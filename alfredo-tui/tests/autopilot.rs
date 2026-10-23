@@ -94,6 +94,9 @@ fn git(workspace: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
+/// `respond` returns this to make the fixture close the socket without answering.
+const DROP_CONNECTION: &str = "\0drop-connection";
+
 /// Threaded fixture Ollama: every POST is recorded and answered by `respond`.
 struct Server {
     endpoint: String,
@@ -166,6 +169,10 @@ impl Server {
                         seen.len() - 1
                     };
                     let content = respond(&request, index);
+                    if content == DROP_CONNECTION {
+                        // Closes without a response, as a restarting Ollama does.
+                        return;
+                    }
                     let mut frame = json!({"message":{"content":content},"done":true});
                     if let Some(Value::Object(counts)) = usage(&request) {
                         frame.as_object_mut().unwrap().extend(counts);
@@ -1516,6 +1523,105 @@ fn oversized_approved_set_stops_autopilot_without_repairs_or_model_advice() {
 #[test]
 fn oversized_approved_set_stops_cleanly_with_no_repair_budget() {
     oversized_approved_set(0);
+}
+
+fn model_unreachable(max_repairs: u32) {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return files_plan(&["calc.py"]);
+        }
+        DROP_CONNECTION.into()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", max_repairs, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "unreachable",
+        finished,
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert_eq!(status.repairs, 0);
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks.len(), 1, "no repair task is created");
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    let evidence: alfredo_tui::worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(alfredo_tui::worker::MODEL_UNREACHABLE)
+    );
+    let report = autopilot.report().unwrap().to_string();
+    assert!(
+        report.contains(&format!("Cannot reach Ollama at {}", server.endpoint)),
+        "{report}"
+    );
+    assert!(report.contains("Repairs   0"), "{report}");
+    assert!(
+        report.contains("Next      Start Ollama, then /repair 1 retry"),
+        "{report}"
+    );
+    assert!(!report.contains("larger model"), "{report}");
+    assert!(!report.contains("--max-repairs"), "{report}");
+    assert!(!report.contains("repair budget exhausted"), "{report}");
+    assert!(
+        autopilot.notice().contains("0 repairs") || !autopilot.notice().contains("repairs"),
+        "{}",
+        autopilot.notice()
+    );
+    assert_eq!(
+        server.count(),
+        2,
+        "one planner request and one worker request, no repair attempts"
+    );
+}
+
+#[test]
+fn dropped_ollama_connection_stops_autopilot_without_repairs_and_says_to_start_ollama() {
+    model_unreachable(3);
+}
+
+#[test]
+fn dropped_ollama_connection_stops_cleanly_with_no_repair_budget() {
+    model_unreachable(0);
+}
+
+#[test]
+fn malformed_model_output_is_still_repaired_and_carries_no_failure_code() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+            ]})
+            .to_string();
+        }
+        if worker_prompt(request).contains("Repair") {
+            good_calc()
+        } else {
+            "this is prose, not file edits".into()
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", 2, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "repaired", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
+    assert_eq!(autopilot.status(&control).unwrap().repairs, 1);
+    let evidence: alfredo_tui::worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(evidence.failure_code, None);
 }
 
 #[test]

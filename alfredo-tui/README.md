@@ -60,7 +60,7 @@ F1 on an empty prompt lists every command. Most used:
 
 Chat reads your repository itself: the model can call read-only tools (`read_file`,
 `list_files`, `grep`, `git_status`, `git_branch`, `git_log`, `git_diff`) on the working tree, so "summarise README" works without naming
-the file. Each call and a one-line cut of its result show in the transcript; see
+the file; `list_files` and `grep` skip git-ignored files such as a Python `.venv`. Each call and a one-line cut of its result show in the transcript; see
 `docs/reference.md#chat-tools-read-only`. Chat can also edit files (`edit_file`,
 `write_file`): each call shows an approval card with a diff; `y` approves, `n` denies,
 Esc denies and ends the turn (`docs/reference.md#chat-approval-and-file-edits`). Chat can commit, switch branches, merge (`git_commit`, `git_switch`,

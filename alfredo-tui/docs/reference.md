@@ -98,6 +98,16 @@ does not repair it (no repair spent, no larger-model or `--max-repairs` advice) 
 summary adds a `Next` row. The planning lint rejects a draft that approves a committed file
 over 64 KiB with the same message, so the failure comes at plan time.
 
+A worker, repair or review request that cannot reach Ollama (connection refused, or the
+connection dropped before the reply) is also an environment failure, not a code failure: the
+run gets the typed `model-unreachable` `failure_code`, autopilot stops without spending a
+repair (Repairs stays 0), and the Reason names the endpoint: `Cannot reach Ollama at
+http://127.0.0.1:11434; the server is down or the endpoint is wrong.` The `Next` row says to
+start Ollama, then `/repair ID retry` (a failed task re-enters through `/repair`;
+`/requeue` is only for cancelled runs). A manual `/run` shows the same text, and headless
+`--go` prints the Reason on stderr and exits 1. Bad `FILE` blocks and failing checks stay
+repairable. Auto-pause and resume on reconnect are not part of this.
+
 Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
 or untracked, non-ignored files, the start notice and the run's summary carry a
 warning line such as `3 uncommitted changes are not visible to workers (based on HEAD
@@ -900,10 +910,13 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Ctrl+O in the Plan draft panel | Switch between the readable task list and the raw draft JSON |
 | Up / Down, Tab, Enter in the side pane | Move, switch missions/work, open the row |
 | Left / Right | Move through Unicode grapheme clusters |
-| Home / End | Move to the start / end of the draft |
+| Home / End, Ctrl+A / Ctrl+E | Move to the start / end of the draft |
+| Ctrl+Left / Ctrl+Right, Alt+B / Alt+F | Move to the start of the previous / end of the next whitespace-delimited word |
+| Ctrl+K | Delete from the cursor to the end of the draft |
 | Backspace / Delete | Delete the previous / next grapheme |
 | Ctrl+W / Ctrl+U | Delete previous whitespace-delimited word / clear draft |
-| Shift+Enter | Insert newline when supported by the terminal |
+| Ctrl+J, Alt+Enter | Insert a newline on any terminal (shown as `↵`); the 16 KiB limit applies |
+| Shift+Enter | Insert newline when the terminal reports it (kitty protocol) |
 | Ctrl+N | Create another conversation (up to eight) |
 | F2 | Switch the right pane between task detail and conversation |
 | F3 | Open evidence for the selected task; groups require a task selection |
@@ -939,8 +952,8 @@ select, Enter to fill the draft, and Escape to dismiss; a second Enter submits.
 Autosave during history browsing preserves the original unsent draft/cursor.
 Restored user prompts seed history; transient command history is not persisted.
 The prompt viewport follows the cursor in terminal cells; newlines display as `↵`.
-Traditional terminals may send Shift+Enter as plain Enter; pasted multiline text
-remains supported.
+Traditional terminals may send Shift+Enter as plain Enter, so use Ctrl+J or Alt+Enter; pasted
+multiline text remains supported.
 
 ## Verify
 
@@ -1506,8 +1519,8 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `read_file` | `path`, optional `start_line` | Numbered lines (`N<TAB>text`) of a UTF-8 text file; long files are cut with `[truncated at line N of M; call read_file with start_line=…]`; a line longer than the output budget is cut at a character boundary and followed by `[line N is M bytes; showed the first K]` |
-| `list_files` | optional `path` (directory) | Files below it, one relative path per line, depth first in name order; at most 500 |
-| `grep` | `pattern` (literal text), optional `path`, `ignore_case` | `path:line:text` per match; at most 200 matches, lines cut to 200 characters |
+| `list_files` | optional `path` (directory) | Files below it, one relative path per line, depth first in name order; at most 500. Files git ignores are left out (see below) |
+| `grep` | `pattern` (literal text), optional `path`, `ignore_case` | `path:line:text` per match; at most 200 matches, lines cut to 200 characters; ignored files are not searched (see below) |
 | `git_status` | none | Current branch with upstream ahead/behind, then changed, staged and untracked files (`XY path`) |
 | `git_branch` | none | `current: NAME` (or `current: detached at SHA`), then local branches (including `alfredo/go-*`) with last commit |
 | `git_log` | optional `ref` (default `HEAD`), `max_count` (default 20, at most 200) | `sha date author: subject` per commit, newest first |
@@ -1518,6 +1531,19 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   follow symlinks. The `@path` exclusions apply: `.git`, secrets (`.env*`, `*.pem`,
   `*.key`, `*.p12`, `*.pfx`), `node_modules`, `target`, `dist`, `vendor`. Binary and
   non-UTF-8 files and files over 4 MiB are not shown.
+- **Discovery skips ignored files.** In a git workspace `list_files` and `grep` skip
+  untracked files git ignores (`.gitignore` at any depth, `.git/info/exclude`, the global
+  excludes file), so a Python repo's `.venv` or other build output cannot fill the 500-file
+  and 200-match caps. Tracked files stay visible even when a pattern matches them. `.venv`,
+  `venv`, `__pycache__` and `site-packages` directories are skipped even with no
+  `.gitignore` (`build/` is not, since it can be source). Ignore files can only hide more:
+  the exclusions above still apply on top, so a `!.env` negation shows nothing. Naming an
+  ignored directory in `path` (e.g. `list_files` with `path=.venv`) still lists it, with a
+  leading `[note: … is ignored …]` line. `read_file` is unchanged: it reads any
+  non-excluded file by path. Outside git, or when git cannot list (a failing git, a
+  repository config with filter drivers or includes, a listing over 16 MiB), the plain walk
+  is used with the fixed exclusions only. Nested repositories and submodule contents are
+  not listed in a git workspace.
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
   tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
   no external diff or textconv. `ref`, `base` and `target` must be plain ref names

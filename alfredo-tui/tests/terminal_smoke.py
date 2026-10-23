@@ -440,6 +440,30 @@ class ModelPicker(unittest.TestCase):
                 terminal.close()
                 server.shutdown()
 
+    def test_ctrl_j_and_alt_enter_insert_newlines_and_readline_motions_edit_the_draft(self):
+        # Issue #351: ordinary terminals send Ctrl+J (LF) and Alt+Enter (ESC CR), never Shift+Enter.
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-keys-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-keys-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'abc\ndef\x1b\rg')  # Ctrl+J, then Alt+Enter
+                terminal.wait_for('abc↵def↵g▏')
+                terminal.write(b'\x01X')  # Ctrl+A moves to the start of the draft
+                terminal.wait_for('X▏abc↵def↵g')
+                terminal.write(b'\x1bf\x0b')  # Alt+F moves a word, Ctrl+K kills to the end
+                terminal.wait_for('Xabc▏  ')  # nothing after the cursor any more
+                self.assertNotIn('↵def', terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+
 
 class TerminalSmoke(unittest.TestCase):
     def test_model_name_as_first_command_selects_after_discovery(self):

@@ -141,6 +141,17 @@ pub(super) fn next_action(
                 .and_then(|run| crate::worker::too_large_advice(&run.detail))
                 .map(|(_, next)| next.to_string())
         }
+        TaskStatus::Failed
+            if task.run.as_ref().is_some_and(|run| {
+                crate::worker::model_unreachable_advice(&run.detail).is_some()
+            }) =>
+        {
+            // A repair of the code cannot start the server; show the way forward.
+            task.run
+                .as_ref()
+                .and_then(|run| crate::worker::model_unreachable_advice(&run.detail))
+                .map(|(_, next)| next.to_string())
+        }
         TaskStatus::Rejected | TaskStatus::Failed if snapshot.architecture_required(id) => {
             Some(format!("/architect-revise {id}"))
         }

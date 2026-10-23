@@ -1086,6 +1086,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                    let alt_only = key.modifiers == KeyModifiers::ALT;
                     let index = work.app.selected;
                     let key_at = std::time::Instant::now();
                     work.app.sessions[index].note_key(key_at);
@@ -1423,6 +1424,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 request = Some(work.app.sessions[index].retry());
                             }
                         }
+                        // Readline motions (issue #351); Alt+Left/Right stay with the task tree.
+                        KeyCode::Left if ctrl => work.app.sessions[index].word_left(),
+                        KeyCode::Right if ctrl => work.app.sessions[index].word_right(),
+                        KeyCode::Char('b') if alt_only => work.app.sessions[index].word_left(),
+                        KeyCode::Char('f') if alt_only => work.app.sessions[index].word_right(),
+                        KeyCode::Char('a') if ctrl => work.app.sessions[index].home(),
+                        KeyCode::Char('e') if ctrl => work.app.sessions[index].end(),
+                        KeyCode::Char('k') if ctrl => work.app.sessions[index].kill_to_end(),
                         KeyCode::Left => work.app.sessions[index].left(),
                         KeyCode::Right => work.app.sessions[index].right(),
                         KeyCode::Home => work.app.sessions[index].home(),
@@ -1430,7 +1439,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Delete => work.app.sessions[index].delete(),
                         KeyCode::Char('w') if ctrl => work.app.sessions[index].delete_word(),
                         KeyCode::Char('u') if ctrl => work.app.sessions[index].clear_draft(),
-                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        // Ctrl+J (LF) and Alt+Enter (ESC CR) work on terminals without the kitty
+                        // protocol, where Shift+Enter arrives as plain Enter (issue #351).
+                        KeyCode::Char('j') if ctrl => {
+                            work.app.sessions[index].insert("\n");
+                        }
+                        KeyCode::Enter
+                            if key
+                                .modifiers
+                                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+                        {
                             work.app.sessions[index].insert("\n");
                         }
                         KeyCode::Enter
