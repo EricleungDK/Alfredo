@@ -16,6 +16,8 @@ use std::{
 };
 use tokio::{runtime::Runtime, task::JoinHandle};
 
+/// On-disk schema written by `Snapshot::capture`.
+const SCHEMA_VERSION: u32 = 19;
 const LIMIT: usize = 12 * 1024 * 1024; // JSON escaping can expand bounded text sixfold.
 static TEMP: AtomicU64 = AtomicU64::new(0);
 type Result<T> = std::result::Result<T, String>;
@@ -55,12 +57,20 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn capture(app: &App, namespace: &str) -> Self {
         Self {
-            schema_version: 19,
+            schema_version: SCHEMA_VERSION,
             task_view: None,
             plan_draft: None,
             namespace: namespace.into(),
             selected: app.selected,
-            sessions: app.sessions.iter().map(Session::checkpoint).collect(),
+            sessions: app
+                .sessions
+                .iter()
+                .map(|session| {
+                    let mut saved = session.checkpoint();
+                    saved.drop_unbounded_reading(SCHEMA_VERSION);
+                    saved
+                })
+                .collect(),
         }
     }
     pub(crate) fn validate(&self, namespace: &str) -> Result<()> {

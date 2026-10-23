@@ -1646,6 +1646,14 @@ impl Session {
     pub fn source(&self, message: usize) -> Option<&ResponseSource> {
         self.sources.get(&message)
     }
+    /// Saving must never fail because of where the user is reading (issue #375): a
+    /// scroll anchor the stored data cannot account for is view state, so it is dropped
+    /// (the saved offset then reads from the bottom) instead of refusing the snapshot.
+    pub(crate) fn drop_unbounded_reading(&mut self, schema: u32) {
+        if !self.valid_reading(schema) {
+            self.reading.set(Default::default());
+        }
+    }
     pub(crate) fn valid_reading(&self, schema: u32) -> bool {
         // Newline plus two structural lines per message is a conservative bound;
         // layout clamps the wrapped row when terminal geometry changes.
@@ -1660,8 +1668,25 @@ impl Session {
                     .tool_steps
                     .values()
                     .flatten()
-                    .map(|step| 2 * step.calls.len() + 1)
+                    .map(|step| {
+                        // Collapsed: call row + cut result per call. Expanded (Ctrl+O,
+                        // #369): up to 200 result rows and a marker per call.
+                        2 * step.calls.len()
+                            + 1
+                            + step
+                                .results
+                                .iter()
+                                .map(|result| result.lines().count().min(200) + 1)
+                                .sum::<usize>()
+                    })
                     .sum::<usize>()
+                // Compaction note (#187): marker, one row per summary line, blank row.
+                + self.compaction().map_or(0, |note| {
+                    note.summary.bytes().filter(|b| *b == b'\n').count() + 3
+                })
+                // Project notes (#322) render above the transcript.
+                + self.notes_lines.len()
+                + 1
         };
         let reading = self.reading.get();
         let has_worker_result = |command: &crate::console_command::ConsoleCommand| {
