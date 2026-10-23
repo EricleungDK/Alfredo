@@ -900,10 +900,13 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Ctrl+O in the Plan draft panel | Switch between the readable task list and the raw draft JSON |
 | Up / Down, Tab, Enter in the side pane | Move, switch missions/work, open the row |
 | Left / Right | Move through Unicode grapheme clusters |
-| Home / End | Move to the start / end of the draft |
+| Home / End, Ctrl+A / Ctrl+E | Move to the start / end of the draft |
+| Ctrl+Left / Ctrl+Right, Alt+B / Alt+F | Move to the start of the previous / end of the next whitespace-delimited word |
+| Ctrl+K | Delete from the cursor to the end of the draft |
 | Backspace / Delete | Delete the previous / next grapheme |
 | Ctrl+W / Ctrl+U | Delete previous whitespace-delimited word / clear draft |
-| Shift+Enter | Insert newline when supported by the terminal |
+| Ctrl+J, Alt+Enter | Insert a newline on any terminal (shown as `↵`); the 16 KiB limit applies |
+| Shift+Enter | Insert newline when the terminal reports it (kitty protocol) |
 | Ctrl+N | Create another conversation (up to eight) |
 | F2 | Switch the right pane between task detail and conversation |
 | F3 | Open evidence for the selected task; groups require a task selection |
@@ -939,8 +942,8 @@ select, Enter to fill the draft, and Escape to dismiss; a second Enter submits.
 Autosave during history browsing preserves the original unsent draft/cursor.
 Restored user prompts seed history; transient command history is not persisted.
 The prompt viewport follows the cursor in terminal cells; newlines display as `↵`.
-Traditional terminals may send Shift+Enter as plain Enter; pasted multiline text
-remains supported.
+Traditional terminals may send Shift+Enter as plain Enter, so use Ctrl+J or Alt+Enter; pasted
+multiline text remains supported.
 
 ## Verify
 
