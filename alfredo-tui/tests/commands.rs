@@ -76,6 +76,9 @@ fn slash_typeahead_lists_prefix_then_substring_matches_with_usage() {
         .description
         .contains("GOAL"));
     assert_eq!(Completion::typeahead("/pla").unwrap().draft(), "/plan ");
+    // An exact name leads, so Enter on a fully typed `/model` still submits it.
+    let exact = Completion::typeahead("/model").unwrap();
+    assert!(exact.selected_is("/model") && exact.choices.len() > 1);
     for draft in ["", "hello", "@way", "/path/in chat", "/zzzz-none"] {
         assert!(Completion::typeahead(draft).is_none(), "{draft}");
     }

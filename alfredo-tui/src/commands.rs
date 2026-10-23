@@ -226,14 +226,16 @@ impl Completion {
             query: String::new(),
         })
     }
-    /// Rank of `name` for the typed text: 0 prefix, 1 substring, None otherwise.
+    /// Rank of `name` for the typed text: 0 exact, 1 prefix, 2 substring, None otherwise.
     fn rank(name: &str, query: &str) -> Option<u8> {
         let name = name.trim_start_matches(['/', '@']).to_lowercase();
         let query = query.trim_start_matches(['/', '@']).to_lowercase();
-        if name.starts_with(&query) {
+        if name == query {
             Some(0)
+        } else if name.starts_with(&query) {
+            Some(1)
         } else {
-            name.contains(&query).then_some(1)
+            name.contains(&query).then_some(2)
         }
     }
     /// Live type-ahead for a draft that is one token starting with `/`: prefix matches
