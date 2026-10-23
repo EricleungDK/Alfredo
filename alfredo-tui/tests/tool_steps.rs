@@ -181,6 +181,55 @@ fn transcript_shows_each_tool_call_and_a_truncated_result() {
     assert!(text.contains("FINAL_ANSWER"));
 }
 
+/// One tool round with the given call, drawn; issue #274.
+fn row_text(name: &str, arguments: serde_json::Value) -> String {
+    let mut app = App::new("m".into());
+    let session = &mut app.sessions[0];
+    session.insert("go");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    let call = ToolCall {
+        name: name.into(),
+        arguments,
+    };
+    let step = ToolStep {
+        calls: vec![call],
+        results: vec!["ok".into()],
+    };
+    session.apply(attempt, Update::ToolStep(step));
+    session.apply(attempt, Update::Token("DONE".into()));
+    session.apply(attempt, Update::Done);
+    screen_text(&app, 120, 30)
+}
+
+#[test]
+fn tool_rows_put_the_path_first_and_cut_long_text() {
+    let edit = json!({"new_text": "a", "old_text": "A1", "path": "README.md"});
+    let text = row_text("edit_file", edit);
+    assert!(text.contains("⚙ edit_file README.md"), "{text}");
+    assert!(!text.contains("A1 a"), "{text}");
+    let long = "w".repeat(500);
+    let text = row_text("write_file", json!({"path": "src/x.rs", "content": long}));
+    assert!(text.contains("⚙ write_file src/x.rs (1 line)"), "{text}");
+    assert!(!text.contains(&"w".repeat(100)), "{text}");
+}
+
+#[test]
+fn unknown_tools_keep_the_value_list_row() {
+    let text = row_text("frobnicate", json!({"b": "two", "a": "one"}));
+    assert!(text.contains("⚙ frobnicate one two"), "{text}");
+}
+
+#[test]
+fn tool_row_arguments_are_sanitised_and_may_arrive_as_a_json_string() {
+    let text = row_text("grep", json!({"pattern": "a\u{202e}b\nc"}));
+    assert!(text.contains("<U+202E>"), "{text}");
+    assert!(!text.contains('\u{202e}'), "{text}");
+    let text = row_text("edit_file", json!("{\"path\": \"src/main.rs\"}"));
+    assert!(text.contains("⚙ edit_file src/main.rs"), "{text}");
+}
+
 fn screen_text(app: &App, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| ui::draw(frame, app)).unwrap();
@@ -271,6 +320,57 @@ fn a_reloaded_conversation_shows_the_full_stored_result_when_expanded() {
         full.contains("line 0") && full.contains("line 29"),
         "{full}"
     );
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #375: the saved scroll anchor comes from the real render, so rows the estimate
+/// never counted (expanded results, the compaction note) must not make the save fail.
+#[test]
+fn saving_while_scrolled_over_expanded_results_and_a_compaction_note_succeeds() {
+    let root = std::env::temp_dir().join(format!("alfredo-tool-anchor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("workspace")).unwrap();
+    let tasks = TaskStore::new(&root.join("state"), &root.join("workspace"), "mission").unwrap();
+    let store = ConversationStore::open(&tasks, "default").unwrap();
+    let build = || {
+        let mut app = App::new("m".into());
+        let session = &mut app.sessions[0];
+        for prompt in ["one", "two", "three"] {
+            tool_turn(session, prompt, "old", "reply");
+        }
+        session.insert("four");
+        let plan = session.start_compaction(None, true).unwrap();
+        let attempt = session.attempt;
+        session
+            .finish_compaction(attempt, &plan, Ok(numbered(40)))
+            .unwrap();
+        // A 200-row expanded result plus its `… N more lines` marker.
+        tool_turn(session, "show", &numbered(250), "FINAL");
+        session.toggle_tool_results();
+        app
+    };
+    let total = screen_text(&build(), 100, 700).lines().count();
+    assert_eq!(total, 700);
+    let mut covered = 0;
+    for rows in (1..=420).step_by(7).chain([419, 420, 421, 600]) {
+        let app = build();
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+        app.sessions[0].scroll_rows(-rows);
+        terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+        let snapshot = Snapshot::capture(&app, "default");
+        store
+            .save(&snapshot)
+            .unwrap_or_else(|error| panic!("scrolled up {rows} rows: {error}"));
+        let restored = store.load().unwrap().unwrap().restore();
+        assert_eq!(
+            restored.sessions[0].messages.len(),
+            app.sessions[0].messages.len()
+        );
+        covered += 1;
+    }
+    assert!(covered > 50);
     drop(store);
     let _ = std::fs::remove_dir_all(root);
 }
