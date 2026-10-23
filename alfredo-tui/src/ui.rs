@@ -1217,7 +1217,12 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
     let mut base = 0usize;
     let mut blocks: Vec<crate::reading::Block> = Vec::new();
     let mut cache = session.transcript_cache.borrow_mut();
-    cache.sync(session.messages.iter().map(|m| m.content.as_str()));
+    cache.sync(
+        session
+            .messages
+            .iter()
+            .map(|m| (m.content.as_str(), m.role != "user")),
+    );
     // A new chat suggests the common path, even below the workspace arrival line.
     if session.messages.is_empty()
         && session.task_receipts().is_empty()
@@ -1509,10 +1514,14 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         let mut covered = 0usize;
         let mut at = 0usize;
         let mut done = false;
-        let mut take = |line: &Line<'static>, at: &mut usize| -> bool {
+        let mut take = |line: &Line<'static>, at: &mut usize, cut: bool| -> bool {
             if *at >= position.line && covered <= wanted {
                 covered += heights[*at];
-                window.push(line.clone());
+                window.push(if cut {
+                    crate::transcript_cache::cut_line(line, width)
+                } else {
+                    line.clone()
+                });
             }
             *at += 1;
             covered > wanted
@@ -1521,15 +1530,16 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             match segment {
                 Segment::Run(run) => {
                     for line in run {
-                        done |= take(line, &mut at);
+                        done |= take(line, &mut at, false);
                     }
                 }
                 Segment::Message { index, heading } => {
-                    done |= take(heading, &mut at);
-                    for line in &cache.entry(*index).lines {
-                        done |= take(line, &mut at);
+                    done |= take(heading, &mut at, false);
+                    let entry = cache.entry(*index);
+                    for (line, cut) in entry.lines.iter().zip(&entry.cut) {
+                        done |= take(line, &mut at, *cut);
                     }
-                    done |= take(&Line::default(), &mut at);
+                    done |= take(&Line::default(), &mut at, false);
                 }
             }
             if done {

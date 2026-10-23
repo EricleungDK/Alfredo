@@ -337,6 +337,16 @@ rejection of inconsistent reports; live model quality is a separate diagnostic.
 See the [qualification plan](../../.agent/Tasks/native-inference-qualification.md) for
 authority, legacy context comparisons and the remaining qualification boundary.
 
+## Markdown in chat replies
+
+The transcript styles an assistant reply once per change of its text (cached with its
+heights, never per frame): fenced code blocks (``` or ~~~) in cyan with the fence lines
+dimmed and each code row cut at the pane width, not wrapped; `#`..`######` headings in
+bold; `**bold**` and `` `inline code` `` without their markers; `-`, `*` and `1.` bullet
+markers coloured. An unclosed fence, `**` or backtick stays plain text (an open fence
+shows as an open code block while the reply streams). Your own messages are shown as typed.
+Control characters are dropped as before and bidi controls in a reply show as `<U+XXXX>`.
+
 ## Establish scope in conversation
 
 Describe a new project or consequential architectural change to enter Wayfinder
