@@ -68,6 +68,7 @@ fn evidence(patch: &str) -> String {
         model_metrics: None,
         failure_code: None,
         generation: None,
+        project_notes: None,
         run: "run-2".into(),
         baseline: "a".repeat(40),
         status: TaskStatus::ReviewReady,

@@ -275,12 +275,12 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | Path | Contents |
 | --- | --- |
 | `src/main.rs` | CLI flags, event loop, key handling |
-| `src/ui.rs`, `src/model.rs` | Rendering and conversation state |
+| `src/ui.rs`, `src/ui/inspector.rs`, `src/ui/activity_lines.rs`, `src/model.rs` | Rendering (task inspector and receipts; activity and command lines) and conversation state |
 | `src/chat_tools/allow.rs` | Chat always-allow rules: per-mission store, strict matching, `/allow` |
 | `src/compaction.rs` | Chat compaction: summarise older turns into a note, `/clear`, `/compact` |
 | `src/side_pane.rs`, `src/theme.rs` | Side pane projection and keys; icons, status glyphs, palette, spinner |
 | `src/autopilot.rs` | `/go` loop, auto-review, bounded repair, integration branch |
-| `src/tasks.rs`, `src/task_control.rs`, `src/dispatch.rs` | Durable task store, commands, dispatch |
+| `src/tasks.rs`, `src/task_control.rs`, `src/task_control/commands.rs`, `src/dispatch.rs` | Durable task store, commands (`prepare_command`, `dispatch_prepared`, `command`, `parse`), dispatch |
 | `src/worker.rs`, `src/run_boundary.rs` | Isolated worktree workers and bubblewrap sandbox |
 | `src/planner.rs`, `src/planning_context.rs` | Plan generation from committed repo context |
 | `src/provider.rs`, `src/inference_admission.rs`, `src/health.rs` | Ollama client, shared capacity, health polling |

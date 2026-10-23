@@ -193,6 +193,7 @@ fn evidence() -> View {
         model_metrics: None,
         failure_code: None,
         generation: None,
+        project_notes: None,
         run: "task-2-run-1".into(),
         baseline: "a".repeat(40),
         status: TaskStatus::Failed,

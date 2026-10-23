@@ -127,7 +127,7 @@ pub(crate) fn interrupted_before_check(path: &Path, task: &Task) -> Result<Evide
         agent: None,
         run: run.id.clone(), baseline: run.baseline.clone(), status: TaskStatus::Failed,
         detail: format!("Worker interrupted before check launch; partial work retained, {PATCH_NOT_RECONSTRUCTED}. Propose a repair and approve it separately; no effects replayed"),
-        patch: String::new(), candidate_commit: None, model_metrics: None, failure_code: None, generation: None, check: None,
+        patch: String::new(), candidate_commit: None, model_metrics: None, failure_code: None, generation: None, project_notes: None, check: None,
     })
 }
 /// An interruption `/resume` recovers is the same fact as a `/stop` cancel: the run is
@@ -631,7 +631,7 @@ pub(crate) fn interrupted_after_check(path: &Path, task: &Task, mission: &str) -
     Ok(Evidence {
         agent: None, run: intent.run, baseline: intent.baseline, status: TaskStatus::Failed,
         detail: format!("Worker interrupted after check; candidate not finalized. Check result retained; {PATCH_NOT_RECONSTRUCTED}. Propose a repair and approve it separately; no effects replayed"),
-        patch: String::new(), candidate_commit: None, model_metrics: None, failure_code: None, generation: None,
+        patch: String::new(), candidate_commit: None, model_metrics: None, failure_code: None, generation: None, project_notes: None,
         check: Some(result.receipt),
     })
 }

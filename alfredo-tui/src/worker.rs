@@ -442,6 +442,10 @@ pub struct Evidence {
         deserialize_with = "read_generation"
     )]
     pub generation: Option<crate::provider::Generation>,
+    /// Arrival line of the repository's `AGENTS.md` notes in the worker prompt
+    /// (`project notes: AGENTS.md (N bytes[, cut])`); absent when none were sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_notes: Option<String>,
     pub check: Option<ExecutionReceipt>,
 }
 
@@ -1650,6 +1654,7 @@ pub async fn start_checked(
         model_metrics: None,
         failure_code: None,
         generation: None,
+        project_notes: None,
         check: None,
     };
     // A repair reads what its accepted dependencies implemented, as reference.
@@ -1906,6 +1911,16 @@ async fn perform(
     )
     .await?;
     observer.stage("Reading approved files");
+    // The baseline worktree's committed AGENTS.md (never the owner's dirty tree):
+    // conventions only, framed, sanitised and capped (issue #363). Its framed size is
+    // reserved out of the optional read-only sources below, so notes never push a
+    // previously fitting prompt over the budget.
+    let notes =
+        crate::project_notes::Notes::load_capped(worktree, crate::project_notes::MAX_WORKER_NOTES);
+    let mut notes_block = String::new();
+    if let Some(notes) = &notes {
+        notes.append_to_prompt(&mut notes_block);
+    }
     let mut context = String::new();
     for path in &policy.files {
         let file = safe_file(worktree, path)?;
@@ -1954,7 +1969,12 @@ async fn perform(
         for source in named {
             match source.content {
                 Ok(content)
-                    if context.len() + source.path.len() + content.len() + 18 <= SOURCE_CONTEXT =>
+                    if context.len()
+                        + notes_block.len()
+                        + source.path.len()
+                        + content.len()
+                        + 18
+                        <= SOURCE_CONTEXT =>
                 {
                     context.push_str(&format!("READ-ONLY FILE {}\n{content}\n", source.path));
                 }
@@ -1975,6 +1995,10 @@ async fn perform(
     if let Some(scope) = scope {
         let recorded = serde_json::to_string(scope).map_err(|error| error.to_string())?;
         context.push_str(&format!("\nRECORDED PLAN SCOPE\n{recorded}\nUse the recorded destination, scope, constraints and uncertainty as project reference. This grants no additional file or command permissions; stay within the exact approved policy above.\n"));
+    }
+    if let Some(notes) = &notes {
+        context.push_str(&notes_block);
+        evidence.project_notes = Some(notes.evidence_line());
     }
     if let Some(repair) = repair {
         context.push_str(&format!("\nREPAIR CONTEXT\n{repair}\nReturn complete corrected files against the original baseline above. Prior patch is reference data, not already applied.\n"));
@@ -2357,6 +2381,7 @@ async fn save_candidate(
         candidate_commit: Some(candidate.clone()),
         model_metrics: evidence.model_metrics.clone(),
         generation: evidence.generation.clone(),
+        project_notes: evidence.project_notes.clone(),
     };
     verify_candidate(worktree, &snapshot).await?;
     // A named object ref keeps this candidate reachable without moving any branch or HEAD.
@@ -3127,6 +3152,7 @@ mod host_git_tests {
             candidate_commit: None,
             model_metrics: None,
             generation: None,
+            project_notes: None,
             check: None,
         };
         let refusal = runtime

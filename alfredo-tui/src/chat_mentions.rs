@@ -163,7 +163,7 @@ fn read_mention(root: &Path, path: &str, check_failed: &mut bool) -> Result<Stri
     if ignored_untracked(root, &relative, check_failed) {
         return Err("ignored by .gitignore and not tracked; refused".into());
     }
-    read::text(&full).map_err(|error| {
+    read::text(root, &full).map_err(|error| {
         if error.starts_with("binary") {
             "binary".to_string()
         } else {

@@ -7,7 +7,8 @@ use serde_json::json;
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 
 static ID: AtomicU64 = AtomicU64::new(0);
@@ -161,6 +162,66 @@ fn symlinks_cannot_escape_the_workspace() {
     assert!(!found.contains("TOP SECRET"), "{found}");
     let into = workspace.run("list_files", json!({"path": "up"}));
     assert!(into.starts_with("error: "), "{into}");
+}
+
+/// Issue #360: a concurrent writer swaps the read target between the workspace check and
+/// the open. The check passes on a regular file, then the name is a symlink to a file
+/// outside the workspace. The read must never return the outside text.
+#[cfg(unix)]
+#[test]
+fn read_file_does_not_leak_outside_text_when_the_target_is_swapped_for_a_symlink() {
+    const ITERATIONS: usize = 200_000;
+    const BUDGET: Duration = Duration::from_secs(8);
+    /// Reads that must run within the budget for the race to count as exercised.
+    const MIN_RUNS: usize = 20_000;
+    let workspace = Workspace::new();
+    let outside = workspace.base.join("outside.txt");
+    fs::write(&outside, "TOPSECRET-OUTSIDE\n").unwrap();
+    let target = workspace.root.join("notes.txt");
+    fs::write(&target, "regular\n").unwrap();
+    let stop = AtomicBool::new(false);
+    let started = Instant::now();
+    let (leaks, runs) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = fs::remove_file(&target);
+                let _ = std::os::unix::fs::symlink(&outside, &target);
+                let _ = fs::remove_file(&target);
+                let _ = fs::write(&target, "regular\n");
+            }
+        });
+        let mut leaks = 0;
+        let mut runs = 0;
+        while runs < ITERATIONS && started.elapsed() < BUDGET {
+            let output = workspace.run("read_file", json!({ "path": "notes.txt" }));
+            if output.contains("TOPSECRET-OUTSIDE") {
+                leaks += 1;
+            }
+            runs += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        (leaks, runs)
+    });
+    eprintln!("read_file swap race: LEAKS={leaks} over {runs} reads");
+    assert!(
+        runs >= MIN_RUNS,
+        "only {runs} reads ran; the race was not exercised"
+    );
+    assert_eq!(leaks, 0, "outside text reached read_file output");
+}
+
+#[cfg(unix)]
+#[test]
+fn read_file_follows_a_symlink_that_stays_inside_the_workspace() {
+    let workspace = Workspace::new();
+    std::os::unix::fs::symlink(
+        workspace.root.join("src/main.rs"),
+        workspace.root.join("entry.rs"),
+    )
+    .unwrap();
+    let output = workspace.run("read_file", json!({ "path": "entry.rs" }));
+    assert!(!output.starts_with("error: "), "{output}");
+    assert!(output.contains("fn main"), "{output}");
 }
 
 #[test]
