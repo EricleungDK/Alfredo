@@ -7,6 +7,8 @@ on:
       - 'alfredo-tui/**'
       - '.github/workflows/rust-terminal.yml'
   push:
+    # PR branches are covered by the pull_request run; push runs only on main.
+    branches: [main]
     paths:
       - 'LICENSE'
       - 'alfredo-tui/**'
@@ -26,7 +28,8 @@ env:
   MANIFEST: alfredo-tui/Cargo.toml
 
 jobs:
-  terminal:
+  # Lint, unit tests and dependency audit. Runs in parallel with `smokes`.
+  checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -53,6 +56,43 @@ jobs:
         run: cargo test --locked --manifest-path "$MANIFEST"
       - name: Dependency notice integrity tests
         run: python3 -m unittest discover -s alfredo-tui/tests -p 'test_*.py'
+      - name: Install dependency auditor
+        run: |
+          cargo audit --version 2>/dev/null | grep -q ' 0\.22\.2$' \
+            || cargo install cargo-audit --version 0.22.2 --locked --force
+      - name: Audit locked dependencies
+        working-directory: alfredo-tui
+        run: cargo audit --file Cargo.lock --deny warnings --json > dependency-audit.json
+      - name: Verify audit failure gate
+        run: python3 alfredo-tui/tests/audit_smoke.py
+      - name: Retain dependency audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alfredo-terminal-dependency-audit
+          path: alfredo-tui/dependency-audit.json
+          if-no-files-found: warn
+
+  # Debug build plus the PTY/headless/eval smokes. Runs in parallel with `checks`.
+  smokes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Cache Cargo registry, dependencies and tools
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: alfredo-tui -> target
+          cache-bin: true
+      - name: Install worker sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap util-linux
+          # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces that bwrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true
       - name: Build debug binary
         run: cargo build --locked --manifest-path "$MANIFEST"
       - name: PTY smoke - terminal
@@ -88,30 +128,70 @@ jobs:
       - name: Eval smoke - fixture harness metrics
         timeout-minutes: 10
         run: python3 alfredo-tui/tests/eval_smoke.py
-      - name: Install dependency auditor
-        run: |
-          cargo audit --version 2>/dev/null | grep -q ' 0\.22\.2$' \
-            || cargo install cargo-audit --version 0.22.2 --locked --force
-      - name: Audit locked dependencies
-        working-directory: alfredo-tui
-        run: cargo audit --file Cargo.lock --deny warnings --json > dependency-audit.json
-      - name: Verify audit failure gate
-        run: python3 alfredo-tui/tests/audit_smoke.py
-      - name: Retain dependency audit
-        if: always()
-        uses: actions/upload-artifact@v4
+
+  # Release archive and installed-release smoke: always on main and manual runs;
+  # on PRs only when packaging inputs change.
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
         with:
-          name: alfredo-terminal-dependency-audit
-          path: alfredo-tui/dependency-audit.json
-          if-no-files-found: warn
-      - name: Package release archive
+          fetch-depth: 0
+      - name: Decide whether packaging needs checking
+        id: need
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo run=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          if git diff --name-only "$BASE"...HEAD | grep -Eq '^(alfredo-tui/(Cargo\.toml|Cargo\.lock|INSTALL\.md|scripts/[^/]+\.py|tests/release_smoke\.py)|\.github/workflows/rust-terminal\.yml|LICENSE$)'; then
+            echo run=true >> "$GITHUB_OUTPUT"
+          else
+            echo run=false >> "$GITHUB_OUTPUT"
+            echo "Packaging inputs unchanged; release packaging runs on main after merge."
+          fi
+      - if: steps.need.outputs.run == 'true'
+        name: Install Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - if: steps.need.outputs.run == 'true'
+        name: Cache Cargo registry, dependencies and tools
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: alfredo-tui -> target
+          cache-bin: true
+      - if: steps.need.outputs.run == 'true'
+        name: Install worker sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap util-linux
+          # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces that bwrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true
+      - if: steps.need.outputs.run == 'true'
+        name: Package release archive
         run: python3 alfredo-tui/scripts/package_release.py --output alfredo-tui/dist
-      - name: Installed release smoke
+      - if: steps.need.outputs.run == 'true'
+        name: Installed release smoke
         timeout-minutes: 20
         run: python3 alfredo-tui/tests/release_smoke.py alfredo-tui/dist/*.tar.gz
-      - name: Retain verified candidate
+      - if: steps.need.outputs.run == 'true'
+        name: Retain verified candidate
         uses: actions/upload-artifact@v4
         with:
           name: alfredo-terminal-linux-x86_64-candidate
           path: alfredo-tui/dist/*
           if-no-files-found: error
+
+  # Single gate with the old job name, so `terminal` stays the check to look at.
+  terminal:
+    if: always()
+    needs: [checks, smokes, release]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: All jobs passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "checks/smokes/release: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
