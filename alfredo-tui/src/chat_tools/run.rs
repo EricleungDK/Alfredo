@@ -17,6 +17,29 @@ use tokio::sync::{mpsc::Sender, oneshot};
 
 /// Tool rounds one turn may run; a model asking for more is stopped with a notice.
 pub const MAX_STEPS: usize = 8;
+/// Accepted `--max-turns` values.
+pub const MAX_TURNS_RANGE: std::ops::RangeInclusive<usize> = 1..=32;
+
+/// Validate `--max-turns`. Empty leaves the default ([`MAX_STEPS`]).
+pub fn parse_max_turns(value: &str) -> Result<Option<usize>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|number| MAX_TURNS_RANGE.contains(number))
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "Invalid max-turns {value:?}; use a tool-round count from {} to {}",
+                MAX_TURNS_RANGE.start(),
+                MAX_TURNS_RANGE.end()
+            )
+        })
+}
+
 /// Calls run from one model reply; extra calls are answered with an error.
 const MAX_CALLS: usize = 16;
 /// Calls kept from one reply; any beyond are dropped (a model this far off is looping).
@@ -138,6 +161,7 @@ pub async fn run_turn_limited(
         }
     }
     let mut steps = 0;
+    let max_steps = provider.max_turns().unwrap_or(MAX_STEPS);
     // Set when this future is dropped (Esc, /stop, switch, quit): blocking read calls
     // see it and end instead of running on (issue #257).
     let cancel = CancelOnDrop::default();
@@ -198,10 +222,10 @@ pub async fn run_turn_limited(
             send(Update::Done).await;
             return;
         }
-        if steps == MAX_STEPS {
+        if steps == max_steps {
             send(Update::Stopped(Stop::StepLimit)).await;
             send(Update::Token(format!(
-                "\n\n[{STEP_CAP_NOTICE} after {MAX_STEPS} rounds; ask again to continue]"
+                "\n\n[{STEP_CAP_NOTICE} after {max_steps} rounds; ask again to continue]"
             )))
             .await;
             send(Update::Done).await;
