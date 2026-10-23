@@ -174,6 +174,7 @@ fn save_final(directory: &Path, task: &Task, receipt: ExecutionReceipt) {
             model_metrics: None,
             failure_code: None,
             generation: None,
+            project_notes: None,
             check: Some(receipt),
         })
         .unwrap(),

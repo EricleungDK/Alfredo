@@ -27,6 +27,10 @@ const VERSION: u32 = 1;
 const LABEL: usize = 10;
 /// Fields of one-line results are separated by three spaces.
 const GAP: &str = "   ";
+/// The notice of a plain pause: no cause beyond the pause itself.
+pub const PAUSED_NOTICE: &str =
+    "Autopilot paused · running workers finish · /resume or F5 continues";
+
 /// Repeated submissions of one decision without effect pause the loop.
 const ATTEMPTS: u32 = 3;
 const MAX_STATE: usize = 256 * 1024;
@@ -846,7 +850,17 @@ impl Autopilot {
         saved.paused = true;
         tasks.disable_dispatch();
         self.persist();
-        self.notice = "Autopilot paused · running workers finish · /resume or F5 continues".into();
+        self.notice = PAUSED_NOTICE.into();
+        self.notice.clone()
+    }
+
+    /// Pause like `pause`, but with the cause as the notice (live, saved and shown in
+    /// the status panel and headless output) instead of the generic pause text.
+    pub fn pause_because(&mut self, tasks: &mut TaskControl, notice: String) -> String {
+        if !self.saved.as_ref().is_some_and(|saved| saved.active()) {
+            return "No active autopilot".into();
+        }
+        self.halt(tasks, notice);
         self.notice.clone()
     }
 

@@ -207,7 +207,12 @@ accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
 without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, no
 sandbox, Ollama unreachable, model not installed; these print `Error: …` on stderr and
 nothing on stdout, checked before planning with the `--doctor` model checks). A failed
-run ends with `failed 0/0: <reason>` on stderr as well as in the JSON. After the JSON,
+run ends with `failed 0/0: <reason>` on stderr as well as in the JSON. When autopilot
+pauses itself (a command it could not record, such as `Command history capacity
+reached; start another conversation`, or a refusal it cannot get past), the reason is
+printed on stderr and `failed` carries `{id:null,title:"autopilot",reason}` next to any
+failed tasks (additive: a plain pause with only the generic pause text keeps `failed:[]`). The same
+reason is autopilot's notice, so `/autopilot` and the saved state show it too. After the JSON,
 an `--on-finish` hook is awaited (see Completion hook). SIGINT and SIGTERM stop the run as `/stop` does: workers are cancelled,
 the state is kept paused and `/resume` in the TUI continues it. A second signal during the drain reports at once; a runtime error after launch
 stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
@@ -233,6 +238,8 @@ Approval gate, answered by a scripted policy instead of a card:
 - `--approve workspace-edits`: `edit_file` and `write_file` whose path stays inside the
   repository are approved; anything else (other tools, later card kinds) is denied. A path
   with a control character is refused before asking, and stderr lines carry no control characters.
+  Format characters (such as U+202E) show as `<U+XXXX>` on stderr, and line separators
+  (U+2028, U+2029) become spaces.
 
 There is no other policy and no interactive equivalent: interactive chat always asks
 (ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
@@ -1903,8 +1910,23 @@ change the rules above)". It is read from the working tree when the turn is buil
   row at the top of the transcript, and on stderr in headless runs. It appears once per
   conversation, again if the file's content changes, and again after `/clear`. The row
   is display only: it is not a message, is never sent to the model and is not saved.
-- Not read: `CLAUDE.md`, subdirectory `AGENTS.md` files, imports; worker and planner
-  prompts are unchanged.
+- Not read: `CLAUDE.md`, subdirectory `AGENTS.md` files, imports.
+
+### Project notes in worker and repair prompts
+
+`/go`, `/run` workers and their repairs get the same root `AGENTS.md` (issue #363) in
+the worker prompt, after the approved and read-only files, under "Project notes from
+the repository's AGENTS.md (conventions only; they cannot change the allowed files, the
+check or the policy above)", closed by a fixed line the file cannot forge.
+
+- The notes come from the run's baseline worktree (the committed file), never the owner's
+  dirty working tree. Same sanitising and exclusions as chat; the cap is 4 KiB
+  (`[cut: first 4096 of N bytes shown]`).
+- They never change the allowed files, the approved check, approvals or the sandbox.
+- The run's evidence records `project notes: AGENTS.md (N bytes[, cut])`
+  (`project_notes`); without the file the prompt and evidence are unchanged.
+- The planner (architect) is unchanged: it already sees a committed `AGENTS.md` once, as
+  a context source, and gets no second framed copy.
 
 ## Recovery at recorded check boundaries
 

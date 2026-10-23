@@ -81,6 +81,7 @@ fn save(store: &TaskStore, run: &str, status: TaskStatus) {
         model_metrics: None,
         failure_code: None,
         generation: None,
+        project_notes: None,
         run: run.into(),
         baseline: "a".repeat(40),
         status,

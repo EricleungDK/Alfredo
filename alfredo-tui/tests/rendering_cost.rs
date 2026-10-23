@@ -94,6 +94,7 @@ impl Fixture {
             model_metrics: None,
             failure_code: None,
             generation: None,
+            project_notes: None,
             run: run.clone(),
             baseline: "a".repeat(40),
             status: TaskStatus::Failed,
