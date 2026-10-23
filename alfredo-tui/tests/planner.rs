@@ -1342,6 +1342,108 @@ fn v9_plan_upgrade_preserves_contract_absence_and_v10_rejects_downgrade() {
     assert_eq!(fs::read(path).unwrap(), bytes);
 }
 
+/// Commit `count` tracked files with long names so `ls-tree -r -l -z` is far past
+/// the 256 KiB git output bound. Uses fast-import to stay quick.
+fn commit_many_files(workspace: &std::path::Path, count: usize) {
+    let mut stream = String::from("commit refs/heads/many\ncommitter F <f@example.invalid> 1 +0000\ndata 4\nbulk\nfrom HEAD\n");
+    for index in 0..count {
+        let name = format!(
+            "vendor/pkg{:03}/module_with_a_long_name_{index:05}.txt",
+            index % 200
+        );
+        stream.push_str(&format!("M 100644 inline {name}\ndata 2\nx\n\n"));
+    }
+    let mut child = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["fast-import", "--quiet"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["reset", "-q", "--hard", "many"])
+        .status()
+        .unwrap()
+        .success());
+}
+
+async fn capture_many(count: usize) -> alfredo_tui::planning_context::RepositoryContext {
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace").canonicalize().unwrap();
+    commit_many_files(&workspace, count);
+    let started = Instant::now();
+    let context = alfredo_tui::planning_context::capture(&workspace, "calculation")
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "capture took {:?}",
+        started.elapsed()
+    );
+    context
+}
+
+#[tokio::test]
+async fn context_of_a_4000_file_repository_is_bounded_and_counts_every_path() {
+    let context = capture_many(4000).await;
+    assert!(context.paths.len() <= 256);
+    assert_eq!(context.paths.len() + context.omitted_paths, 4001);
+    assert!(context.paths.iter().any(|path| path == "README.md"));
+    context.validate().unwrap();
+}
+
+#[tokio::test]
+async fn context_of_a_20000_file_repository_is_bounded_and_counts_every_path() {
+    let context = capture_many(20_000).await;
+    assert!(context.paths.len() <= 256);
+    assert_eq!(context.paths.len() + context.omitted_paths, 20_001);
+    assert!(context.paths.iter().any(|path| path == "README.md"));
+    context.validate().unwrap();
+}
+
+#[tokio::test]
+async fn context_above_the_record_cap_degrades_with_a_notice_instead_of_failing() {
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace").canonicalize().unwrap();
+    commit_many_files(&workspace, 300);
+    let capped = alfredo_tui::planning_context::capture_with_record_limit(
+        &workspace,
+        "calculation",
+        None,
+        100,
+    )
+    .await
+    .unwrap();
+    assert!(capped.listing_truncated);
+    assert_eq!(capped.paths.len() + capped.omitted_paths, 100);
+    capped.validate().unwrap();
+    let whole = alfredo_tui::planning_context::capture(&workspace, "calculation")
+        .await
+        .unwrap();
+    assert!(!whole.listing_truncated);
+    assert!(!serde_json::to_string(&whole)
+        .unwrap()
+        .contains("listing_truncated"));
+    let exact = alfredo_tui::planning_context::capture_with_record_limit(
+        &workspace,
+        "calculation",
+        None,
+        301,
+    )
+    .await
+    .unwrap();
+    assert_eq!(exact, whole);
+}
+
 #[tokio::test]
 async fn pinned_context_uses_exact_commit_instead_of_head_or_working_bytes() {
     let fixture = Fixture::new();

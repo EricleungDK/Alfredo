@@ -116,9 +116,13 @@ struct Running {
     token: String,
     /// Tool results the turn reported.
     results: Arc<Mutex<Vec<String>>>,
+    /// Every `ToolResult` event as sent: attempt, call, result, new_round.
+    reported: Arc<Mutex<Vec<Reported>>>,
     _fixture: ollama_fixture::Fixture,
     _dir: PathBuf,
 }
+
+type Reported = (u64, alfredo_tui::model::ToolCall, String, bool);
 
 async fn start(escalate: bool, seconds: u32) -> Running {
     let root = workspace("run");
@@ -149,12 +153,24 @@ async fn start(escalate: bool, seconds: u32) -> Running {
     // Keep the receiver alive and drained, as the terminal does.
     let results = Arc::new(Mutex::new(Vec::new()));
     let seen = results.clone();
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let events = reported.clone();
     tokio::spawn(async move {
         let mut receiver = receiver;
         while let Some(event) = receiver.recv().await {
             match event.update {
                 Update::ToolStep(step) => seen.lock().unwrap().extend(step.results),
-                Update::ToolResult { result, .. } => seen.lock().unwrap().push(result),
+                Update::ToolResult {
+                    call,
+                    result,
+                    new_round,
+                } => {
+                    events
+                        .lock()
+                        .unwrap()
+                        .push((event.attempt, call, result.clone(), new_round));
+                    seen.lock().unwrap().push(result);
+                }
                 _ => {}
             }
         }
@@ -185,6 +201,7 @@ async fn start(escalate: bool, seconds: u32) -> Running {
         log,
         token,
         results,
+        reported,
         _fixture: fixture,
         _dir: dir,
     }
@@ -251,6 +268,83 @@ async fn esc_kills_a_host_run_command_and_logs_cancelled() {
     let _ = fs::remove_dir_all(&run.root);
 }
 
+/// Issue #333: the killed run is reported as a `⚙` row and an "already applied" line,
+/// though the turn that ran it was dropped; replayed through a session that Esc
+/// already cancelled, as the terminal does.
+async fn assert_cancelled_run_is_reported(run: &Running, command_part: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let reported = loop {
+        let reported = run.reported.lock().unwrap().clone();
+        if !reported.is_empty() || Instant::now() > deadline {
+            break reported;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    let (attempt, call, result, new_round) = reported[0].clone();
+    assert!(
+        result.starts_with("cancelled after ")
+            && result
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with("s · killed; it may have partly run"),
+        "{result}"
+    );
+    let mut session = Session::new("fixture".into());
+    session.insert("run it");
+    session.begin().unwrap();
+    session.apply(attempt, Update::Token("working".into()));
+    session.cancel();
+    session.apply(
+        attempt,
+        Update::ToolResult {
+            call,
+            result,
+            new_round,
+        },
+    );
+    let steps = session.tool_steps(1);
+    assert_eq!(steps.len(), 1, "the cancelled run needs a row: {steps:?}");
+    session.insert("next");
+    let request = session.begin().unwrap();
+    let note = request
+        .iter()
+        .find(|m| m.content.starts_with("[This turn was interrupted."))
+        .unwrap_or_else(|| panic!("no applied note: {request:?}"));
+    assert!(
+        note.content.contains("run_command")
+            && note.content.contains(command_part)
+            && note
+                .content
+                .contains(": cancelled mid-run, effects may be partial"),
+        "{}",
+        note.content
+    );
+    assert!(session.interrupted_turn(0));
+}
+
+#[tokio::test]
+async fn esc_reports_a_killed_sandboxed_run_command_as_partly_applied() {
+    if !sandbox_works() {
+        return;
+    }
+    let _serial = SERIAL.lock().await;
+    let run = start(false, 3).await;
+    run.handle.abort();
+    assert_cancelled_run_is_reported(&run, "touch marker").await;
+    let _ = fs::remove_dir_all(&run.root);
+}
+
+#[tokio::test]
+async fn esc_reports_a_killed_host_run_command_as_partly_applied() {
+    let _serial = SERIAL.lock().await;
+    let run = start(true, 3).await;
+    run.handle.abort();
+    assert_cancelled_run_is_reported(&run, "touch marker").await;
+    let _ = fs::remove_dir_all(&run.root);
+}
+
 #[tokio::test]
 async fn quitting_stops_a_running_host_command_before_exit() {
     let _serial = SERIAL.lock().await;
@@ -279,7 +373,7 @@ async fn quitting_stops_a_running_host_command_before_exit() {
 }
 
 #[tokio::test]
-async fn a_stopped_run_reports_error_cancelled_to_the_model() {
+async fn a_stopped_run_reports_cancelled_to_the_model() {
     let _serial = SERIAL.lock().await;
     let run = start(true, 5).await;
     // Stop the command but let the turn go on, as a quit that is still winding down does.
@@ -291,7 +385,7 @@ async fn a_stopped_run_reports_error_cancelled_to_the_model() {
     let _ = tokio::time::timeout(Duration::from_secs(5), run.handle).await;
     let results = run.results.lock().unwrap().clone();
     assert!(
-        results.iter().any(|r| r.starts_with("error: cancelled")),
+        results.iter().any(|r| r.starts_with("cancelled after ")),
         "{results:?}"
     );
     let _ = fs::remove_dir_all(&run.root);
