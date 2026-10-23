@@ -195,6 +195,8 @@ pub struct Ollama {
     keep_alive: Option<String>,
     /// User-chosen input window (`--num-ctx`); None omits the option.
     num_ctx_override: Option<u32>,
+    /// Chat tool-round cap (`--max-turns`); None keeps the default.
+    max_turns: Option<usize>,
     connect_retries: u32,
     retry_backoff: Duration,
     /// Schema-constrained temperature; token limit applies to every request.
@@ -380,6 +382,7 @@ impl Ollama {
             recorder: None,
             keep_alive: None,
             num_ctx_override: None,
+            max_turns: None,
             connect_retries: 0,
             retry_backoff: Duration::from_secs(1),
             temperature: 0.0,
@@ -405,6 +408,17 @@ impl Ollama {
     pub fn with_num_ctx(mut self, num_ctx: Option<u32>) -> Self {
         self.num_ctx_override = num_ctx;
         self
+    }
+
+    /// Tool rounds one chat turn may run; None keeps the default. Use
+    /// `chat_tools::parse_max_turns` first.
+    pub fn with_max_turns(mut self, max_turns: Option<usize>) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
+
+    pub fn max_turns(&self) -> Option<usize> {
+        self.max_turns
     }
 
     pub fn num_ctx(&self) -> Option<u32> {
