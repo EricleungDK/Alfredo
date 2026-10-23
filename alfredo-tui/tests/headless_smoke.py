@@ -119,6 +119,19 @@ class HeadlessSmoke(unittest.TestCase):
             self.assertTrue(item['title'] and item['reason'])
         self.assertIn('failed 0/2', err)
 
+    def test_unreachable_model_mid_run_is_not_repaired_and_the_reason_is_on_stderr(self):
+        self.fixture.drop_worker = True
+        code, out, err = self.run_headless('--headless', '--max-repairs', '3')
+        self.assertEqual(code, 1, err)
+        result = self.result(out)
+        self.assertEqual((result['state'], result['repairs']), ('failed', 0))
+        reason = result['failed'][0]['reason']
+        self.assertIn(f'Cannot reach Ollama at {self.fixture.endpoint}', reason)
+        self.assertRegex(err, r'(?m)^failed 0/\d+: Cannot reach Ollama at ')
+        self.assertNotIn('larger model', err)
+        # Only the provider's own connect retries hit the server; no repair attempt ran.
+        self.assertEqual(set(self.fixture.markers()), {'PLAN', 'DROP'})
+
     def test_worker_that_changes_nothing_is_not_accepted_even_when_the_check_passes_exit_1(self):
         self.fixture.echo_worker = True
         code, out, err = self.run_headless('--headless', '--max-repairs', '1')

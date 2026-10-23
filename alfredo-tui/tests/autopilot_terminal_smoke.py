@@ -31,6 +31,8 @@ class AutopilotServer:
         self.release_app = threading.Event()
         self.prose_worker = False
         self.bad_plan = False
+        # Closes the socket on every worker request, as a restarting Ollama does.
+        self.drop_worker = False
         # Recovery-by-/repair option: every automatic repair writes wrong content until `fixed`.
         self.bad_repairs = False
         self.fixed = False
@@ -79,6 +81,11 @@ class AutopilotServer:
                             tasks = [dict(tasks[0], policy={'files': ['calc.py'], 'check': ['/usr/bin/true']})]
                         content = ('no plan today' if fixture.bad_plan else
                                    json.dumps({'tasks': tasks[:1] if fixture.single_task else tasks}))
+                    elif fixture.drop_worker:
+                        with fixture.lock:
+                            fixture.requests.append('DROP')
+                        self.close_connection = True
+                        return
                     elif fixture.echo_worker:
                         marker = 'ECHO'
                         content = json.dumps({'files': [{'path': 'calc.py', 'content': 'def answer():\n    return 0\n'}]})

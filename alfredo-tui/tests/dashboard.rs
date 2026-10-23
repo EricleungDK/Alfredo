@@ -481,6 +481,26 @@ fn too_large_failure_shows_reason_and_next_step_in_the_task_pane() {
 }
 
 #[test]
+fn model_unreachable_failure_shows_reason_and_next_step_in_the_task_pane() {
+    let fixture = finished_fixture_with(
+        &alfredo_tui::worker::model_unreachable("http://127.0.0.1:11434", 1),
+        None,
+    );
+    let screen = text(&fixture.render(140, 40));
+    assert!(
+        screen.contains("Cannot reach Ollama at http://127.0.0.1:11434"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Next     Start Ollama, then /repair 1 retry"),
+        "{screen}"
+    );
+    assert!(!screen.contains("larger model"), "{screen}");
+    assert!(!screen.contains("--max-repairs"), "{screen}");
+    assert!(!screen.contains("/repair 1 REASON"), "{screen}");
+}
+
+#[test]
 fn successful_outcome_reads_as_passed_not_as_a_pending_review_request() {
     let evidence = serde_json::to_string(&Evidence {
         agent: None,

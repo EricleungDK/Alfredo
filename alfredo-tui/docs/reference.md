@@ -98,6 +98,16 @@ does not repair it (no repair spent, no larger-model or `--max-repairs` advice) 
 summary adds a `Next` row. The planning lint rejects a draft that approves a committed file
 over 64 KiB with the same message, so the failure comes at plan time.
 
+A worker, repair or review request that cannot reach Ollama (connection refused, or the
+connection dropped before the reply) is also an environment failure, not a code failure: the
+run gets the typed `model-unreachable` `failure_code`, autopilot stops without spending a
+repair (Repairs stays 0), and the Reason names the endpoint: `Cannot reach Ollama at
+http://127.0.0.1:11434; the server is down or the endpoint is wrong.` The `Next` row says to
+start Ollama, then `/repair ID retry` (a failed task re-enters through `/repair`;
+`/requeue` is only for cancelled runs). A manual `/run` shows the same text, and headless
+`--go` prints the Reason on stderr and exits 1. Bad `FILE` blocks and failing checks stay
+repairable. Auto-pause and resume on reconnect are not part of this.
+
 Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
 or untracked, non-ignored files, the start notice and the run's summary carry a
 warning line such as `3 uncommitted changes are not visible to workers (based on HEAD
