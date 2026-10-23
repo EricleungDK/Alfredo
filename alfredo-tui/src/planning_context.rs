@@ -1,7 +1,11 @@
 //! Bounded committed repository inputs. No checkout, working-file reads or Git effects.
-use crate::worker::git;
+use crate::worker::{git, git_records};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, BinaryHeap},
+    path::Path,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,6 +22,10 @@ pub struct RepositoryContext {
     pub omitted_paths: usize,
     pub sources: Vec<Source>,
     pub omitted_sources: usize,
+    /// True when the tree had more than `MAX_TREE_RECORDS` entries: counting
+    /// stopped there, so the omitted counts are lower bounds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub listing_truncated: bool,
 }
 fn sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
@@ -223,10 +231,55 @@ pub async fn capture_at(
     .await
     .map_err(|_| "Repository planning context exceeded 30 seconds".to_string())?
 }
+/// Most tree entries counted for one context. A larger tree is cut here and the
+/// context says so (`listing_truncated`) instead of planning failing.
+pub const MAX_TREE_RECORDS: usize = 1_000_000;
+/// Best-ranked candidates kept while streaming the tree (256 map paths, with
+/// slack for the 16 KiB map budget, and 32 source candidates).
+const POOL: usize = 1024;
+
+struct Entry {
+    path: String,
+    blob: String,
+    size: usize,
+    score: usize,
+}
+// Greater means worse (lower score, then later path) so the max-heap root is
+// the entry to evict.
+impl Ord for Entry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .score
+            .cmp(&self.score)
+            .then_with(|| self.path.cmp(&other.path))
+    }
+}
+impl PartialOrd for Entry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl PartialEq for Entry {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for Entry {}
+
 async fn capture_inner(
     workspace: &Path,
     prompt: &str,
     pinned: Option<&str>,
+) -> Result<RepositoryContext, String> {
+    capture_with_record_limit(workspace, prompt, pinned, MAX_TREE_RECORDS).await
+}
+
+#[doc(hidden)]
+pub async fn capture_with_record_limit(
+    workspace: &Path,
+    prompt: &str,
+    pinned: Option<&str>,
+    max_records: usize,
 ) -> Result<RepositoryContext, String> {
     let root = git(workspace, &["rev-parse", "--show-toplevel"]).await?;
     if Path::new(root.trim()) != workspace {
@@ -255,63 +308,79 @@ async fn capture_inner(
     if !sha(&baseline) {
         return Err("Planning needs a committed Git baseline".into());
     }
-    let tree = git(workspace, &["ls-tree", "-r", "-l", "-z", &baseline]).await?;
-    struct Entry {
-        path: String,
-        blob: String,
-        size: usize,
-        score: usize,
-    }
     let terms: Vec<_> = prompt
         .split(|c: char| !c.is_alphanumeric())
         .filter(|term| term.len() > 2)
         .map(str::to_lowercase)
         .collect();
-    let mut entries = Vec::new();
+    let mut heap: BinaryHeap<Entry> = BinaryHeap::new();
     let mut total = 0;
-    for record in tree.split('\0').filter(|record| !record.is_empty()) {
-        total += 1;
-        let (metadata, path) = record.split_once('\t').ok_or("Malformed Git tree entry")?;
-        let fields: Vec<_> = metadata.split_whitespace().collect();
-        if fields.len() != 4 {
-            return Err("Malformed Git tree metadata".into());
-        }
-        if !matches!(fields[0], "100644" | "100755") || fields[1] != "blob" || !path_valid(path) {
-            continue;
-        }
-        let lower = path.to_lowercase();
-        if excluded(&lower) {
-            continue;
-        }
-        let base = lower.rsplit('/').next().unwrap_or(&lower);
-        let priority = match lower.as_str() {
-            "agents.md" => 1000,
-            "readme.md" | "context.md" => 900,
-            "cargo.toml" | "package.json" | "pyproject.toml" | "makefile" => 800,
-            _ => 0,
-        };
-        let score = priority
-            + terms
-                .iter()
-                .filter(|term| lower.contains(term.as_str()))
-                .count()
-                .min(10)
-                * 20
-            + usize::from(base == "agents.md") * 100;
-        entries.push(Entry {
-            path: path.into(),
-            blob: fields[2].into(),
-            size: fields[3].parse().map_err(|_| "Invalid Git blob size")?,
-            score,
-        });
-    }
-    entries.sort_by(|a, b| b.score.cmp(&a.score).then(a.path.cmp(&b.path)));
+    let mut listing_truncated = false;
+    git_records(
+        workspace,
+        &["ls-tree", "-r", "-l", "-z", &baseline],
+        |record| {
+            if total == max_records {
+                listing_truncated = true;
+                return Ok(false);
+            }
+            total += 1;
+            let Ok(record) = std::str::from_utf8(record) else {
+                return Ok(true); // a non-UTF-8 path can never be listed
+            };
+            let (metadata, path) = record.split_once('\t').ok_or("Malformed Git tree entry")?;
+            let fields: Vec<_> = metadata.split_whitespace().collect();
+            if fields.len() != 4 {
+                return Err("Malformed Git tree metadata".into());
+            }
+            if !matches!(fields[0], "100644" | "100755") || fields[1] != "blob" || !path_valid(path)
+            {
+                return Ok(true);
+            }
+            let lower = path.to_lowercase();
+            if excluded(&lower) {
+                return Ok(true);
+            }
+            let base = lower.rsplit('/').next().unwrap_or(&lower);
+            let priority = match lower.as_str() {
+                "agents.md" => 1000,
+                "readme.md" | "context.md" => 900,
+                "cargo.toml" | "package.json" | "pyproject.toml" | "makefile" => 800,
+                _ => 0,
+            };
+            let score = priority
+                + terms
+                    .iter()
+                    .filter(|term| lower.contains(term.as_str()))
+                    .count()
+                    .min(10)
+                    * 20
+                + usize::from(base == "agents.md") * 100;
+            let entry = Entry {
+                path: path.into(),
+                blob: fields[2].into(),
+                size: fields[3].parse().map_err(|_| "Invalid Git blob size")?,
+                score,
+            };
+            if heap.len() == POOL {
+                if heap.peek().is_some_and(|worst| entry >= *worst) {
+                    return Ok(true);
+                }
+                heap.pop();
+            }
+            heap.push(entry);
+            Ok(true)
+        },
+    )
+    .await?;
+    let entries = heap.into_sorted_vec();
     let mut context = RepositoryContext {
         baseline,
         paths: vec![],
         omitted_paths: 0,
         sources: vec![],
         omitted_sources: 0,
+        listing_truncated,
     };
     let mut map_bytes = 0;
     for entry in &entries {

@@ -1010,7 +1010,16 @@ Planning context is pinned to committed HEAD. It includes a ranked file map (up 
 256 paths / 16 KiB) and up to eight complete UTF-8 source blobs (8 KiB each, 24 KiB
 combined, 64 KiB serialized context). Root instructions, README/context and build
 manifests rank ahead of request-matching paths. At most 32 candidate blobs are read,
-with a 30-second context deadline and the Git helper's 256-KiB output bound.
+with a 30-second context deadline. The committed tree listing is streamed, not
+buffered: the 256-KiB Git output bound applies to each blob read, not to the
+listing. Repository size limits: the listing keeps only the best 1,024 ranked
+candidates in memory whatever the file count (tested at 20,000 tracked files), and
+counts at most 1,000,000 tree entries. Past that cap planning still succeeds on the
+first 1,000,000 entries; the saved context carries `listing_truncated: true` and its
+omitted counts are lower bounds. Any other Git call whose output exceeds 256 KiB (for
+example a very large `git diff` evidence patch) is killed at once and fails with
+"Git output exceeds the bounded evidence limit" instead of waiting out the 30-second
+deadline.
 Symlinks/submodules, generated/vendor paths, common secret-file names, binary and
 oversized sources are omitted. Counts and actual inputs appear in the preview and
 saved Plan receipt; the selection is not a full repository audit or secret scanner.
