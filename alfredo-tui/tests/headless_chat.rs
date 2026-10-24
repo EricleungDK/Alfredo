@@ -154,6 +154,59 @@ fn scripted_policy_approves_workspace_edits_and_logs_them() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// A final frame carrying the server's counts, as Ollama sends them (issue #283).
+fn counted(reply: Reply, prompt: u64, eval: u64, total_ns: u64) -> Reply {
+    let Reply::Stream(mut frames, delay) = reply else {
+        unreachable!("scripted replies are streams")
+    };
+    let last: Value = serde_json::from_slice(frames.last().unwrap()).unwrap();
+    let mut last = last;
+    last["prompt_eval_count"] = prompt.into();
+    last["eval_count"] = eval.into();
+    last["total_duration"] = total_ns.into();
+    *frames.last_mut().unwrap() = format!("{last}\n").into_bytes();
+    Reply::Stream(frames, delay)
+}
+
+#[test]
+fn usage_sums_the_counts_of_every_round() {
+    let root = repository("usage");
+    let fixture = scripted_chat(vec![
+        counted(
+            tool_calls(&[("read_file", json!({"path": "greet.py"}))]),
+            50,
+            3,
+            1_500_000_000,
+        ),
+        counted(done("It greets."), 70, 5, 2_000_000_000),
+    ]);
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "What is in greet.py", "--headless"],
+    );
+    let value = result(&output);
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(
+        value["usage"],
+        json!({"prompt_tokens": 120, "completion_tokens": 8, "model_seconds": 3.5})
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn usage_fields_are_null_when_the_server_reports_nothing() {
+    let root = repository("usage-none");
+    let fixture = scripted_chat(vec![done("Hello.")]);
+    let output = run(&root, &fixture, &["--chat", "hi", "--headless"]);
+    let value = result(&output);
+    assert_eq!(
+        value["usage"],
+        json!({"prompt_tokens": null, "completion_tokens": null, "model_seconds": null})
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn without_a_policy_every_mutating_call_is_denied_and_logged() {
     let root = repository("deny");
