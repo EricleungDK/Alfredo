@@ -222,12 +222,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         // Tiny terminals keep every row for the detail; F6 still opens the pane.
         body
     };
-    let help = app.completion.as_ref().filter(|completion| {
-        completion
-            .choices
-            .iter()
-            .any(|choice| choice.group.is_some())
-    });
+    let help = app.completion.as_ref().filter(|completion| completion.help);
     if let Some(help) = help {
         draw_help(frame, help, right);
     } else {
@@ -793,7 +788,14 @@ fn draw_help(frame: &mut Frame, help: &crate::commands::Completion, area: Rect) 
     } else {
         Block::bordered()
             .padding(Padding::horizontal(1))
-            .title(" Help · ↑↓ choose · Enter fills prompt · Esc close ")
+            .title(if help.query.is_empty() {
+                " Help · type to filter · ↑↓ choose · Enter fills prompt · Esc close ".to_string()
+            } else {
+                format!(
+                    " Help /{} · ↑↓ choose · Enter fills prompt · Esc close ",
+                    help.query.trim_start_matches(['/', '@'])
+                )
+            })
             .title_bottom(
                 " F2 tasks/chat  F3 evidence  F4 activity  F5 pause  F6 pane  Enter agent  ^O expand/raw plan ",
             )
@@ -978,7 +980,11 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
             List::new(items)
                 .block(frame_block(
                     area,
-                    " Complete · ↑↓ choose · Enter fills draft · Esc close ".into(),
+                    if completion.live {
+                        " Commands · ↑↓ choose · Enter/Tab fills draft · Esc close ".into()
+                    } else {
+                        " Complete · ↑↓ choose · Enter fills draft · Esc close ".into()
+                    },
                 ))
                 .highlight_symbol("› ")
                 .highlight_style(

@@ -209,13 +209,81 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
 pub struct Completion {
     pub choices: Vec<Choice>,
     pub selected: usize,
+    /// Opened by typing `/`: Tab fills like Enter, and the prompt keeps the focus.
+    pub live: bool,
+    /// The F1 catalog (grouped, or `Matches` once a filter is typed).
+    pub help: bool,
+    /// Type-to-filter text of the F1 catalog.
+    pub query: String,
 }
 impl Completion {
     fn from_choices(choices: Vec<Choice>) -> Option<Self> {
         (!choices.is_empty()).then_some(Self {
             choices,
             selected: 0,
+            live: false,
+            help: false,
+            query: String::new(),
         })
+    }
+    /// Rank of `name` for the typed text: 0 exact, 1 prefix, 2 substring, None otherwise.
+    fn rank(name: &str, query: &str) -> Option<u8> {
+        let one = |text: &str| text.strip_prefix(['/', '@']).unwrap_or(text).to_lowercase();
+        let (name, query) = (one(name), one(query));
+        if name == query {
+            Some(0)
+        } else if name.starts_with(&query) {
+            Some(1)
+        } else {
+            name.contains(&query).then_some(2)
+        }
+    }
+    /// Live type-ahead for a draft that is one token starting with `/`: prefix matches
+    /// first, then substring matches, each with its usage hint.
+    pub fn typeahead(draft: &str) -> Option<Self> {
+        if !draft.starts_with('/') || draft.chars().any(char::is_whitespace) {
+            return None;
+        }
+        let mut ranked: Vec<_> = COMMANDS
+            .iter()
+            .filter_map(|(name, description)| Some((Self::rank(name, draft)?, *name, *description)))
+            .collect();
+        ranked.sort_by_key(|(rank, ..)| *rank);
+        let mut completion = Self::from_choices(
+            ranked
+                .into_iter()
+                .map(|(_, name, description)| Choice {
+                    name: name.into(),
+                    description,
+                    group: None,
+                    draft: format!("{name} "),
+                })
+                .collect(),
+        )?;
+        completion.live = true;
+        Some(completion)
+    }
+    /// Sets the F1 filter; with text the catalog shows one `Matches` group, prefix first.
+    pub fn set_query(&mut self, query: String) {
+        let mut all = Self::all();
+        if !query.is_empty() {
+            let mut ranked: Vec<_> = all
+                .choices
+                .into_iter()
+                .filter_map(|choice| Some((Self::rank(&choice.name, &query)?, choice)))
+                .collect();
+            ranked.sort_by_key(|(rank, _)| *rank);
+            all.choices = ranked
+                .into_iter()
+                .map(|(_, mut choice)| {
+                    choice.group = Some("Matches");
+                    choice
+                })
+                .collect();
+        }
+        self.choices = all.choices;
+        self.selected = 0;
+        self.query = query;
     }
     pub fn open(draft: &str) -> Option<Self> {
         if !(draft.starts_with('/') || draft.starts_with('@'))
@@ -318,9 +386,15 @@ impl Completion {
         Self {
             choices,
             selected: 0,
+            live: false,
+            help: true,
+            query: String::new(),
         }
     }
     pub fn next(&mut self, forward: bool) {
+        if self.choices.is_empty() {
+            return;
+        }
         self.selected = if forward {
             (self.selected + 1) % self.choices.len()
         } else {
@@ -329,5 +403,11 @@ impl Completion {
     }
     pub fn draft(&self) -> String {
         self.choices[self.selected].draft.clone()
+    }
+    /// True when the selected command is exactly what is already typed.
+    pub fn selected_is(&self, draft: &str) -> bool {
+        self.choices
+            .get(self.selected)
+            .is_some_and(|c| c.name == draft.trim())
     }
 }

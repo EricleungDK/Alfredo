@@ -149,7 +149,7 @@ git merge alfredo/go-<id>              # on your branch, when satisfied
 You can also start unattended: `alfredo-tui --model qwen2.5-coder:14b --go "GOAL"`.
 For scripts and CI, add `--headless`: it runs without a terminal, prints progress lines
 on stderr and ends with one JSON object on stdout
-(`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]}`);
+(`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}]}`);
 SIGINT/SIGTERM cancel workers like `/stop`. Exit 2 means setup failed (Ollama down, model
 not installed) with the reason on stderr; with `--on-finish`, headless waits for the hook
 (10 s limit) after printing the JSON and reports a failed hook on stderr.
@@ -162,7 +162,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | --- | --- |
 | Enter | Send prompt or command |
 | Ctrl+J / Alt+Enter | New line (shown as `↵`) on any terminal; Shift+Enter too where the terminal reports it, and paste also works |
-| F1 | Command picker (empty prompt); Tab after `/prefix` completes |
+| F1 | Command picker (empty prompt; type to filter); typing `/` lists matching commands, Tab or Enter completes |
 | F2 | Right pane: task detail / conversation |
 | F3 | Evidence for the selected task (task detail) |
 | F4 | Activity (saved task receipts) |

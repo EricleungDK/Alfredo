@@ -1092,16 +1092,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     work.app.sessions[index].note_key(key_at);
                     work.app.transient_rows.clear();
                     if let Some(completion) = work.app.completion.as_mut() {
+                        let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
                         match key.code {
                             KeyCode::Up | KeyCode::BackTab => {
                                 completion.next(false);
                                 continue;
                             }
-                            KeyCode::Down | KeyCode::Tab => {
+                            KeyCode::Down => {
                                 completion.next(true);
                                 continue;
                             }
-                            KeyCode::Enter => {
+                            // Live `/` type-ahead: Tab fills like Enter.
+                            KeyCode::Tab if !completion.live => {
+                                completion.next(true);
+                                continue;
+                            }
+                            // A modified Enter (newline) closes the list and acts normally.
+                            KeyCode::Enter if !key.modifiers.is_empty() => {
+                                work.app.completion = None;
+                            }
+                            // A fully typed command name submits as before.
+                            KeyCode::Enter
+                                if completion.live
+                                    && completion.selected_is(&work.app.sessions[index].draft) =>
+                            {
+                                work.app.completion = None;
+                            }
+                            KeyCode::Enter | KeyCode::Tab if !completion.choices.is_empty() => {
                                 let draft = completion.draft();
                                 work.app.completion = None;
                                 work.app.sessions[index].clear_draft();
@@ -1110,6 +1127,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             KeyCode::Esc => {
                                 work.app.completion = None;
+                                continue;
+                            }
+                            // F1 picker: type to filter instead of closing.
+                            KeyCode::Char(ch) if completion.help && plain => {
+                                let mut query = completion.query.clone();
+                                query.push(ch);
+                                completion.set_query(query);
+                                continue;
+                            }
+                            KeyCode::Backspace if completion.help => {
+                                let mut query = completion.query.clone();
+                                query.pop();
+                                completion.set_query(query);
                                 continue;
                             }
                             _ => work.app.completion = None,
@@ -1993,6 +2023,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Backspace => {
                             work.app.sessions[index].backspace();
+                            work.app.completion = alfredo_tui::commands::Completion::typeahead(
+                                &work.app.sessions[index].draft,
+                            );
                         }
                         KeyCode::PageUp if work.tasks.agent_shown().is_some() => {
                             work.tasks.agent_shown().unwrap().scroll_rows(-10)
@@ -2025,7 +2058,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char(ch)
                             if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
                         {
-                            work.app.sessions[index].type_char(ch)
+                            work.app.sessions[index].type_char(ch);
+                            work.app.completion = alfredo_tui::commands::Completion::typeahead(
+                                &work.app.sessions[index].draft,
+                            );
                         }
                         _ => {}
                     }
