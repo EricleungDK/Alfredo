@@ -95,6 +95,19 @@ class Pty:
             self.test.assertIsNone(self.process.poll(), self.output.decode(errors='replace'))
         self.test.fail(f'Missing {text!r}:\n{self.screen()}')
 
+    def wait_gone(self, text, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if text not in self.screen():
+                return
+            if select.select([self.master], [], [], 0.05)[0]:
+                chunk = os.read(self.master, 65536)
+                self.output.extend(chunk)
+                if b'\x1b[6n' in chunk:
+                    os.write(self.master, b'\x1b[1;1R')
+            self.test.assertIsNone(self.process.poll(), self.output.decode(errors='replace'))
+        self.test.fail(f'Still showing {text!r}:\n{self.screen()}')
+
     def write(self, data):
         os.write(self.master, data)
 
@@ -440,6 +453,45 @@ class ModelPicker(unittest.TestCase):
                 terminal.close()
                 server.shutdown()
 
+    def test_slash_typeahead_filters_fills_and_f1_filters_by_typing(self):
+        # Issue #364: typing / lists commands; Tab/Enter fill without submitting; F1 filters.
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-slash-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-slash-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'/')
+                terminal.wait_for('Commands')
+                terminal.write(b'pla')
+                terminal.wait_for('/plan-save')
+                terminal.write(b'\t')
+                terminal.wait_for('/plan ▏')
+                terminal.wait_gone('Commands ·')
+                terminal.write(b'\x15/pla')
+                terminal.wait_for('Commands ·')
+                terminal.write(b'\x1b')
+                terminal.wait_gone('Commands ·')
+                terminal.wait_for('/pla▏')
+                terminal.write(b'\x15/pla')
+                terminal.wait_for('Commands ·')
+                terminal.write(b'\x7f\x7f\x7f\x7f')
+                terminal.wait_gone('Commands ·')
+                terminal.write(b'\x1bOP')  # F1 on an empty prompt
+                terminal.wait_for('Help')
+                terminal.write(b'pla')
+                terminal.wait_for('Help /pla')
+                terminal.write(b'\r')
+                terminal.wait_for('/plan ▏')
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+
     def test_ctrl_j_and_alt_enter_insert_newlines_and_readline_motions_edit_the_draft(self):
         # Issue #351: ordinary terminals send Ctrl+J (LF) and Alt+Enter (ESC CR), never Shift+Enter.
         binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
@@ -784,7 +836,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Finish or cancel active conversations')
             self.assertNotIn('Open your work', visible_screen(output))
             os.write(master, b'\x15')
-            os.write(master, b'\x0e/mod\t\r')  # Completion fills /models, without submitting.
+            os.write(master, b'\x0e/mod\t')  # Type-ahead Tab fills /models, without submitting.
             wait_for(b'/models')
             os.write(master, b'\r')
             wait_for(b'Installed models')

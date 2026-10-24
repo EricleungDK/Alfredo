@@ -909,7 +909,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | --- | --- |
 | Enter | Send current prompt (or fill draft when command picker is open) |
 | F1 | Open command picker when draft is empty (`/help` opens it too) |
-| Tab after `/prefix` | Open matching slash commands |
+| Tab after `/prefix` | Fill the selected matching slash command |
 | Up / Down in conversation | Browse prompt history and restore unsent draft |
 | First printable key or paste after a rejected command | Replaces the rejected text (shown reversed); Left, Right, Home, End, Backspace, Delete, Ctrl+W and the first Up keep it for editing; Up again, or Up from an emptied prompt, browses history where it is the newest entry |
 | Up / Down in task detail | Select a visible task or group |
@@ -1281,6 +1281,16 @@ the lockfile now uses patched 0.23.45. All 213 locked dependencies then audited
 without findings or warnings. This point-in-time scan covers published advisories,
 not undisclosed defects, application security or license compatibility. See the
 [recorded before/after evidence](../../.agent/Reports/2026-09-14-native-dependency-audit.json).
+
+## Slash command type-ahead
+
+Typing `/` as the whole first word of the prompt lists the commands that match what
+you typed, prefix matches first and then substring matches, each with its usage
+hint. Up/Down choose; Enter or Tab fills `/name ` into the prompt without
+submitting it; Esc closes the list and keeps the text; backspacing past `/` closes it.
+A fully typed command name still submits on Enter, and a message that is a path
+(`/path/in/chat ...`, with a space) or plain text and `@` mentions are unaffected.
+In the F1 picker, typing filters the list the same way (Backspace edits the filter).
 
 ## Installed-model completion
 

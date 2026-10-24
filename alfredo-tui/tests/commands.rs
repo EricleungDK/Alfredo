@@ -54,6 +54,78 @@ fn completion_filters_cycles_and_only_produces_a_draft() {
 }
 
 #[test]
+fn slash_typeahead_lists_prefix_then_substring_matches_with_usage() {
+    let all = Completion::typeahead("/").unwrap();
+    assert!(all.live && all.choices.len() > 30);
+    let picker = Completion::typeahead("/pla").unwrap();
+    let names: Vec<_> = picker.choices.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names[0], "/plan");
+    assert!(names.contains(&"/plan-save"), "{names:?}");
+    // `/resume` matches `/re` by prefix; `/plan-revise` contains it only inside.
+    let names: Vec<_> = Completion::typeahead("/re")
+        .unwrap()
+        .choices
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert!(
+        names.iter().position(|n| n == "/resume").unwrap()
+            < names.iter().position(|n| n == "/plan-revise").unwrap()
+    );
+    assert!(Completion::typeahead("/go").unwrap().choices[0]
+        .description
+        .contains("GOAL"));
+    assert_eq!(Completion::typeahead("/pla").unwrap().draft(), "/plan ");
+    // An exact name leads, so Enter on a fully typed `/model` still submits it.
+    let exact = Completion::typeahead("/model").unwrap();
+    assert!(exact.selected_is("/model") && exact.choices.len() > 1);
+    for draft in [
+        "",
+        "hello",
+        "@way",
+        "/path/in chat",
+        "/zzzz-none",
+        "//tmp",
+        "/@x",
+    ] {
+        assert!(Completion::typeahead(draft).is_none(), "{draft}");
+    }
+}
+
+#[test]
+fn f1_picker_filters_by_typed_text() {
+    let mut help = Completion::all();
+    let total = help.choices.len();
+    help.set_query("pla".into());
+    assert!(help.choices.len() < total && help.choices[0].name == "/plan");
+    assert!(help.choices.iter().all(|c| c.group == Some("Matches")));
+    assert_eq!(help.draft(), "/plan ");
+    help.set_query("zzzz".into());
+    assert!(help.choices.is_empty());
+    help.next(true);
+    help.set_query(String::new());
+    assert_eq!(help.choices.len(), total);
+    assert!(help.help && !help.live);
+}
+
+#[test]
+fn live_typeahead_renders_matches_and_usage_hints() {
+    let mut app = App::new("fixture".into());
+    app.completion = Completion::typeahead("/pla");
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("/plan-save"), "{text}");
+    assert!(text.contains("Enter/Tab fills draft"), "{text}");
+}
+
+#[test]
 fn autosave_during_history_browsing_preserves_the_original_unsent_draft() {
     let mut app = App::new("fixture".into());
     app.sessions[0].insert("submitted");
