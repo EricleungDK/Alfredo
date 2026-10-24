@@ -1,4 +1,6 @@
 use alfredo_tui::model::{App, Session, MAX_DRAFT};
+use alfredo_tui::ui;
+use ratatui::{backend::TestBackend, Terminal};
 use unicode_width::UnicodeWidthStr;
 
 #[test]
@@ -43,6 +45,126 @@ fn cursor_remains_visible_in_cell_bounded_views_at_both_ends_and_middle() {
     assert!(editor.draft_view(20).starts_with('▏'));
     editor.end();
     assert!(editor.draft_view(20).ends_with('▏'));
+}
+
+#[test]
+fn multi_line_draft_window_shows_each_line_with_the_caret_and_keeps_wide_cells_aligned() {
+    let mut editor = Session::new("fixture".into());
+    editor.insert("one\n界👩‍💻e\u{301}x\nthree");
+    assert_eq!(editor.draft_line_count(), 3);
+    assert_eq!(
+        editor.draft_lines(20, 6),
+        ["one", "界👩‍💻e\u{301}x", "three▏"]
+    );
+    // Cursor on the middle line, after the wide character.
+    editor.home();
+    editor.right();
+    editor.right();
+    editor.right();
+    editor.right();
+    editor.right();
+    assert_eq!(
+        editor.draft_lines(20, 6),
+        ["one", "界▏👩‍💻e\u{301}x", "three"]
+    );
+    // Narrow widths never overflow in cells and keep the caret.
+    for width in [1, 2, 3, 5] {
+        for row in editor.draft_lines(width, 6) {
+            assert!(row.width() <= width, "{row:?}");
+        }
+        assert!(editor
+            .draft_lines(width, 6)
+            .iter()
+            .any(|row| row.contains('▏')));
+    }
+    // A single-line draft is untouched: one row, same as draft_view.
+    editor.clear_draft();
+    editor.insert("plain 界");
+    assert_eq!(editor.draft_line_count(), 1);
+    assert_eq!(editor.draft_lines(20, 6), [editor.draft_view(20)]);
+}
+
+#[test]
+fn multi_line_draft_window_scrolls_to_keep_the_cursor_line_visible() {
+    let mut editor = Session::new("fixture".into());
+    editor.insert("l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7");
+    assert_eq!(editor.draft_lines(10, 3), ["l5", "l6", "l7▏"]);
+    editor.home();
+    assert_eq!(editor.draft_lines(10, 3), ["▏l0", "l1", "l2"]);
+    for _ in 0..(3 * 4) {
+        editor.right();
+    }
+    // Cursor at the start of l4: the window ends on it.
+    assert_eq!(editor.draft_lines(10, 3), ["l2", "l3", "▏l4"]);
+}
+
+#[test]
+fn up_and_down_move_between_draft_lines_and_only_report_false_at_the_edges() {
+    let mut editor = Session::new("fixture".into());
+    editor.insert("ab界\ncd\nefghij");
+    editor.end();
+    assert!(editor.line_up());
+    // Column is measured in cells: the cursor lands at the end of the short line.
+    assert_eq!(&editor.draft[..editor.cursor()], "ab界\ncd");
+    assert!(editor.line_up());
+    assert_eq!(&editor.draft[..editor.cursor()], "ab");
+    assert!(!editor.line_up());
+    assert_eq!(&editor.draft[..editor.cursor()], "ab");
+    assert!(editor.line_down());
+    assert_eq!(&editor.draft[..editor.cursor()], "ab界\ncd");
+    assert!(editor.line_down());
+    assert!(!editor.line_down());
+    // A single-line draft always falls through to history.
+    editor.clear_draft();
+    editor.insert("solo");
+    assert!(!editor.line_up());
+    assert!(!editor.line_down());
+}
+
+fn screen(app: &App, width: u16, height: u16) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..height)
+        .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect()
+}
+
+#[test]
+fn prompt_box_grows_with_the_draft_up_to_six_rows_and_the_transcript_gives_way() {
+    let mut app = App::new("fixture".into());
+    let before = screen(&app, 80, 24);
+    // Single-line draft: three-row box, one text row, exactly as before.
+    app.sessions[0].insert("only");
+    let single = screen(&app, 80, 24);
+    assert!(single[24 - 4].contains("only▏"), "{single:#?}");
+    assert!(single[24 - 5].contains('┌') || single[24 - 5].contains('╭'));
+    assert_eq!(before[..24 - 4], single[..24 - 4]);
+    app.sessions[0].clear_draft();
+    app.sessions[0].insert("one\n界two\nthree");
+    let grown = screen(&app, 80, 24);
+    assert!(grown[24 - 6].contains("one"), "{grown:#?}");
+    assert!(grown[24 - 5].contains('界'));
+    assert!(grown[24 - 4].contains("three▏"));
+    assert!(grown[24 - 7].contains('┌') || grown[24 - 7].contains('╭'));
+    assert!(!grown.iter().any(|row| row.contains('↵')));
+    // Many lines: capped at six text rows, scrolled to the cursor line.
+    app.sessions[0].clear_draft();
+    app.sessions[0].insert(
+        &(0..10)
+            .map(|n| format!("row{n}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let capped = screen(&app, 80, 24);
+    assert!(capped[24 - 4].contains("row9▏"));
+    assert!(capped[24 - 9].contains("row4"));
+    assert!(!capped.iter().any(|row| row.contains("row3")));
+    // Small terminals still render with the grown box.
+    let small = screen(&app, 50, 14);
+    assert!(small.iter().any(|row| row.contains("row9▏")));
+    let tiny = screen(&app, 32, 10);
+    assert!(tiny.iter().any(|row| row.contains("row9▏")));
 }
 
 #[test]

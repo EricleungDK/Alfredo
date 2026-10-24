@@ -926,7 +926,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Enter | Send current prompt (or fill draft when command picker is open) |
 | F1 | Open command picker when draft is empty (`/help` opens it too) |
 | Tab after `/prefix` | Fill the selected matching slash command |
-| Up / Down in conversation | Browse prompt history and restore unsent draft |
+| Up / Down in conversation | Move between lines of a multi-line draft; from its first / last line (or a single-line draft) browse prompt history and restore unsent draft |
 | First printable key or paste after a rejected command | Replaces the rejected text (shown reversed); Left, Right, Home, End, Backspace, Delete, Ctrl+W and the first Up keep it for editing; Up again, or Up from an emptied prompt, browses history where it is the newest entry |
 | Up / Down in task detail | Select a visible task or group |
 | Alt+Left / Alt+Right | Collapse / expand a branch, or move to parent / child |
@@ -943,7 +943,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Ctrl+K | Delete from the cursor to the end of the draft |
 | Backspace / Delete | Delete the previous / next grapheme |
 | Ctrl+W / Ctrl+U | Delete previous whitespace-delimited word / clear draft |
-| Ctrl+J, Alt+Enter | Insert a newline on any terminal (shown as `↵`); the 16 KiB limit applies |
+| Ctrl+J, Alt+Enter | Insert a newline on any terminal; the 16 KiB limit applies |
 | Shift+Enter | Insert newline when the terminal reports it (kitty protocol) |
 | Ctrl+N | Create another conversation (up to eight) |
 | F2 | Switch the right pane between task detail and conversation |
@@ -979,7 +979,10 @@ The command picker uses Up/Down or Tab to
 select, Enter to fill the draft, and Escape to dismiss; a second Enter submits.
 Autosave during history browsing preserves the original unsent draft/cursor.
 Restored user prompts seed history; transient command history is not persisted.
-The prompt viewport follows the cursor in terminal cells; newlines display as `↵`.
+The prompt viewport follows the cursor in terminal cells. A draft with newlines shows one
+row per line, growing the prompt box up to six text rows (the transcript gives up the rows)
+and scrolling so the cursor line stays visible. Up/Down move between draft lines and reach
+history only from the first/last line.
 Traditional terminals may send Shift+Enter as plain Enter, so use Ctrl+J or Alt+Enter; pasted
 multiline text remains supported.
 

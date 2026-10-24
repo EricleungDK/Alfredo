@@ -765,35 +765,92 @@ impl Session {
 
     /// Single-line viewport measured in terminal cells, never UTF-8 bytes.
     pub fn draft_view(&self, width: usize) -> String {
-        if width == 0 {
-            return String::new();
-        }
         let cursor = self.cursor();
         let display = |text: &str| text.replace('\n', "↵");
-        let after = display(&self.draft[cursor..]);
-        let before = display(&self.draft[..cursor]);
-        let right_budget = after.width().min(width / 3);
-        let left_budget = width.saturating_sub(1 + right_budget);
-        let mut left = Vec::new();
-        let mut used = 0;
-        for grapheme in before.graphemes(true).rev() {
-            if used + grapheme.width() > left_budget {
-                break;
-            }
-            used += grapheme.width();
-            left.push(grapheme);
+        caret_window(
+            &display(&self.draft[..cursor]),
+            &display(&self.draft[cursor..]),
+            width,
+        )
+    }
+
+    /// Number of logical lines in the draft (at least one).
+    pub fn draft_line_count(&self) -> usize {
+        self.draft.bytes().filter(|byte| *byte == b'\n').count() + 1
+    }
+
+    /// At most `height` logical lines of the draft, one per row, scrolled so the
+    /// cursor line is the last row once the draft is longer than the window. The
+    /// cursor line carries the caret and follows it horizontally; other lines are
+    /// cut to `width` cells. A single-line draft is exactly `draft_view`.
+    pub fn draft_lines(&self, width: usize, height: usize) -> Vec<String> {
+        if height == 0 {
+            return Vec::new();
         }
-        let mut visible = left.into_iter().rev().collect::<String>();
-        visible.push('▏');
-        used += 1;
-        for grapheme in after.graphemes(true) {
-            if used + grapheme.width() > width {
-                break;
-            }
-            used += grapheme.width();
-            visible.push_str(grapheme);
+        let cursor = self.cursor();
+        let line = self.draft[..cursor]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        let first = (line + 1).saturating_sub(height);
+        self.draft
+            .split('\n')
+            .enumerate()
+            .skip(first)
+            .take(height)
+            .map(|(number, text)| {
+                let start = text.as_ptr() as usize - self.draft.as_ptr() as usize;
+                if number == line {
+                    caret_window(
+                        &self.draft[start..cursor],
+                        &self.draft[cursor..start + text.len()],
+                        width,
+                    )
+                } else {
+                    cut_cells(text, width)
+                }
+            })
+            .collect()
+    }
+
+    /// Moves the cursor to the previous draft line, keeping its cell column.
+    /// Returns false (nothing moved) on the first line, so Up can browse history.
+    pub fn line_up(&mut self) -> bool {
+        if self.replace_pending() {
+            return false;
         }
-        visible
+        let cursor = self.cursor();
+        let Some(newline) = self.draft[..cursor].rfind('\n') else {
+            return false;
+        };
+        let column = self.draft[newline + 1..cursor].width();
+        let start = self.draft[..newline]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        self.cursor = start + column_offset(&self.draft[start..newline], column);
+        true
+    }
+
+    /// Moves the cursor to the next draft line, keeping its cell column.
+    /// Returns false on the last line, so Down can browse history.
+    pub fn line_down(&mut self) -> bool {
+        if self.replace_pending() {
+            return false;
+        }
+        let cursor = self.cursor();
+        let Some(offset) = self.draft[cursor..].find('\n') else {
+            return false;
+        };
+        let start = self.draft[..cursor]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let column = self.draft[start..cursor].width();
+        let next = cursor + offset + 1;
+        let end = self.draft[next..]
+            .find('\n')
+            .map_or(self.draft.len(), |index| next + index);
+        self.cursor = next + column_offset(&self.draft[next..end], column);
+        true
     }
 
     pub fn begin(&mut self) -> Result<Vec<Message>, &'static str> {
@@ -2233,4 +2290,61 @@ impl App {
             session.apply(event.attempt, event.update);
         }
     }
+}
+
+/// Viewport of one line around a caret, in terminal cells: keeps the text
+/// before the caret up to its share of `width` and as much after as fits.
+fn caret_window(before: &str, after: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let right_budget = after.width().min(width / 3);
+    let left_budget = width.saturating_sub(1 + right_budget);
+    let mut used = 0;
+    let mut skip = before.len();
+    for (index, grapheme) in before.grapheme_indices(true).rev() {
+        if used + grapheme.width() > left_budget {
+            break;
+        }
+        used += grapheme.width();
+        skip = index;
+    }
+    let mut visible = String::with_capacity(width + 4);
+    visible.push_str(&before[skip..]);
+    visible.push('▏');
+    used += 1;
+    for grapheme in after.graphemes(true) {
+        if used + grapheme.width() > width {
+            break;
+        }
+        used += grapheme.width();
+        visible.push_str(grapheme);
+    }
+    visible
+}
+
+/// The leading part of `text` that fits in `width` cells.
+fn cut_cells(text: &str, width: usize) -> String {
+    let mut used = 0;
+    let mut end = 0;
+    for (index, grapheme) in text.grapheme_indices(true) {
+        if used + grapheme.width() > width {
+            break;
+        }
+        used += grapheme.width();
+        end = index + grapheme.len();
+    }
+    text[..end].to_string()
+}
+
+/// Byte offset in `line` of the first cluster boundary at or past `column` cells.
+fn column_offset(line: &str, column: usize) -> usize {
+    let mut used = 0;
+    for (index, grapheme) in line.grapheme_indices(true) {
+        if used >= column {
+            return index;
+        }
+        used += grapheme.width();
+    }
+    line.len()
 }

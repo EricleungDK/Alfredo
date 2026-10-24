@@ -7,7 +7,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap},
     Frame,
 };
@@ -33,6 +33,9 @@ const LABEL: usize = 9;
 const MAX_DEPTH: usize = 2;
 /// Cells of an automatic command shown in the transcript.
 const COMMAND_SUMMARY: usize = 160;
+
+/// Most text rows the prompt box shows for a multi-line draft (issue #398).
+const MAX_PROMPT_ROWS: usize = 6;
 
 fn safe(text: &str) -> String {
     dashboard::safe(text)
@@ -191,11 +194,19 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     let theme = app.pane.theme;
     let projection = side_pane::project(app, tasks, now);
     let autopilot = tasks.and_then(|tasks| tasks.autopilot.as_ref());
+    // The prompt box grows with a multi-line draft; the transcript gives up the rows.
+    let header_rows = 1 + u16::from(autopilot.is_some());
+    let prompt_text_rows = (app.sessions[app.selected].draft_line_count())
+        .min(MAX_PROMPT_ROWS)
+        .min(usize::from(
+            area.height.saturating_sub(header_rows + 3 + 2 + 2),
+        ))
+        .max(1);
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(u16::from(autopilot.is_some())),
         Constraint::Min(3),
-        Constraint::Length(3),
+        Constraint::Length(prompt_text_rows as u16 + 2),
         Constraint::Length(2),
     ])
     .split(area);
@@ -250,9 +261,20 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         Some((tasks, target)) => crate::agent_view::prompt_title(tasks, target),
         None => " Prompt · Enter send ".to_string(),
     };
-    let draft = session.draft_view(rows[3].width.saturating_sub(4) as usize);
+    let draft_width = rows[3].width.saturating_sub(4) as usize;
+    let draft = if session.draft_line_count() > 1 {
+        Text::from(
+            session
+                .draft_lines(draft_width, prompt_text_rows)
+                .iter()
+                .map(|line| Line::from(safe(line)))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        Text::from(safe(&session.draft_view(draft_width)))
+    };
     frame.render_widget(
-        Paragraph::new(safe(&draft))
+        Paragraph::new(draft)
             .style(if session.replace_pending() {
                 // Rejected text reads as selected: the next character replaces it.
                 Style::default().add_modifier(Modifier::REVERSED)
