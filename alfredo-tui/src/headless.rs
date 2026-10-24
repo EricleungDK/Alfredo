@@ -94,12 +94,13 @@ impl Progress {
             }
             let before = self.repairs.insert(id, outcome.repairs).unwrap_or(0);
             if outcome.repairs > before {
-                lines.push(format!("#{id} check failed → repair #{}", outcome.head));
+                let cause = outcome.repair_cause.map_or("check failed", |c| c.label());
+                lines.push(format!("#{id} {cause} → repair #{}", outcome.head));
             }
             match &outcome.result {
                 Some(Ok(())) if self.settled.insert(id) => lines.push(format!("#{id} accepted")),
                 Some(Err(reason)) if self.settled.insert(id) => {
-                    lines.push(format!("#{id} failed: {reason}"))
+                    lines.push(format!("#{id} failed: {}", failed_reason(outcome, reason)))
                 }
                 _ => {}
             }
@@ -115,6 +116,14 @@ impl Progress {
             }
         }
         lines
+    }
+}
+
+/// A stuck task's reason with its last failure line appended (the TUI's summary text).
+fn failed_reason(outcome: &TaskOutcome, reason: &str) -> String {
+    match &outcome.last_failure {
+        Some(failure) => format!("{reason}; last failure: {failure}"),
+        None => reason.to_owned(),
     }
 }
 
@@ -164,9 +173,16 @@ fn result_json(
     let mut failed: Vec<_> = outcomes
         .iter()
         .filter_map(|outcome| match &outcome.result {
-            Some(Err(reason)) => Some(serde_json::json!({
-                "id": outcome.id, "title": outcome.title, "reason": reason
-            })),
+            Some(Err(reason)) => {
+                let mut entry = serde_json::json!({
+                    "id": outcome.id, "title": outcome.title,
+                    "reason": failed_reason(outcome, reason)
+                });
+                if let Some(failure) = &outcome.last_failure {
+                    entry["last_failure"] = failure.clone().into();
+                }
+                Some(entry)
+            }
             _ => None,
         })
         .collect();
@@ -936,6 +952,8 @@ mod tests {
             status,
             repairs,
             result,
+            repair_cause: None,
+            last_failure: None,
         }
     }
 
@@ -963,6 +981,46 @@ mod tests {
             progress.lines(&status(RunState::Done, 2), &done),
             ["#1 accepted", "done 2/2 alfredo/go-ab12"]
         );
+    }
+
+    #[test]
+    fn repair_line_names_its_trigger_and_failed_task_carries_the_last_failure() {
+        use alfredo_tui::autopilot::RepairCause;
+        let mut progress = Progress::default();
+        let mut repaired = outcome(1, TaskStatus::Failed, 1, None);
+        repaired.repair_cause = Some(RepairCause::NoFilesChanged);
+        assert_eq!(
+            progress.lines(&status(RunState::Running, 0), &[repaired]),
+            ["plan drafted", "#1 no files changed → repair #3"]
+        );
+        let mut stuck = outcome(
+            2,
+            TaskStatus::Failed,
+            3,
+            Some(Err("failed; repair budget exhausted (3/3)".into())),
+        );
+        stuck.repair_cause = Some(RepairCause::CheckFailed);
+        stuck.last_failure = Some("Check failed (exit 1): AssertionError".into());
+        let lines = progress.lines(&status(RunState::Running, 0), &[stuck.clone()]);
+        assert_eq!(
+            lines,
+            [
+                "#2 check failed → repair #4",
+                "#2 failed: failed; repair budget exhausted (3/3); last failure: Check failed (exit 1): AssertionError"
+            ]
+        );
+        let json = result_json("m", &status(RunState::Failed, 0), &[stuck], "", false);
+        let entry = &json["failed"][0];
+        assert_eq!(
+            entry["last_failure"],
+            "Check failed (exit 1): AssertionError"
+        );
+        assert!(entry["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("failed; repair budget exhausted (3/3); last failure: Check failed"));
+        assert_eq!(entry["id"], 2);
+        assert_eq!(entry["title"], "t2");
     }
 
     #[test]

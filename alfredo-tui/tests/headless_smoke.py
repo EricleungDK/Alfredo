@@ -115,8 +115,12 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual((result['state'], result['accepted'], result['total']), ('failed', 0, 2))
         self.assertEqual([item['id'] for item in result['failed']], [1, 2])
         for item in result['failed']:
-            self.assertEqual(set(item), {'id', 'title', 'reason'})
             self.assertTrue(item['title'] and item['reason'])
+        first, blocked = result['failed']
+        self.assertEqual(set(first), {'id', 'title', 'reason', 'last_failure'})
+        self.assertEqual(first['last_failure'], 'Model returned no FILE blocks')
+        self.assertIn(first['last_failure'], first['reason'])
+        self.assertEqual(set(blocked), {'id', 'title', 'reason'})
         self.assertIn('failed 0/2', err)
 
     def test_unreachable_model_mid_run_is_not_repaired_and_the_reason_is_on_stderr(self):
@@ -145,7 +149,26 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertIsNone(result['branch'], 'nothing was integrated')
         self.assertEqual(self.fixture.markers(), ['PLAN', 'ECHO', 'ECHO'])
         self.assertIn('failed 0/1', err)
+        failure = result['failed'][0]['last_failure']
+        self.assertTrue(failure.startswith('No files changed:'), failure)
+        self.assertIn(failure, result['failed'][0]['reason'])
+        self.assertIn('#1 no files changed \u2192 repair #', err)
+        self.assertNotIn('check failed', err)
+        self.assertRegex(err, r'(?m)^#1 failed: .*last failure: No files changed:')
         self.assertEqual(self.git('branch', '--list', 'alfredo/*'), '')
+
+    def test_failing_check_repairs_say_check_failed_and_carry_the_check_tail(self):
+        self.fixture.bad_repairs = True
+        code, out, err = self.run_headless('--headless', '--max-repairs', '1')
+        self.assertEqual(code, 1, err)
+        first = self.result(out)['failed'][0]
+        self.assertEqual(first['id'], 1)
+        self.assertIn('Check failed (exit 1)', first['last_failure'])
+        self.assertNotIn('No files changed', first['last_failure'])
+        self.assertIn(first['last_failure'], first['reason'])
+        self.assertIn('#1 check failed \u2192 repair #', err)
+        self.assertNotIn('no files changed', err)
+        self.assertRegex(err, r'(?m)^#1 failed: .*last failure: .*Check failed')
 
     def hook(self, body):
         path = self.workspace.parent / 'hook.sh'
