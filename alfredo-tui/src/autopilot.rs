@@ -312,6 +312,39 @@ pub struct TaskOutcome {
     pub status: TaskStatus,
     pub repairs: u32,
     pub result: Option<Result<(), String>>,
+    /// What triggered the newest repair (`None` without one).
+    pub repair_cause: Option<RepairCause>,
+    /// First line of the head's recorded failure, as the TUI summary shows it;
+    /// set only for a stuck task whose head failed.
+    pub last_failure: Option<String>,
+}
+
+/// Why a repair was started: the failure its parent attempt recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepairCause {
+    CheckFailed,
+    NoFilesChanged,
+    Other,
+}
+
+impl RepairCause {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CheckFailed => "check failed",
+            Self::NoFilesChanged => "no files changed",
+            Self::Other => "worker failed",
+        }
+    }
+
+    fn of(detail: &str) -> Self {
+        if detail.starts_with(crate::worker::NO_FILES_CHANGED) {
+            Self::NoFilesChanged
+        } else if detail.starts_with("Check ") || detail.starts_with(crate::worker::NO_CHANGE) {
+            Self::CheckFailed
+        } else {
+            Self::Other
+        }
+    }
 }
 
 /// One command chosen by autopilot. The caller admits it exactly like typed input.
@@ -1265,7 +1298,21 @@ impl Autopilot {
             .into_iter()
             .map(|family| {
                 let root = snapshot.tasks.iter().find(|task| task.id == family.root);
+                let head = snapshot.tasks.iter().find(|task| task.id == family.head);
+                let repair_cause = head
+                    .filter(|_| family.repairs > 0)
+                    .and_then(|head| head.repair_of)
+                    .and_then(|parent| snapshot.tasks.iter().find(|task| task.id == parent))
+                    .map(|parent| RepairCause::of(&failure_detail(tasks, parent)));
+                let last_failure = head
+                    .filter(|head| {
+                        head.status == TaskStatus::Failed
+                            && matches!(&family.settled, Settled::Stuck(_))
+                    })
+                    .map(|head| last_failure_line(&failure_detail(tasks, head)));
                 TaskOutcome {
+                    repair_cause,
+                    last_failure,
                     id: family.root,
                     title: root.map(|task| task.title.clone()).unwrap_or_default(),
                     status: root.map_or(TaskStatus::Proposed, |task| task.status.clone()),
