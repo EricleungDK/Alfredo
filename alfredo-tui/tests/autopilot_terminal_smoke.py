@@ -41,6 +41,8 @@ class AutopilotServer:
         self.hold_calc = None
         # Issue #350: one task whose check passes on the baseline; every worker answer echoes calc.py unchanged.
         self.echo_worker = False
+        # Issue #283: server counts added to every final frame (empty: the server reports none).
+        self.usage = {}
         fixture = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -114,7 +116,7 @@ class AutopilotServer:
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/x-ndjson')
                     self.end_headers()
-                    self.wfile.write((json.dumps({'message': {'content': content}, 'done': True}) + '\n').encode())
+                    self.wfile.write((json.dumps({'message': {'content': content}, 'done': True, **fixture.usage}) + '\n').encode())
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
