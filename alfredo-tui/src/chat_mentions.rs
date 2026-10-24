@@ -74,6 +74,8 @@ pub struct Attachment {
     /// Appended to the user message sent to the model; empty when nothing attached.
     pub block: String,
     pub notices: Vec<String>,
+    /// Paths of the files whose content is in `block`, in prompt order.
+    pub files: Vec<String>,
 }
 
 /// Built from already-read files; split out so bounds are unit-testable.
@@ -102,6 +104,7 @@ pub fn assemble(
                 while !text.is_char_boundary(end) {
                     end -= 1;
                 }
+                out.files.push(candidate.path.clone());
                 files.push_str(&format!("\nFILE {}\n{}", candidate.path, &text[..end]));
                 if !text[..end].ends_with('\n') {
                     files.push('\n');

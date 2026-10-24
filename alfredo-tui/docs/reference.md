@@ -245,6 +245,12 @@ Approval gate, answered by a scripted policy instead of a card:
   Format characters (such as U+202E) show as `<U+XXXX>` on stderr, and line separators
   (U+2028, U+2029) become spaces.
 
+`@path` mentions in the prompt are attached exactly as in interactive chat (working-tree
+content of regular files inside the repository; symlinks, ignored untracked files and
+excluded names are refused; at most 8 files and 32 KiB per prompt). Each mention that is not
+attached gets one stderr line (`@path: not attached (reason)`), and the JSON result gains
+`"attached": ["a.txt"]` only when something was attached.
+
 There is no other policy and no interactive equivalent: interactive chat always asks
 (ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
 `--headless`. Each outcome is appended to `chat-approvals.jsonl` like an interactive
