@@ -499,7 +499,13 @@ fn allow_lists_every_rule_in_full_at_100_columns() {
         "cargo test --features {}",
         "very-long-feature-name-".repeat(6)
     );
-    rules.add_for(&shell(&long, false)).unwrap();
+    // Over 80 characters no card offers `a` any more (#409), but an older rule file can
+    // still hold such a rule, and `/allow` shows it in full.
+    fs::write(
+        state.join(allow::FILE),
+        json!([{"id": 1, "tool": "run_command", "command": long}]).to_string(),
+    )
+    .unwrap();
     rules.add_for(&plain("edit_file", CardKind::Edit)).unwrap();
     rules.add_for(&shell("echo onhost true", true)).unwrap();
     let listed = allow::slash(&rules, "").unwrap();
@@ -637,6 +643,153 @@ fn git_push_through_run_command_is_never_allowlistable() {
     assert!(rules.matching(&shell("git status", false)).is_some());
     let host = screen(shell("git push origin feat", true));
     assert!(host.contains("push: asked every time"), "{host}");
+    let _ = fs::remove_dir_all(state);
+}
+
+/// Issue #409: the `a` hint shows the whole command as the card's `$` lines do, or `a` is
+/// not offered; it never shows a cut or stripped command as what the rule matches.
+#[test]
+fn the_hint_shows_commands_of_80_characters_and_drops_a_at_81() {
+    let at_limit = format!("echo {}", "A".repeat(75));
+    assert_eq!(at_limit.chars().count(), 80);
+    for escalated in [false, true] {
+        let hint = allow::offer(&shell(&at_limit, escalated)).unwrap();
+        assert!(hint.contains(&format!("`{at_limit}`")), "{hint}");
+    }
+    let over = format!("{at_limit}B");
+    for escalated in [false, true] {
+        let card = shell(&over, escalated);
+        assert!(allow::offer(&card).is_none());
+        assert!(!allow::available(&card));
+        assert!(rules_for_test().add_for(&card).is_err());
+        let text = screen(card);
+        assert!(!text.contains("a always allow"), "{text}");
+        assert!(
+            text.contains("a not offered: too long to always-allow"),
+            "{text}"
+        );
+        assert!(
+            text.contains("y approve") && text.contains("n deny"),
+            "{text}"
+        );
+        assert!(!text.contains("exactly"), "{text}");
+    }
+}
+
+fn rules_for_test() -> Rules {
+    Rules::new(&dir("scratch"))
+}
+
+#[test]
+fn the_hint_shows_a_tab_as_an_arrow_and_a_newline_as_a_return_arrow() {
+    let tabbed = "echo AAAAAAAAAAAAAAAAAAAA ok;\techo SECOND; echo THIRD";
+    let hint = allow::offer(&shell(tabbed, true)).unwrap();
+    assert!(hint.contains("→"), "{hint}");
+    assert!(hint.contains("echo SECOND; echo THIRD"), "{hint}");
+    assert!(
+        hint.contains("`echo AAAAAAAAAAAAAAAAAAAA ok;→echo SECOND; echo THIRD`"),
+        "{hint}"
+    );
+    assert!(hint.ends_with(" exactly"), "{hint}");
+    // The issue's repro (over 80 shown) is no longer cut: `a` is not offered.
+    let long = format!("echo {} ok;\techo SECOND_PART; echo THIRD", "A".repeat(60));
+    assert!(allow::offer(&shell(&long, true)).is_none());
+    let multi = "printf 'a\tb\n'\tcat t.py";
+    let hint = allow::offer(&shell(multi, false)).unwrap();
+    assert!(hint.contains("'a→"), "{hint}");
+    assert!(!hint.contains('\n') && hint.contains("↵"), "{hint}");
+    assert!(hint.contains("cat t.py"), "{hint}");
+    let lines = allow::offer(&shell("echo one\necho two", false)).unwrap();
+    assert!(lines.contains("`echo one↵echo two`"), "{lines}");
+    // A literal return arrow cannot pass for a newline; other control bytes are not
+    // offered at all (the card's `$` lines would drop them).
+    assert!(allow::show_command("a↵b").contains("<U+21B5>"));
+    assert!(allow::offer(&shell("echo a\u{1b}[2Jb", false)).is_none());
+    assert!(allow::offer(&shell("echo a\rb", false)).is_none());
+}
+
+/// A run_command card with the preview built as `shell.rs` does (one `$ ` line per line).
+fn shell_with_preview(command: &str, escalated: bool) -> Card {
+    let mut card = shell(command, escalated);
+    card.preview = "cwd . · sandboxed · timeout 30s".to_string();
+    for line in command.lines() {
+        card.preview.push_str(&format!("\n$ {line}"));
+    }
+    card
+}
+
+#[test]
+fn the_card_s_dollar_lines_and_the_hint_show_the_same_command_text() {
+    // (command, the card's `$` lines, the command as the hint shows it)
+    let cases: [(&str, &[&str], &str); 4] = [
+        ("echo a\tb", &["$ echo a→   b"], "echo a→   b"),
+        ("echo → x", &["$ echo <U+2192> x"], "echo <U+2192> x"),
+        ("echo ↵ x", &["$ echo <U+21B5> x"], "echo <U+21B5> x"),
+        (
+            "echo one\necho two",
+            &["$ echo one", "$ echo two"],
+            "echo one↵echo two",
+        ),
+    ];
+    for (command, rows, hint) in cases {
+        for escalated in [false, true] {
+            let card = shell_with_preview(command, escalated);
+            let offer = allow::offer(&card).unwrap();
+            assert!(offer.contains(&format!("`{hint}`")), "{command:?}: {offer}");
+            assert_eq!(allow::show_command(command), hint);
+            let text = screen(card);
+            let mut from = 0;
+            for row in rows {
+                let at = text[from..]
+                    .find(row)
+                    .unwrap_or_else(|| panic!("{command:?}: {row:?} missing in {text}"));
+                from += at + row.len();
+            }
+        }
+    }
+}
+
+#[test]
+fn a_control_character_or_escape_lookalike_is_checked_before_trimming() {
+    for command in [
+        "ls\r", "\rls", "ls \u{b}", "\u{85}ls", "ls\u{85}", "ls\u{1b}",
+    ] {
+        assert!(
+            allow::offer(&shell(command, false)).is_none(),
+            "{command:?}"
+        );
+        assert!(allow::offer(&shell(command, true)).is_none(), "{command:?}");
+        assert!(rules_for_test().add_for(&shell(command, false)).is_err());
+    }
+    // Plain surrounding whitespace is still trimmed away.
+    assert!(allow::offer(&shell("  ls\n", false))
+        .unwrap()
+        .contains("`ls`"));
+    // Text that looks like an escape could pass for a different command.
+    for command in ["echo <U+21B5> x", "echo <U+2192>"] {
+        let card = shell(command, true);
+        assert!(allow::offer(&card).is_none(), "{command}");
+        assert!(allow::unavailable_reason(&card)
+            .unwrap()
+            .contains("looks like an escape"));
+    }
+}
+
+#[test]
+fn the_escalated_card_shows_the_whole_command_and_slash_allow_shows_it_the_same_way() {
+    let command = "make\tbuild;\necho done → ok";
+    let card = shell(command, true);
+    let text = screen(card.clone());
+    let shown = allow::show_command(command);
+    assert!(text.contains("on HOST (escalated rule)"), "{text}");
+    assert!(text.contains(&shown), "{text}");
+    let state = dir("same-view");
+    let rules = Rules::new(&state);
+    let rule = rules.add_for(&card).unwrap();
+    assert_eq!(rule.command.as_deref(), Some(command));
+    let described = allow::describe(&rule);
+    assert!(described.contains(&format!("`{shown}`")), "{described}");
+    assert!(allow::offer(&card).unwrap().contains(&format!("`{shown}`")));
     let _ = fs::remove_dir_all(state);
 }
 

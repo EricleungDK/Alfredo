@@ -127,18 +127,21 @@ pub fn rule_for(card: &Card) -> Result<Rule, String> {
         return Err(format!("{} can never be always-allowed", card.tool));
     }
     Ok(match card.kind {
-        CardKind::Shell { escalated } => Rule {
-            id: 0,
-            tool: card.tool.clone(),
-            command: Some(
-                command_of(card)
-                    .map(str::trim)
-                    .filter(|c| !c.is_empty())
-                    .ok_or("run_command has no command")?
-                    .to_string(),
-            ),
-            escalated,
-        },
+        CardKind::Shell { escalated } => {
+            let raw = command_of(card).ok_or("run_command has no command")?;
+            // Checked before trimming: `ls\r` must not pass as `ls`.
+            hint_command(raw)?;
+            let command = Some(raw.trim())
+                .filter(|c| !c.is_empty())
+                .ok_or("run_command has no command")?
+                .to_string();
+            Rule {
+                id: 0,
+                tool: card.tool.clone(),
+                command: Some(command),
+                escalated,
+            }
+        }
         _ => Rule {
             id: 0,
             tool: card.tool.clone(),
@@ -146,6 +149,81 @@ pub fn rule_for(card: &Card) -> Result<Rule, String> {
             escalated: false,
         },
     })
+}
+
+/// Most characters of a command, as shown, that the `a` hint carries (issue #409); a longer
+/// command is not offered.
+pub const HINT_COMMAND_MAX: usize = 80;
+
+/// One `$ ` line of a `run_command` card as drawn: invisible characters as `<U+XXXX>`, a
+/// literal `↵` as `<U+21B5>`, a tab as `→` plus padding (stops counted from the start of
+/// the line, `$ ` included) and a literal `→` as `<U+2192>`. The card and
+/// [`show_command`] both use it, so they cannot drift (issue #409).
+pub fn show_line(line: &str) -> String {
+    let visible = crate::dashboard::safe_visible(line).replace('\u{21B5}', "<U+21B5>");
+    crate::dashboard::show_tabs(&visible)
+}
+
+/// A command as its card's `$` lines show it, the lines joined by `↵`: each line goes
+/// through [`show_line`] after its `$ ` prefix. Control characters other than tab and
+/// newline, which the card would drop, show as `<U+XXXX>` here, so `/allow` deletes
+/// nothing; such a command is never offered ([`hint_command`]). The hint and `/allow`
+/// share this (issue #409).
+pub fn show_command(command: &str) -> String {
+    command
+        .split('\n')
+        .map(|line| {
+            let spelled: String = line
+                .chars()
+                .map(|c| {
+                    if c.is_control() && c != '\t' {
+                        format!("<U+{:04X}>", c as u32)
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect();
+            show_line(&format!("$ {spelled}"))["$ ".len()..].to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("↵")
+}
+
+/// The command as the hint shows it, or why the hint cannot show all of it: control
+/// characters other than tab and newline (the card would drop them) and text that looks
+/// like one of the `<U+XXXX>` escapes are refused, and so is a command that shows as more
+/// than [`HINT_COMMAND_MAX`] characters.
+fn hint_command(command: &str) -> Result<String, String> {
+    if command
+        .chars()
+        .any(|c| c.is_control() && c != '\t' && c != '\n')
+    {
+        return Err("has control characters it cannot show".into());
+    }
+    if command.contains("<U+") {
+        return Err("contains text that looks like an escape".into());
+    }
+    let shown = show_command(command.trim());
+    if shown.chars().count() > HINT_COMMAND_MAX {
+        return Err(format!(
+            "too long to always-allow (over {HINT_COMMAND_MAX} characters as shown)"
+        ));
+    }
+    Ok(shown)
+}
+
+/// Why `a` is not offered on `card` although the tool can be always-allowed (a command
+/// the hint cannot show in full), for the card's key line.
+pub fn unavailable_reason(card: &Card) -> Option<String> {
+    if !offered(card) {
+        return None;
+    }
+    rule_for(card).err()
+}
+
+/// Whether `a` is available on `card`: the rule can be added and the hint shows it in full.
+pub fn available(card: &Card) -> bool {
+    offer(card).is_some()
 }
 
 /// One line naming what a rule covers, in full (the view wraps it; issue #320).
@@ -160,7 +238,7 @@ pub fn describe(rule: &Rule) -> String {
             "#{} {} `{}`{}{}",
             rule.id,
             clean(&rule.tool),
-            clean(command),
+            show_command(command),
             if exact(rule) {
                 " (exactly)"
             } else {
@@ -188,11 +266,7 @@ pub fn offer(card: &Card) -> Option<String> {
             } else {
                 ""
             },
-            command
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(80)
-                .collect::<String>(),
+            hint_command(command).ok()?,
             if exact(&rule) {
                 " exactly"
             } else {

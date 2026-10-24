@@ -1149,7 +1149,7 @@ impl Session {
         let decision = match key {
             'y' => Decision::Approve,
             'n' => Decision::Deny,
-            'a' if crate::chat_tools::allow::offered(self.pending_approval()?) => {
+            'a' if crate::chat_tools::allow::available(self.pending_approval()?) => {
                 Decision::AlwaysAllow
             }
             _ => return None,

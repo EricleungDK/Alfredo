@@ -240,7 +240,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         }
         _ if session
             .pending_approval()
-            .is_some_and(crate::chat_tools::allow::offered) =>
+            .is_some_and(crate::chat_tools::allow::available) =>
         {
             " Approval pending · y approve · a always · n deny · Esc cancels the turn ".to_string()
         }
@@ -1767,6 +1767,9 @@ fn approval_card_lines(
             let shown = safe_visible(line);
             let shown = if line.starts_with(['+', '-']) {
                 dashboard::show_tabs(&shown)
+            } else if line.starts_with("$ ") {
+                // A run_command line is drawn as `a` shows it (issue #409).
+                crate::chat_tools::allow::show_line(line)
             } else {
                 dashboard::expand_tabs(&shown)
             };
@@ -1816,7 +1819,13 @@ fn approval_card_lines(
                 "  y approve · {} · n deny · Esc cancels the turn (deny)",
                 safe_visible(&offer)
             ),
-            None => "  y approve · n deny · Esc cancels the turn (deny)".into(),
+            None => match crate::chat_tools::allow::unavailable_reason(card) {
+                Some(why) => format!(
+                    "  y approve · n deny · Esc cancels the turn (deny) · a not offered: {}",
+                    safe_visible(&why)
+                ),
+                None => "  y approve · n deny · Esc cancels the turn (deny)".into(),
+            },
         },
         warn,
     ));
