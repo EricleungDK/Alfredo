@@ -79,10 +79,12 @@ class HeadlessSmoke(unittest.TestCase):
         code, out, err = self.run_headless('--headless')
         self.assertEqual(code, 0, err)
         result = self.result(out)
-        self.assertEqual(set(result), {'model', 'state', 'goal', 'branch', 'accepted', 'total', 'repairs', 'failed'})
+        self.assertEqual(set(result), {'model', 'state', 'goal', 'branch', 'accepted', 'total', 'repairs', 'failed', 'usage'})
         self.assertEqual((result['state'], result['goal'], result['accepted'], result['total'],
                           result['repairs'], result['failed']), ('done', GOAL, 2, 2, 1, []))
         self.assertRegex(result['branch'], r'^alfredo/go-')
+        # The fake server reports no counts: every field is null, the object stays.
+        self.assertEqual(result['usage'], {'prompt_tokens': None, 'completion_tokens': None, 'model_seconds': None})
         lines = err.splitlines()
         for expected in ['plan drafted', '#1 approved', '#1 check failed → repair #3', '#2 approved',
                          f"done 2/2 {result['branch']}"]:
@@ -91,6 +93,13 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual(self.git('show', f"{result['branch']}:calc.py"), 'def answer():\n    return 42')
         self.assertEqual(self.git('rev-parse', 'HEAD'), head)
         self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_usage_sums_planner_worker_and_repair_counts_from_the_server(self):
+        self.fixture.usage = {'prompt_eval_count': 50, 'eval_count': 3, 'total_duration': 2_000_000_000}
+        code, out, err = self.run_headless('--headless')
+        self.assertEqual(code, 0, err)
+        # Four model calls (plan, calc, repair, app) of 50 in / 3 out / 2 s each.
+        self.assertEqual(self.result(out)['usage'], {'prompt_tokens': 200, 'completion_tokens': 12, 'model_seconds': 8.0})
 
     def test_goal_completes_on_a_repository_whose_tree_listing_exceeds_the_git_output_bound(self):
         # 4000 tracked files make `git ls-tree -r -l -z` about 436 KB, past the 256 KiB bound.
