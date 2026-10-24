@@ -905,7 +905,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | --- | --- |
 | Enter | Send current prompt (or fill draft when command picker is open) |
 | F1 | Open command picker when draft is empty (`/help` opens it too) |
-| Tab after `/prefix` | Open matching slash commands |
+| Tab after `/prefix` | Fill the selected matching slash command |
 | Up / Down in conversation | Browse prompt history and restore unsent draft |
 | First printable key or paste after a rejected command | Replaces the rejected text (shown reversed); Left, Right, Home, End, Backspace, Delete, Ctrl+W and the first Up keep it for editing; Up again, or Up from an emptied prompt, browses history where it is the newest entry |
 | Up / Down in task detail | Select a visible task or group |

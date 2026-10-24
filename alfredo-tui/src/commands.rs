@@ -228,8 +228,8 @@ impl Completion {
     }
     /// Rank of `name` for the typed text: 0 exact, 1 prefix, 2 substring, None otherwise.
     fn rank(name: &str, query: &str) -> Option<u8> {
-        let name = name.trim_start_matches(['/', '@']).to_lowercase();
-        let query = query.trim_start_matches(['/', '@']).to_lowercase();
+        let one = |text: &str| text.strip_prefix(['/', '@']).unwrap_or(text).to_lowercase();
+        let (name, query) = (one(name), one(query));
         if name == query {
             Some(0)
         } else if name.starts_with(&query) {

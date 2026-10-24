@@ -79,7 +79,15 @@ fn slash_typeahead_lists_prefix_then_substring_matches_with_usage() {
     // An exact name leads, so Enter on a fully typed `/model` still submits it.
     let exact = Completion::typeahead("/model").unwrap();
     assert!(exact.selected_is("/model") && exact.choices.len() > 1);
-    for draft in ["", "hello", "@way", "/path/in chat", "/zzzz-none"] {
+    for draft in [
+        "",
+        "hello",
+        "@way",
+        "/path/in chat",
+        "/zzzz-none",
+        "//tmp",
+        "/@x",
+    ] {
         assert!(Completion::typeahead(draft).is_none(), "{draft}");
     }
 }
@@ -115,7 +123,6 @@ fn live_typeahead_renders_matches_and_usage_hints() {
         .collect();
     assert!(text.contains("/plan-save"), "{text}");
     assert!(text.contains("Enter/Tab fills draft"), "{text}");
-    app.completion.as_mut().unwrap().set_query("x".into());
 }
 
 #[test]

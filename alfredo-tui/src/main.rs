@@ -1107,6 +1107,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 completion.next(true);
                                 continue;
                             }
+                            // A modified Enter (newline) closes the list and acts normally.
+                            KeyCode::Enter if !key.modifiers.is_empty() => {
+                                work.app.completion = None;
+                            }
                             // A fully typed command name submits as before.
                             KeyCode::Enter
                                 if completion.live
