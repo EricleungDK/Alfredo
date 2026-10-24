@@ -213,7 +213,7 @@ without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, 
 sandbox, Ollama unreachable, model not installed; these print `Error: …` on stderr and
 nothing on stdout, checked before planning with the `--doctor` model checks). A failed
 task that ends with its repair budget spent (or a failed worker) adds `last_failure`, the same bounded one-line
-summary the TUI shows (for example `No files changed: …` or `Check failed (exit 1): …`), and `reason`
+summary the TUI shows (for example `No files changed: …` or `Check failed (exit 1): stderr: AssertionError`; a failed check ends with its key error line), and `reason`
 and the `#1 failed: …` stderr line end with `; last failure: <that line>`. A failed
 run ends with `failed 0/0: <reason>` on stderr as well as in the JSON. When autopilot
 pauses itself (a command it could not record, such as `Command history capacity
