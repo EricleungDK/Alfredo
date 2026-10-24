@@ -199,14 +199,18 @@ wrote is never confirmed for you: `/go` asks you to review it first.
 `alfredo-tui --go GOAL --headless` runs the same autopilot without a terminal (stdin
 and stdout may be pipes), for CI, cron or another tool. It opens the repository's
 default mission like the automatic TUI start. Each autopilot state change prints one
-line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`,
+line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`; a repair
+names its trigger: `check failed`, `no files changed` or `worker failed`;
 `done 2/2 alfredo/go-ab12`). On exit stdout carries exactly one JSON object:
-`{model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]}` with
+`{model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}]}` with
 `state` one of `done`, `partial`, `failed` or `paused`. Exit codes: 0 every task
 accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
 without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, no
 sandbox, Ollama unreachable, model not installed; these print `Error: …` on stderr and
 nothing on stdout, checked before planning with the `--doctor` model checks). A failed
+task that ends with its repair budget spent (or a failed worker) adds `last_failure`, the same bounded one-line
+summary the TUI shows (for example `No files changed: …` or `Check failed (exit 1): …`), and `reason`
+and the `#1 failed: …` stderr line end with `; last failure: <that line>`. A failed
 run ends with `failed 0/0: <reason>` on stderr as well as in the JSON. When autopilot
 pauses itself (a command it could not record, such as `Command history capacity
 reached; start another conversation`, or a refusal it cannot get past), the reason is
