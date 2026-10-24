@@ -4,7 +4,11 @@ use alfredo_tui::{
     model::{App, Message, Status, TaskReceiptRef},
     ui,
 };
-use ratatui::{backend::TestBackend, Terminal};
+use ratatui::{
+    backend::TestBackend,
+    style::{Color, Modifier},
+    Terminal,
+};
 use sha2::{Digest, Sha256};
 
 fn body(index: usize) -> String {
@@ -126,6 +130,199 @@ const GOLDEN: [&str; 21] = [
 fn transcript_output_matches_the_uncached_renderer() {
     let hashes = scenario();
     assert_eq!(hashes, GOLDEN);
+}
+
+fn chat(messages: &[(&str, &str)]) -> App {
+    let mut app = App::new("m".into());
+    for (role, content) in messages {
+        app.sessions[0].messages.push(Message {
+            role: (*role).into(),
+            content: (*content).into(),
+        });
+    }
+    app
+}
+
+fn draw_buffer(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| ui::draw(f, app)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn rows(buffer: &ratatui::buffer::Buffer) -> Vec<Vec<String>> {
+    let area = buffer.area;
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buffer[(x, y)].symbol().to_owned())
+                .collect()
+        })
+        .collect()
+}
+
+fn row_text(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+    rows(buffer).into_iter().map(|r| r.concat()).collect()
+}
+
+/// The cell of the first symbol of `needle` in the first row containing `needle`.
+fn cell_of<'a>(buffer: &'a ratatui::buffer::Buffer, needle: &str) -> &'a ratatui::buffer::Cell {
+    let first = needle.chars().next().unwrap().to_string();
+    for (y, row) in rows(buffer).iter().enumerate() {
+        if row.concat().contains(needle) {
+            let mut x = 0;
+            while x < row.len() {
+                if row[x..].concat().starts_with(needle) && row[x] == first {
+                    return &buffer[(x as u16, y as u16)];
+                }
+                x += 1;
+            }
+        }
+    }
+    panic!("{needle:?} not drawn in {:#?}", row_text(buffer));
+}
+
+const BODY: &str = "assistant";
+
+#[test]
+fn fenced_code_is_styled_markers_dimmed_and_lines_cut_not_wrapped() {
+    let long = "Z".repeat(120);
+    let app = chat(&[
+        ("user", "show code"),
+        (
+            BODY,
+            &format!("intro\n```rust\nlet x = 1;\n{long}\n```\nafter"),
+        ),
+    ]);
+    let buffer = draw_buffer(&app, 40, 30);
+    assert_ne!(cell_of(&buffer, "let x").fg, cell_of(&buffer, "intro").fg);
+    assert_eq!(cell_of(&buffer, "```rust").fg, Color::DarkGray);
+    let per_row: Vec<usize> = row_text(&buffer)
+        .iter()
+        .map(|r| r.matches('Z').count())
+        .collect();
+    assert_eq!(
+        per_row.iter().filter(|n| **n > 0).count(),
+        1,
+        "one row, not wrapped: {per_row:?}"
+    );
+    assert!(per_row.iter().all(|n| *n < 40));
+    assert!(row_text(&buffer).iter().any(|r| r.contains("after")));
+}
+
+#[test]
+fn headings_bold_inline_code_and_bullets_are_styled() {
+    let app = chat(&[
+        ("user", "x"),
+        (
+            BODY,
+            "# Title\nsome **strong** and `code` words\n- first\n* second\n1. third",
+        ),
+    ]);
+    let buffer = draw_buffer(&app, 60, 30);
+    let text = row_text(&buffer).join("\n");
+    assert!(cell_of(&buffer, "Title").modifier.contains(Modifier::BOLD));
+    assert!(cell_of(&buffer, "strong").modifier.contains(Modifier::BOLD));
+    assert!(!cell_of(&buffer, "some").modifier.contains(Modifier::BOLD));
+    assert!(!text.contains("**"), "balanced bold markers are consumed");
+    assert_ne!(
+        cell_of(&buffer, "code words").fg,
+        cell_of(&buffer, "some").fg
+    );
+    for marker in ["- first", "* second", "1. third"] {
+        let cell = cell_of(&buffer, marker);
+        assert_ne!(
+            cell.fg,
+            cell_of(&buffer, "some").fg,
+            "{marker} marker styled"
+        );
+    }
+}
+
+#[test]
+fn unbalanced_or_unknown_markup_stays_plain() {
+    let app = chat(&[
+        ("user", "x"),
+        (
+            BODY,
+            "a **never closed\nb `open tick\n#nospace\nc * lone * star\nd ***",
+        ),
+    ]);
+    let buffer = draw_buffer(&app, 60, 30);
+    let text = row_text(&buffer).join("\n");
+    for raw in [
+        "**never closed",
+        "`open tick",
+        "#nospace",
+        "* lone * star",
+        "d ***",
+    ] {
+        assert!(text.contains(raw), "{raw:?} kept verbatim in {text}");
+    }
+    assert!(!cell_of(&buffer, "never").modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn unterminated_fence_renders_as_an_open_block() {
+    let mut app = chat(&[("user", "x"), (BODY, "text\n```py\nprint(1)")]);
+    let buffer = draw_buffer(&app, 50, 30);
+    assert_ne!(cell_of(&buffer, "print").fg, cell_of(&buffer, "text").fg);
+    // Streaming more of the block keeps it styled and closing it ends the block.
+    app.sessions[0].messages[1]
+        .content
+        .push_str("\n```\nback to prose");
+    let buffer = draw_buffer(&app, 50, 30);
+    assert_ne!(cell_of(&buffer, "print").fg, cell_of(&buffer, "text").fg);
+    assert_eq!(cell_of(&buffer, "back").fg, cell_of(&buffer, "text").fg);
+}
+
+#[test]
+fn model_text_never_reaches_the_buffer_raw() {
+    let evil = "\x1b[31mred\u{202E}evil\x07";
+    let app = chat(&[
+        ("user", "x"),
+        (
+            BODY,
+            &format!("```\ncode {evil}\n```\nthen **bold {evil}** end `tick {evil}`"),
+        ),
+    ]);
+    let buffer = draw_buffer(&app, 80, 30);
+    for row in rows(&buffer) {
+        for symbol in row {
+            assert!(
+                !symbol.chars().any(|c| c.is_control() || c == '\u{202E}'),
+                "raw symbol {symbol:?} in the buffer"
+            );
+        }
+    }
+    let text = row_text(&buffer).join("\n");
+    assert!(text.contains("[31mred"), "ESC dropped, text kept");
+    assert!(
+        text.contains("red<U+202E>evil"),
+        "override shown, not drawn"
+    );
+}
+
+#[test]
+fn user_messages_stay_verbatim() {
+    let app = chat(&[("user", "# h **b** `c`\n- item"), (BODY, "ok")]);
+    let buffer = draw_buffer(&app, 60, 30);
+    let text = row_text(&buffer).join("\n");
+    assert!(
+        text.contains("# h **b** `c`") && text.contains("- item"),
+        "{text}"
+    );
+    assert!(!cell_of(&buffer, "**b**").modifier.contains(Modifier::BOLD));
+    assert_eq!(cell_of(&buffer, "# h").fg, cell_of(&buffer, "- item").fg);
+}
+
+#[test]
+fn an_unchanged_markdown_message_is_not_reparsed() {
+    let app = chat(&[("user", "x"), (BODY, "# T\n```\ncode\n```\n**b**")]);
+    draw_buffer(&app, 60, 30);
+    let first = app.sessions[0].transcript_cache_stats();
+    assert_eq!(first.builds, 2);
+    draw_buffer(&app, 60, 30);
+    assert_eq!(app.sessions[0].transcript_cache_stats(), first);
 }
 
 #[test]
