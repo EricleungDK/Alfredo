@@ -159,8 +159,7 @@ fn counted(reply: Reply, prompt: u64, eval: u64, total_ns: u64) -> Reply {
     let Reply::Stream(mut frames, delay) = reply else {
         unreachable!("scripted replies are streams")
     };
-    let last: Value = serde_json::from_slice(frames.last().unwrap()).unwrap();
-    let mut last = last;
+    let mut last: Value = serde_json::from_slice(frames.last().unwrap()).unwrap();
     last["prompt_eval_count"] = prompt.into();
     last["eval_count"] = eval.into();
     last["total_duration"] = total_ns.into();
