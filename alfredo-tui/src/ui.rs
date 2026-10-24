@@ -240,7 +240,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         }
         _ if session
             .pending_approval()
-            .is_some_and(crate::chat_tools::allow::offered) =>
+            .is_some_and(crate::chat_tools::allow::available) =>
         {
             " Approval pending · y approve · a always · n deny · Esc cancels the turn ".to_string()
         }
@@ -1816,7 +1816,13 @@ fn approval_card_lines(
                 "  y approve · {} · n deny · Esc cancels the turn (deny)",
                 safe_visible(&offer)
             ),
-            None => "  y approve · n deny · Esc cancels the turn (deny)".into(),
+            None => match crate::chat_tools::allow::unavailable_reason(card) {
+                Some(why) => format!(
+                    "  y approve · n deny · Esc cancels the turn (deny) · a not offered: {}",
+                    safe_visible(&why)
+                ),
+                None => "  y approve · n deny · Esc cancels the turn (deny)".into(),
+            },
         },
         warn,
     ));

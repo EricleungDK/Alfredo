@@ -127,18 +127,20 @@ pub fn rule_for(card: &Card) -> Result<Rule, String> {
         return Err(format!("{} can never be always-allowed", card.tool));
     }
     Ok(match card.kind {
-        CardKind::Shell { escalated } => Rule {
-            id: 0,
-            tool: card.tool.clone(),
-            command: Some(
-                command_of(card)
-                    .map(str::trim)
-                    .filter(|c| !c.is_empty())
-                    .ok_or("run_command has no command")?
-                    .to_string(),
-            ),
-            escalated,
-        },
+        CardKind::Shell { escalated } => {
+            let command = command_of(card)
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .ok_or("run_command has no command")?
+                .to_string();
+            hint_command(&command)?;
+            Rule {
+                id: 0,
+                tool: card.tool.clone(),
+                command: Some(command),
+                escalated,
+            }
+        }
         _ => Rule {
             id: 0,
             tool: card.tool.clone(),
@@ -146,6 +148,56 @@ pub fn rule_for(card: &Card) -> Result<Rule, String> {
             escalated: false,
         },
     })
+}
+
+/// Most cells of a command the `a` hint shows (issue #409); a longer command is not offered.
+pub const HINT_COMMAND_MAX: usize = 80;
+
+/// A command as the card shows its `$` lines: invisible characters as `<U+XXXX>`, a tab
+/// as `→` plus padding, a newline as `↵` (a literal `↵` as `<U+21B5>`, so it cannot pass
+/// for a line break). Nothing is deleted: any other control character shows as
+/// `<U+XXXX>` too. The hint and `/allow` share this, so they cannot drift (issue #409).
+pub fn show_command(command: &str) -> String {
+    let spelled: String = command
+        .chars()
+        .map(|c| match c {
+            '\n' | '\t' => c.to_string(),
+            '\u{21B5}' => "<U+21B5>".to_string(),
+            c if c.is_control() => format!("<U+{:04X}>", c as u32),
+            c => c.to_string(),
+        })
+        .collect();
+    crate::dashboard::show_tabs(&crate::dashboard::safe_visible(&spelled)).replace('\n', "↵")
+}
+
+/// The command as the hint shows it, or why the hint cannot show all of it. The card's
+/// `$` lines drop control characters other than tab and newline, so a command holding
+/// one is not shown faithfully either.
+fn hint_command(command: &str) -> Result<String, String> {
+    if command.chars().any(|c| c.is_control() && c != '\t' && c != '\n') {
+        return Err("has control characters it cannot show".into());
+    }
+    let shown = show_command(command);
+    if shown.chars().count() > HINT_COMMAND_MAX {
+        return Err(format!(
+            "too long to always-allow (over {HINT_COMMAND_MAX} characters as shown)"
+        ));
+    }
+    Ok(shown)
+}
+
+/// Why `a` is not offered on `card` although the tool can be always-allowed (a command
+/// the hint cannot show in full), for the card's key line.
+pub fn unavailable_reason(card: &Card) -> Option<String> {
+    if !offered(card) {
+        return None;
+    }
+    rule_for(card).err()
+}
+
+/// Whether `a` is available on `card`: the rule can be added and the hint shows it in full.
+pub fn available(card: &Card) -> bool {
+    offer(card).is_some()
 }
 
 /// One line naming what a rule covers, in full (the view wraps it; issue #320).
@@ -160,7 +212,7 @@ pub fn describe(rule: &Rule) -> String {
             "#{} {} `{}`{}{}",
             rule.id,
             clean(&rule.tool),
-            clean(command),
+            show_command(command),
             if exact(rule) {
                 " (exactly)"
             } else {
@@ -188,11 +240,7 @@ pub fn offer(card: &Card) -> Option<String> {
             } else {
                 ""
             },
-            command
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(80)
-                .collect::<String>(),
+            hint_command(command).ok()?,
             if exact(&rule) {
                 " exactly"
             } else {

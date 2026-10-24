@@ -1855,6 +1855,12 @@ rule `a` would add.
   a host rule never matches extra arguments.
   `a` on a red HOST card reads `a always allow on HOST (escalated rule) …` and adds a host
   rule.
+- **The hint shows the whole command (issue #409).** For `run_command` the key line shows
+  the command exactly as the card's `$` lines do (a tab as `→` plus padding, a newline as
+  `↵`, a literal `↵` or `→` as `<U+21B5>`/`<U+2192>`), and `/allow` shows a rule's command
+  the same way. Nothing is cut or removed. A command that shows as more than 80 characters,
+  or holds a control character the card cannot show, is not offered: `a` does nothing and
+  the key line reads `… a not offered: too long to always-allow …`; answer `y` or `n`.
 - **Still checked.** A rule only replaces the keypress: refusals before asking still
   refuse, and the fingerprint (file content, repository state, cwd) is still checked at
   apply. The outcome goes to `chat-approvals.jsonl` with `"rule": ID`; F4 shows
