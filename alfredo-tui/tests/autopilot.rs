@@ -3390,6 +3390,53 @@ fn failed_summary_names_the_last_failure_reason_and_a_next_step() {
     );
 }
 
+/// Run one failing check with a budget of one repair and return the report.
+fn failed_check_report(check_command: Value) -> String {
+    let fixture = Fixture::new();
+    let server = Server::new(move |request, _| {
+        if planner(request) {
+            return json!({"tasks": [{"title": "Make answer return 42", "acceptance": ["answer() is 42"],
+                "model": "fixture", "dependencies": [], "policy": {"files": ["calc.py"],
+                "check": check_command.clone()}}]})
+            .to_string();
+        }
+        bad_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failed", finished);
+    autopilot.report().unwrap().to_string()
+}
+
+#[test]
+fn last_failure_of_a_traceback_check_names_the_assertion_error() {
+    let report = failed_check_report(check("from calc import answer; assert answer() == 42"));
+    let line = report
+        .lines()
+        .find(|line| line.contains("Last failure:"))
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(line.contains("Check failed (exit 1)"), "{line}");
+    assert!(line.ends_with("AssertionError"), "{line}");
+}
+
+#[test]
+fn last_failure_of_a_pytest_style_check_shows_the_failed_line() {
+    let report = failed_check_report(check(
+        "import sys; print('FAILED tests/x.py::t - assert 1 == 2', file=sys.stderr); \
+         print('1 failed in 0.1s', file=sys.stderr); sys.exit(1)",
+    ));
+    let line = report
+        .lines()
+        .find(|line| line.contains("Last failure:"))
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(
+        line.ends_with("FAILED tests/x.py::t - assert 1 == 2"),
+        "{line}"
+    );
+}
+
 #[test]
 fn planner_prose_is_reported_in_plain_words_without_serde_detail() {
     let fixture = Fixture::new();
