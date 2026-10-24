@@ -711,7 +711,7 @@ fn the_hint_shows_a_tab_as_an_arrow_and_a_newline_as_a_return_arrow() {
 /// A run_command card with the preview built as `shell.rs` does (one `$ ` line per line).
 fn shell_with_preview(command: &str, escalated: bool) -> Card {
     let mut card = shell(command, escalated);
-    card.preview = format!("cwd . · sandboxed · timeout 30s");
+    card.preview = "cwd . · sandboxed · timeout 30s".to_string();
     for line in command.lines() {
         card.preview.push_str(&format!("\n$ {line}"));
     }
