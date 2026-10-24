@@ -840,6 +840,7 @@ class TerminalSmoke(unittest.TestCase):
             self.assertTrue(captured_scope['confirmed'])
             self.assertEqual(captured_scope['brief']['scope'], 'Fixture repository only')
             wait_for(b' thinking')
+            wait_for(b'Esc stop')  # Issue #399: the footer names the key while the slow request is in flight.
             self.assertNotIn('PRIVATE_THINKING_SENTINEL', visible_screen(output))
             wait_for('thinking · 1.'.encode())  # Clock advances while no model output arrives.
             os.write(master, b'/workspace\r')
@@ -865,6 +866,8 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'LIMIT_PARTIAL')
             os.write(master, b'\t\x1b')  # Return to slow session and cancel.
             wait_for(b'cancelled')
+            wait_for(b'Ctrl+R retries')
+            self.assertNotIn('Esc stop', visible_screen(output))
             # Intent publication failure must prevent canonical task dispatch.
             intent_path = next(Path(state.name).glob('rust-tasks-v1/*/conversations-*.json'))
             intent_bytes = intent_path.read_bytes()

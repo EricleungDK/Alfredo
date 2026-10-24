@@ -314,6 +314,17 @@ pub enum Footer {
     ChatExpanded,
 }
 
+/// Where the chat turn stands; the chat footers name the key that applies (issue #399).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Turn {
+    /// No turn is running and none needs a retry.
+    Idle,
+    /// A reply is thinking, streaming or running a tool: Esc stops it.
+    Running,
+    /// The last turn was cancelled or failed: Ctrl+R retries it.
+    Interrupted,
+}
+
 /// Footer hints for the right pane: task detail or chat.
 pub fn footer_hints(dashboard: bool, width: usize) -> String {
     footer(
@@ -322,13 +333,14 @@ pub fn footer_hints(dashboard: bool, width: usize) -> String {
         } else {
             Footer::Chat
         },
+        Turn::Idle,
         width,
     )
 }
 
 /// One line, at most eight hints separated by two spaces, relevant to the
 /// focused area; lower-priority hints drop first when narrow.
-pub fn footer(context: Footer, width: usize) -> String {
+pub fn footer(context: Footer, turn: Turn, width: usize) -> String {
     let hints: &[(&str, u8)] = match context {
         Footer::Pane => &[
             ("↑↓ move", 1),
@@ -367,6 +379,15 @@ pub fn footer(context: Footer, width: usize) -> String {
             ("^Q quit", 0),
         ],
         Footer::Chat | Footer::ChatExpanded => &[
+            // Priority 0 keeps the turn hint at every width, like help and quit.
+            (
+                match turn {
+                    Turn::Running => "Esc stop",
+                    Turn::Interrupted => "Ctrl+R retries",
+                    Turn::Idle => "",
+                },
+                0,
+            ),
             ("Enter send", 1),
             ("F6 pane", 1),
             ("F2 tasks", 1),
@@ -388,7 +409,7 @@ pub fn footer(context: Footer, width: usize) -> String {
     loop {
         let chosen: Vec<&str> = hints
             .iter()
-            .filter(|(_, priority)| *priority <= level)
+            .filter(|(hint, priority)| *priority <= level && !hint.is_empty())
             .map(|(hint, _)| *hint)
             .collect();
         // Keep the quit/help pair at the end so the line always closes on a whole hint.

@@ -855,7 +855,7 @@ impl Session {
 
     pub fn begin(&mut self) -> Result<Vec<Message>, &'static str> {
         if self.status.active() {
-            return Err("Cancel or wait for the current reply");
+            return Err("Esc stops the reply, or wait for it");
         }
         let prompt = self.draft.trim().to_string();
         if prompt.is_empty() {
