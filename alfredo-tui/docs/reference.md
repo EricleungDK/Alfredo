@@ -231,9 +231,9 @@ passing run does not overwrite the conversation's saved model. The run prints
 `model NAME` on stderr and reports `"model": "NAME"` in the JSON. Without the flag the
 restored conversation's model applies, as in the terminal.
 
-### Headless chat (`--chat PROMPT --headless`)
+### Headless chat (`--chat PROMPT|- --headless`)
 
-`alfredo-tui --chat PROMPT --headless [--approve workspace-edits]` runs one Chat Agent
+`alfredo-tui --chat PROMPT|- --headless [--approve workspace-edits]` runs one Chat Agent
 turn (issue #240) without a terminal, on the repository's default mission, with the same
 system context and tool loop as chat. Read tools run. Mutating calls go through the
 Approval gate, answered by a scripted policy instead of a card:
@@ -250,6 +250,12 @@ content of regular files inside the repository; symlinks, ignored untracked file
 excluded names are refused; at most 8 files and 32 KiB per prompt). Each mention that is not
 attached gets one stderr line (`@path: not attached (reason)`), and the JSON result gains
 `"attached": ["a.txt"]` only when something was attached.
+
+`PROMPT` may be `-`, which reads the prompt from stdin to EOF (issue #323). The prompt is
+UTF-8, capped at 256 KiB and used as given, so surrounding whitespace is not trimmed away.
+Empty or whitespace-only stdin, stdin past the cap, and a missing prompt (`--chat` last, or
+followed by a known flag such as `--headless`) are usage errors: exit 2, the reason on
+stderr, nothing on stdout.
 
 There is no other policy and no interactive equivalent: interactive chat always asks
 (ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
