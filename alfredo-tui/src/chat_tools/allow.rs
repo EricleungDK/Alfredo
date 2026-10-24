@@ -14,7 +14,8 @@
 //! - Rules ignore the call's `cwd`.
 //! - Command prefixes match whole whitespace-separated words. A command holding a
 //!   shell operator ([`METACHARS`]) matches only a rule that is exactly that command.
-//! - A malformed file is read as no rules (fail closed).
+//! - An unreadable (malformed or oversized) file is an error naming the path; it matches
+//!   nothing (fail closed) and is never overwritten. A missing or empty file is no rules.
 //!
 //! Matching only replaces the owner's keypress: the card is still previewed (refusals
 //! still refuse), the fingerprint is still checked at apply, and the outcome is logged
