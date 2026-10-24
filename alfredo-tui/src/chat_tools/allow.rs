@@ -128,12 +128,13 @@ pub fn rule_for(card: &Card) -> Result<Rule, String> {
     }
     Ok(match card.kind {
         CardKind::Shell { escalated } => {
-            let command = command_of(card)
-                .map(str::trim)
+            let raw = command_of(card).ok_or("run_command has no command")?;
+            // Checked before trimming: `ls\r` must not pass as `ls`.
+            hint_command(raw)?;
+            let command = Some(raw.trim())
                 .filter(|c| !c.is_empty())
                 .ok_or("run_command has no command")?
                 .to_string();
-            hint_command(&command)?;
             Rule {
                 id: 0,
                 tool: card.tool.clone(),
@@ -150,29 +151,48 @@ pub fn rule_for(card: &Card) -> Result<Rule, String> {
     })
 }
 
-/// Most cells of a command the `a` hint shows (issue #409); a longer command is not offered.
+/// Most characters of a command, as shown, that the `a` hint carries (issue #409); a longer
+/// command is not offered.
 pub const HINT_COMMAND_MAX: usize = 80;
 
-/// A command as the card shows its `$` lines: invisible characters as `<U+XXXX>`, a tab
-/// as `→` plus padding, a newline as `↵` (a literal `↵` as `<U+21B5>`, so it cannot pass
-/// for a line break). Nothing is deleted: any other control character shows as
-/// `<U+XXXX>` too. The hint and `/allow` share this, so they cannot drift (issue #409).
-pub fn show_command(command: &str) -> String {
-    let spelled: String = command
-        .chars()
-        .map(|c| match c {
-            '\n' | '\t' => c.to_string(),
-            '\u{21B5}' => "<U+21B5>".to_string(),
-            c if c.is_control() => format!("<U+{:04X}>", c as u32),
-            c => c.to_string(),
-        })
-        .collect();
-    crate::dashboard::show_tabs(&crate::dashboard::safe_visible(&spelled)).replace('\n', "↵")
+/// One `$ ` line of a `run_command` card as drawn: invisible characters as `<U+XXXX>`, a
+/// literal `↵` as `<U+21B5>`, a tab as `→` plus padding (stops counted from the start of
+/// the line, `$ ` included) and a literal `→` as `<U+2192>`. The card and
+/// [`show_command`] both use it, so they cannot drift (issue #409).
+pub fn show_line(line: &str) -> String {
+    let visible = crate::dashboard::safe_visible(line).replace('\u{21B5}', "<U+21B5>");
+    crate::dashboard::show_tabs(&visible)
 }
 
-/// The command as the hint shows it, or why the hint cannot show all of it. The card's
-/// `$` lines drop control characters other than tab and newline, so a command holding
-/// one is not shown faithfully either.
+/// A command as its card's `$` lines show it, the lines joined by `↵`: each line goes
+/// through [`show_line`] after its `$ ` prefix. Control characters other than tab and
+/// newline, which the card would drop, show as `<U+XXXX>` here, so `/allow` deletes
+/// nothing; such a command is never offered ([`hint_command`]). The hint and `/allow`
+/// share this (issue #409).
+pub fn show_command(command: &str) -> String {
+    command
+        .split('\n')
+        .map(|line| {
+            let spelled: String = line
+                .chars()
+                .map(|c| {
+                    if c.is_control() && c != '\t' {
+                        format!("<U+{:04X}>", c as u32)
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect();
+            show_line(&format!("$ {spelled}"))["$ ".len()..].to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("↵")
+}
+
+/// The command as the hint shows it, or why the hint cannot show all of it: control
+/// characters other than tab and newline (the card would drop them) and text that looks
+/// like one of the `<U+XXXX>` escapes are refused, and so is a command that shows as more
+/// than [`HINT_COMMAND_MAX`] characters.
 fn hint_command(command: &str) -> Result<String, String> {
     if command
         .chars()
@@ -180,7 +200,10 @@ fn hint_command(command: &str) -> Result<String, String> {
     {
         return Err("has control characters it cannot show".into());
     }
-    let shown = show_command(command);
+    if command.contains("<U+") {
+        return Err("contains text that looks like an escape".into());
+    }
+    let shown = show_command(command.trim());
     if shown.chars().count() > HINT_COMMAND_MAX {
         return Err(format!(
             "too long to always-allow (over {HINT_COMMAND_MAX} characters as shown)"

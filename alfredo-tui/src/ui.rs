@@ -1767,6 +1767,9 @@ fn approval_card_lines(
             let shown = safe_visible(line);
             let shown = if line.starts_with(['+', '-']) {
                 dashboard::show_tabs(&shown)
+            } else if line.starts_with("$ ") {
+                // A run_command line is drawn as `a` shows it (issue #409).
+                crate::chat_tools::allow::show_line(line)
             } else {
                 dashboard::expand_tabs(&shown)
             };

@@ -686,7 +686,10 @@ fn the_hint_shows_a_tab_as_an_arrow_and_a_newline_as_a_return_arrow() {
     let hint = allow::offer(&shell(tabbed, true)).unwrap();
     assert!(hint.contains("→"), "{hint}");
     assert!(hint.contains("echo SECOND; echo THIRD"), "{hint}");
-    assert!(hint.contains(&allow::show_command(tabbed)), "{hint}");
+    assert!(
+        hint.contains("`echo AAAAAAAAAAAAAAAAAAAA ok;→echo SECOND; echo THIRD`"),
+        "{hint}"
+    );
     assert!(hint.ends_with(" exactly"), "{hint}");
     // The issue's repro (over 80 shown) is no longer cut: `a` is not offered.
     let long = format!("echo {} ok;\techo SECOND_PART; echo THIRD", "A".repeat(60));
@@ -703,6 +706,73 @@ fn the_hint_shows_a_tab_as_an_arrow_and_a_newline_as_a_return_arrow() {
     assert!(allow::show_command("a↵b").contains("<U+21B5>"));
     assert!(allow::offer(&shell("echo a\u{1b}[2Jb", false)).is_none());
     assert!(allow::offer(&shell("echo a\rb", false)).is_none());
+}
+
+/// A run_command card with the preview built as `shell.rs` does (one `$ ` line per line).
+fn shell_with_preview(command: &str, escalated: bool) -> Card {
+    let mut card = shell(command, escalated);
+    card.preview = format!("cwd . · sandboxed · timeout 30s");
+    for line in command.lines() {
+        card.preview.push_str(&format!("\n$ {line}"));
+    }
+    card
+}
+
+#[test]
+fn the_card_s_dollar_lines_and_the_hint_show_the_same_command_text() {
+    // (command, the card's `$` lines, the command as the hint shows it)
+    let cases: [(&str, &[&str], &str); 4] = [
+        ("echo a\tb", &["$ echo a→   b"], "echo a→   b"),
+        ("echo → x", &["$ echo <U+2192> x"], "echo <U+2192> x"),
+        ("echo ↵ x", &["$ echo <U+21B5> x"], "echo <U+21B5> x"),
+        (
+            "echo one\necho two",
+            &["$ echo one", "$ echo two"],
+            "echo one↵echo two",
+        ),
+    ];
+    for (command, rows, hint) in cases {
+        for escalated in [false, true] {
+            let card = shell_with_preview(command, escalated);
+            let offer = allow::offer(&card).unwrap();
+            assert!(offer.contains(&format!("`{hint}`")), "{command:?}: {offer}");
+            assert_eq!(allow::show_command(command), hint);
+            let text = screen(card);
+            let mut from = 0;
+            for row in rows {
+                let at = text[from..]
+                    .find(row)
+                    .unwrap_or_else(|| panic!("{command:?}: {row:?} missing in {text}"));
+                from += at + row.len();
+            }
+        }
+    }
+}
+
+#[test]
+fn a_control_character_or_escape_lookalike_is_checked_before_trimming() {
+    for command in [
+        "ls\r", "\rls", "ls \u{b}", "\u{85}ls", "ls\u{85}", "ls\u{1b}",
+    ] {
+        assert!(
+            allow::offer(&shell(command, false)).is_none(),
+            "{command:?}"
+        );
+        assert!(allow::offer(&shell(command, true)).is_none(), "{command:?}");
+        assert!(rules_for_test().add_for(&shell(command, false)).is_err());
+    }
+    // Plain surrounding whitespace is still trimmed away.
+    assert!(allow::offer(&shell("  ls\n", false))
+        .unwrap()
+        .contains("`ls`"));
+    // Text that looks like an escape could pass for a different command.
+    for command in ["echo <U+21B5> x", "echo <U+2192>"] {
+        let card = shell(command, true);
+        assert!(allow::offer(&card).is_none(), "{command}");
+        assert!(allow::unavailable_reason(&card)
+            .unwrap()
+            .contains("looks like an escape"));
+    }
 }
 
 #[test]
