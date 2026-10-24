@@ -2319,20 +2319,66 @@ fn held_or_done(family: &Family, tasks: &TaskControl) -> bool {
 
 const BUDGET_EXHAUSTED: &str = "repair budget exhausted";
 
-/// One line of a recorded failure for the summary: its first non-empty line,
-/// shortened on a character boundary.
+/// One line of a recorded failure for the summary, shortened on a character
+/// boundary. A failed check keeps its `Check failed (exit N): stderr:` head and
+/// ends with the output's key error line (as `worker::failing_lines` picks it,
+/// else the last output line); the head is cut first so the error stays visible.
 fn last_failure_line(detail: &str) -> String {
-    let line = detail
+    const LIMIT: usize = 160;
+    const KEY_LIMIT: usize = 120;
+    let first = detail
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or("no detail recorded");
-    let line = clean(line, 400);
-    if line.chars().count() > 160 {
-        let cut: String = line.chars().take(159).collect();
+    let first = clean(first, 1780);
+    if let Some((head, key)) = check_head_and_key(&first) {
+        let key = shorten(&clean(&key, 400), KEY_LIMIT);
+        let room = LIMIT.saturating_sub(key.chars().count() + 1);
+        return format!("{} {key}", shorten(head.trim_end(), room));
+    }
+    shorten(&first, LIMIT)
+}
+
+/// Split a `Check ...: <label>: a | b | c` summary into its head and the most
+/// specific output line.
+fn check_head_and_key(summary: &str) -> Option<(&str, String)> {
+    let check = summary.find("Check ")?;
+    let end = [": stderr: ", ": stdout: ", " · stderr: ", " · stdout: "]
+        .iter()
+        .filter_map(|label| {
+            summary[check..]
+                .find(label)
+                .map(|at| (at, check + at + label.len()))
+        })
+        .min()?
+        .1;
+    let (head, body) = summary.split_at(end);
+    let output = body
+        .trim_start_matches('…')
+        .split(" | ")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let picked = crate::worker::failing_lines(&output);
+    let last = |text: &str, skip_note: bool| {
+        text.lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| {
+                !(line.is_empty() || skip_note && line.ends_with("more failing lines omitted)"))
+            })
+            .map(str::to_string)
+    };
+    let key = last(&picked, true).or_else(|| last(&output, false))?;
+    Some((head, key))
+}
+
+fn shorten(line: &str, limit: usize) -> String {
+    if line.chars().count() > limit {
+        let cut: String = line.chars().take(limit.saturating_sub(1)).collect();
         format!("{cut}…")
     } else {
-        line
+        line.to_string()
     }
 }
 
