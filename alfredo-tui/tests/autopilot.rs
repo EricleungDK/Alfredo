@@ -3437,6 +3437,46 @@ fn last_failure_of_a_pytest_style_check_shows_the_failed_line() {
     );
 }
 
+fn last_failure_text(report: &str) -> String {
+    let line = report
+        .lines()
+        .find(|line| line.contains("Last failure:"))
+        .unwrap_or_else(|| panic!("{report}"));
+    line.split_once("Last failure:")
+        .unwrap()
+        .1
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn last_failure_keeps_the_no_change_prefix_and_is_bounded() {
+    let report = failed_check_report(check(
+        "import sys; sys.stderr.write('AssertionError: ' + 'x' * 400 + '\\n'); sys.exit(1)",
+    ));
+    let line = last_failure_text(&report);
+    assert!(
+        line.starts_with("No change from previous attempt"),
+        "{line}"
+    );
+    assert!(line.chars().count() <= 160, "{line}");
+    assert!(
+        line.contains("… AssertionError: xxx"),
+        "head cut first: {line}"
+    );
+    assert!(line.ends_with('…'), "{line}");
+}
+
+#[test]
+fn last_failure_without_an_error_line_ends_with_the_last_output_line() {
+    let report = failed_check_report(check(
+        "import sys; print('starting'); print('boom'); sys.exit(1)",
+    ));
+    let line = last_failure_text(&report);
+    assert!(line.contains("Check failed (exit 1)"), "{line}");
+    assert!(line.ends_with("boom"), "{line}");
+}
+
 #[test]
 fn planner_prose_is_reported_in_plain_words_without_serde_detail() {
     let fixture = Fixture::new();
