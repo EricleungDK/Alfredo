@@ -119,6 +119,15 @@ impl Usage {
         self.completion_tokens = sum(self.completion_tokens, other.completion_tokens);
         self.model_ns = sum(self.model_ns, other.model_ns);
     }
+    /// The headless result object: server counts and `model_seconds` (the sum of the
+    /// server's `total_duration`, in seconds); `null` for whatever it never reported.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "model_seconds": self.model_ns.map(|ns| ns as f64 / 1e9),
+        })
+    }
     /// `tokens 12.3k in / 1.1k out · model 38 s`; absent when the server gave no token counts.
     pub fn line(&self) -> Option<String> {
         if self.prompt_tokens.is_none() && self.completion_tokens.is_none() {

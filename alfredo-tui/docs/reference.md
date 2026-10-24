@@ -202,8 +202,12 @@ default mission like the automatic TUI start. Each autopilot state change prints
 line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`; a repair
 names its trigger: `check failed`, `no files changed` or `worker failed`;
 `done 2/2 alfredo/go-ab12`). On exit stdout carries exactly one JSON object:
-`{model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}]}` with
-`state` one of `done`, `partial`, `failed` or `paused`. Exit codes: 0 every task
+`{model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage}` with
+`state` one of `done`, `partial`, `failed` or `paused`. `usage` is
+`{prompt_tokens, completion_tokens, model_seconds}`, the same totals as the `/go` summary line:
+planner, worker and repair calls summed from the server's `prompt_eval_count`, `eval_count`
+and `total_duration` (`model_seconds` is that duration in seconds, not client wall-clock time).
+A field the server never reported is `null`; the object is always present. Exit codes: 0 every task
 accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
 without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, no
 sandbox, Ollama unreachable, model not installed; these print `Error: …` on stderr and
@@ -258,7 +262,8 @@ decision. Stderr gets one line per approval and one per tool call (`tool NAME PA
 a call that did not succeed adds the reason: `(error: parent directory of a/b does not exist)`);
 stdout one JSON object
 `{state, stopped, policy, reply, tools, steps, calls:[{tool,path,error,result,detail}], approvals:[{tool,target,outcome,reason}],
-error}`. `state` is `done`, `stopped` or `failed`; `result` is `ok`, `denied`, `malformed` or `error`;
+error, usage}`, where `usage` is the same `{prompt_tokens, completion_tokens, model_seconds}` summed over every
+round of the turn (`null` fields when the server reported none). `state` is `done`, `stopped` or `failed`; `result` is `ok`, `denied`, `malformed` or `error`;
 `detail` is the tool's error text (at most 200 bytes, control characters removed; `null` when
 `error` is false). A turn cut off by the tool step cap (8 rounds by default, `--max-turns`) or by the conversation size
 limit is `state` `stopped` with `stopped` `step_limit` or `output_limit` (`null` otherwise) and

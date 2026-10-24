@@ -605,6 +605,13 @@ impl Autopilot {
     pub fn notice(&self) -> &str {
         &self.notice
     }
+    /// Server-reported usage of this run (see `run_usage`); empty before a plan is saved.
+    pub fn usage(&self, tasks: &TaskControl) -> crate::metrics::Usage {
+        match (self.saved.as_ref(), tasks.snapshot.as_ref()) {
+            (Some(saved), Some(snapshot)) => run_usage(tasks, snapshot, saved),
+            _ => crate::metrics::Usage::default(),
+        }
+    }
     pub fn report(&self) -> Option<&str> {
         self.saved.as_ref()?.report.as_deref()
     }

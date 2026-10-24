@@ -341,11 +341,9 @@ pub fn run(options: Options) -> Result<i32, String> {
             if status.state == RunState::Failed {
                 say(finished_line(status.state, &status, &reason));
             }
-            let _ = writeln!(
-                std::io::stdout(),
-                "{}",
-                result_json(&model, &status, &outcomes, &reason, fatal.is_some())
-            );
+            let mut result = result_json(&model, &status, &outcomes, &reason, fatal.is_some());
+            result["usage"] = work.autopilot.usage(&work.tasks).json();
+            let _ = writeln!(std::io::stdout(), "{result}");
             let _ = std::io::stdout().flush();
             // The JSON is out; now let a started hook finish (or be killed) and report.
             let grace = alfredo_tui::on_finish::TIMEOUT + Duration::from_secs(5);
@@ -634,6 +632,8 @@ struct Turn {
     no_tools: bool,
     /// Round cap the turn ran under (`--max-turns`); None is the default.
     cap: Option<usize>,
+    /// Server counts summed over the turn's rounds (issue #283).
+    usage: alfredo_tui::metrics::Usage,
 }
 
 impl Turn {
@@ -667,6 +667,11 @@ impl Turn {
             }
             Update::Done => self.done = true,
             Update::Failed(reason) => self.failure = Some(reason),
+            Update::Metrics(metrics) => {
+                if let Some(usage) = alfredo_tui::metrics::Usage::from_metrics(&metrics) {
+                    self.usage.add(&usage);
+                }
+            }
             _ => {}
         }
     }
@@ -746,6 +751,7 @@ impl Turn {
             })).collect::<Vec<_>>(),
             "approvals": approvals,
             "error": error,
+            "usage": self.usage.json(),
         })
     }
 }
@@ -1240,6 +1246,30 @@ mod tests {
         assert_eq!(
             Turn::default().json("m", Policy::Deny, &[])["state"],
             "failed"
+        );
+    }
+
+    #[test]
+    fn chat_usage_sums_rounds_and_stays_null_without_counts() {
+        use alfredo_tui::metrics::Metrics;
+        let round = |prompt, eval, ns| {
+            Update::Metrics(Metrics {
+                prompt_eval_count: prompt,
+                eval_count: eval,
+                total_duration: ns,
+                ..Metrics::default()
+            })
+        };
+        let mut turn = Turn::default();
+        turn.update(round(Some(50), Some(3), Some(1_500_000_000)));
+        turn.update(round(Some(70), Some(5), None));
+        assert_eq!(
+            turn.json("m", Policy::Deny, &[])["usage"],
+            serde_json::json!({"prompt_tokens": 120, "completion_tokens": 8, "model_seconds": 1.5})
+        );
+        assert_eq!(
+            Turn::default().json("m", Policy::Deny, &[])["usage"],
+            serde_json::json!({"prompt_tokens": null, "completion_tokens": null, "model_seconds": null})
         );
     }
 
