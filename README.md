@@ -161,7 +161,7 @@ Chat can also act: it reads and searches the repository, and with your approval 
 needs a `y / n / a` card (`a` adds an always-allow rule; `/allow` lists and removes them). For
 large work it calls `propose_plan`, which only prefills `/plan` or `/go` for you to confirm.
 Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
-[the reference](alfredo-tui/docs/reference.md#chat-tools-read-only).
+[the reference](alfredo-tui/docs/reference.md#chat-always-allow-rules).
 
 ## Keys
 
@@ -189,7 +189,7 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | Ctrl+N | New conversation (max 8); `/clear` restarts the current one, `/compact` summarises its older turns |
 | Esc | Cancel the current model request (keeps partial reply); close pickers. You can then send a new prompt or switch `/model`. Esc (or Ctrl+Q, which also quits) stops a running chat `run_command`; `/stop` does too |
 | Ctrl+R | Retry a failed or cancelled turn, until you send a new prompt |
-| y / n / a (approval card) | Approve / deny / always allow (`a`, see `/allow`; not offered for `git_push`) a chat tool call: file edit, shell command, git write or push; Esc denies and ends the turn |
+| y / n / a (approval card) | Approve / deny / always allow (`a`, see `/allow`; not offered for pushes, over-long commands, or writes that create directories) a chat tool call: file edit, shell command, git write or push; Esc denies and ends the turn |
 | Ctrl+A / Ctrl+E | Move to the start / end of the prompt |
 | Ctrl+Left / Ctrl+Right (Alt+B / Alt+F) | Move one word left / right |
 | Ctrl+K | Delete from the cursor to the end of the prompt |
