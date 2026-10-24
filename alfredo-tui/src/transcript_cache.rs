@@ -45,11 +45,11 @@ fn is_fence(line: &str) -> bool {
     trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
-/// `**` may open bold: exactly two asterisks, at the start of the text or after
-/// whitespace or an opening bracket/quote, and followed by a non-space character. So
-/// `src/**/*.rs`, `2 ** 3`, `f(**kw` after a comma and `***x***` stay as typed.
+/// `**` may open bold: exactly two asterisks, followed by a non-space character, at the
+/// start of the text or after whitespace, a non-ASCII character or one of ``([{"'>:,;-|``.
+/// So `src/**/*.rs`, `2**3`, `2 ** 3` and `***x***` stay as typed, while `这是**重点**` is bold.
 fn opens_bold(before: Option<char>, after: &str) -> bool {
-    before.is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '[' | '{' | '"' | '\''))
+    before.is_none_or(|c| c.is_whitespace() || !c.is_ascii() || "([{\"'>:,;-|".contains(c))
         && after
             .chars()
             .next()
@@ -57,16 +57,13 @@ fn opens_bold(before: Option<char>, after: &str) -> bool {
 }
 
 /// Byte offset of the `**` that closes bold in `body`: exactly two asterisks, not
-/// preceded by whitespace, and followed by the end, whitespace or punctuation.
+/// preceded by whitespace.
 fn bold_close(body: &str) -> Option<usize> {
     let mut from = 0;
     while let Some(i) = body[from..].find("**").map(|i| i + from) {
         let before = body[..i].chars().next_back();
         let after = body[i + 2..].chars().next();
-        if i > 0
-            && before.is_some_and(|c| !c.is_whitespace() && c != '*')
-            && after.is_none_or(|c| !c.is_alphanumeric() && c != '*')
-        {
+        if i > 0 && before.is_some_and(|c| !c.is_whitespace() && c != '*') && after != Some('*') {
             return Some(i);
         }
         // Skip the whole asterisk run so `***` never pairs on its tail.

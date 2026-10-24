@@ -258,7 +258,7 @@ fn asterisks_that_are_not_bold_render_verbatim() {
         "Use 2 ** 3 and 4 ** 5 in python, and def f(**kw, **o).",
         "a lone ** here and a trailing **",
         "***both***",
-        "x**y**z",
+        "2**3 and 4**5",
     ];
     for line in lines {
         let app = chat(&[("user", "x"), (BODY, line)]);
@@ -275,11 +275,32 @@ fn flanked_bold_still_consumes_its_markers() {
         ("**Note:** careful", "Note:", "Note: careful"),
         ("see **a `b` c** end", "a ", "see a `b` c end"),
         ("(**x**)", "x", "(x)"),
+        (
+            "**\u{4e2d}\u{6587}**\u{7684}",
+            "\u{4e2d}",
+            "\u{4e2d}\u{6587}\u{7684}",
+        ),
+        (
+            "\u{8fd9}\u{662f}**\u{91cd}\u{70b9}**",
+            "\u{91cd}",
+            "\u{8fd9}\u{662f}\u{91cd}\u{70b9}",
+        ),
+        ("**bold**text", "bold", "boldtext"),
+        ("**Note**: x", "Note", "Note: x"),
+        ("**bold**. y", "bold", "bold. y"),
+        ("**foo**'s y", "foo", "foo's y"),
+        ("- **Item**: text", "Item", "- Item: text"),
+        ("**1.** one", "1.", "1. one"),
     ] {
         let app = chat(&[("user", "x"), (BODY, line)]);
         let buffer = draw_buffer(&app, 60, 12);
         let text = row_text(&buffer).join("\n");
-        assert!(text.contains(shown), "{shown:?} in {text}");
+        // Wide characters leave a skipped cell in the TestBackend buffer.
+        let squash = |t: &str| t.replace(' ', "");
+        assert!(
+            squash(&text).contains(&squash(shown)),
+            "{shown:?} in {text}"
+        );
         assert!(!text.contains("**"), "{text}");
         assert!(cell_of(&buffer, bold).modifier.contains(Modifier::BOLD));
     }
