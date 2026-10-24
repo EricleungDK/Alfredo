@@ -45,8 +45,39 @@ fn is_fence(line: &str) -> bool {
     trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
-/// Left-to-right inline scan: `**bold**` and `` `code` `` lose their markers and get a
-/// style; a marker with no closing partner stays as typed.
+/// `**` may open bold: exactly two asterisks, at the start of the text or after
+/// whitespace or an opening bracket/quote, and followed by a non-space character. So
+/// `src/**/*.rs`, `2 ** 3`, `f(**kw` after a comma and `***x***` stay as typed.
+fn opens_bold(before: Option<char>, after: &str) -> bool {
+    before.is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '[' | '{' | '"' | '\''))
+        && after
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_whitespace() && c != '*')
+}
+
+/// Byte offset of the `**` that closes bold in `body`: exactly two asterisks, not
+/// preceded by whitespace, and followed by the end, whitespace or punctuation.
+fn bold_close(body: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(i) = body[from..].find("**").map(|i| i + from) {
+        let before = body[..i].chars().next_back();
+        let after = body[i + 2..].chars().next();
+        if i > 0
+            && before.is_some_and(|c| !c.is_whitespace() && c != '*')
+            && after.is_none_or(|c| !c.is_alphanumeric() && c != '*')
+        {
+            return Some(i);
+        }
+        // Skip the whole asterisk run so `***` never pairs on its tail.
+        from = i + body[i..].bytes().take_while(|b| *b == b'*').count();
+    }
+    None
+}
+
+/// Left-to-right inline scan: `**bold**` (flanked, see `opens_bold`/`bold_close`) and
+/// `` `code` `` lose their markers and get a style; a marker with no valid closing
+/// partner stays as typed.
 fn inline(text: &str, base: Style, spans: &mut Vec<Span<'static>>) {
     let mut plain = String::new();
     let mut rest = text;
@@ -56,19 +87,29 @@ fn inline(text: &str, base: Style, spans: &mut Vec<Span<'static>>) {
         }
     };
     while let Some(c) = rest.chars().next() {
-        let marker = if rest.starts_with("**") {
-            Some(("**", base.patch(bold_style())))
+        if rest.starts_with("**") {
+            let body = &rest[2..];
+            let before = text[..text.len() - rest.len()].chars().next_back();
+            if before != Some('*') && opens_bold(before, body) {
+                if let Some(end) = bold_close(body) {
+                    flush(&mut plain, spans);
+                    spans.push(Span::styled(
+                        body[..end].to_owned(),
+                        base.patch(bold_style()),
+                    ));
+                    rest = &body[end + 2..];
+                    continue;
+                }
+            }
         } else if c == '`' {
-            Some(("`", base.patch(code_style())))
-        } else {
-            None
-        };
-        if let Some((mark, style)) = marker {
-            let body = &rest[mark.len()..];
-            if let Some(end) = body.find(mark).filter(|end| *end > 0) {
+            let body = &rest[1..];
+            if let Some(end) = body.find('`').filter(|end| *end > 0) {
                 flush(&mut plain, spans);
-                spans.push(Span::styled(body[..end].to_owned(), style));
-                rest = &body[end + mark.len()..];
+                spans.push(Span::styled(
+                    body[..end].to_owned(),
+                    base.patch(code_style()),
+                ));
+                rest = &body[end + 1..];
                 continue;
             }
         }
@@ -132,31 +173,44 @@ fn markdown(text: &str) -> (Vec<Line<'static>>, Vec<bool>) {
     (lines, cut)
 }
 
-/// `line` limited to `width` columns (code rows are cut, not wrapped).
+/// `line` limited to `width` columns (code rows are cut, not wrapped). A row that is
+/// cut ends in `…` in its last column; a row that fits is returned unchanged.
 pub fn cut_line(line: &Line<'static>, width: u16) -> Line<'static> {
-    let mut left = usize::from(width);
+    if line.width() <= usize::from(width) {
+        return line.clone();
+    }
     let mut out = Line {
         style: line.style,
         ..Line::default()
     };
-    for span in &line.spans {
+    if width == 0 {
+        return out;
+    }
+    // Reserve the last column for the marker.
+    let mut left = usize::from(width) - 1;
+    let mut last_style = Style::default();
+    'spans: for span in &line.spans {
         let mut kept = String::new();
         for c in span.content.chars() {
             let w = c.width().unwrap_or(0);
             if w > left {
-                left = 0;
-                break;
+                if !kept.is_empty() {
+                    out.spans.push(Span::styled(kept, span.style));
+                }
+                last_style = span.style;
+                break 'spans;
             }
             left -= w;
             kept.push(c);
         }
+        last_style = span.style;
         if !kept.is_empty() {
             out.spans.push(Span::styled(kept, span.style));
         }
-        if left == 0 {
-            break;
-        }
     }
+    // A wide character that did not fit leaves a gap: pad so `…` is in the last column.
+    let marker = format!("{}\u{2026}", " ".repeat(left));
+    out.spans.push(Span::styled(marker, last_style));
     out
 }
 

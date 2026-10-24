@@ -351,10 +351,15 @@ authority, legacy context comparisons and the remaining qualification boundary.
 
 The transcript styles an assistant reply once per change of its text (cached with its
 heights, never per frame): fenced code blocks (``` or ~~~) in cyan with the fence lines
-dimmed and each code row cut at the pane width, not wrapped; `#`..`######` headings in
+dimmed and each code row cut at the pane width, not wrapped (a cut row ends in a
+visible `…` in its last column; rows that fit are unchanged); `#`..`######` headings in
 bold; `**bold**` and `` `inline code` `` without their markers; `-`, `*` and `1.` bullet
-markers coloured. An unclosed fence, `**` or backtick stays plain text (an open fence
-shows as an open code block while the reply streams). Your own messages are shown as typed.
+markers coloured. `**` opens bold only when it is exactly two asterisks at the start of
+the text or after whitespace or an opening bracket or quote, and the next character is
+not whitespace; it closes only when the previous character is not whitespace and the
+next is the end, whitespace or punctuation. So `src/**/*.rs`, `2 ** 3`, `f(**kw, **o)`
+and `***both***` show every asterisk. An unclosed fence, `**` or backtick stays plain
+text (an open fence shows as an open code block while the reply streams). Your own messages are shown as typed.
 Control characters are dropped as before and bidi controls in a reply show as `<U+XXXX>`.
 
 ## Establish scope in conversation
