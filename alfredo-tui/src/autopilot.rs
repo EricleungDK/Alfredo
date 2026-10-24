@@ -460,7 +460,12 @@ pub struct Autopilot {
     on_finish: Option<PathBuf>,
     /// Failure notices of running hooks, polled by `take_finished_notice`.
     hook_results: Vec<std::sync::mpsc::Receiver<String>>,
+    /// `outcomes` failure text per family root, keyed by what it was derived from
+    /// (head, repairs, stuck-and-failed), so a polling caller does not re-read evidence.
+    outcome_cache: std::sync::Mutex<BTreeMap<u64, OutcomeDetail>>,
 }
+
+type OutcomeDetail = ((u64, u32, bool), Option<RepairCause>, Option<String>);
 
 impl Autopilot {
     /// Load this conversation set's autopilot. A saved active loop is always
@@ -511,6 +516,7 @@ impl Autopilot {
             recovering: BTreeSet::new(),
             on_finish: crate::on_finish::configured(),
             hook_results: Vec::new(),
+            outcome_cache: Default::default(),
         })
     }
 
@@ -1294,22 +1300,32 @@ impl Autopilot {
         let (Some(saved), Some(snapshot)) = (self.saved.as_ref(), tasks.snapshot.as_ref()) else {
             return vec![];
         };
+        let mut cache = self.outcome_cache.lock().unwrap_or_else(|e| e.into_inner());
         families(snapshot, saved, tasks)
             .into_iter()
             .map(|family| {
                 let root = snapshot.tasks.iter().find(|task| task.id == family.root);
                 let head = snapshot.tasks.iter().find(|task| task.id == family.head);
-                let repair_cause = head
-                    .filter(|_| family.repairs > 0)
-                    .and_then(|head| head.repair_of)
-                    .and_then(|parent| snapshot.tasks.iter().find(|task| task.id == parent))
-                    .map(|parent| RepairCause::of(&failure_detail(tasks, parent)));
-                let last_failure = head
-                    .filter(|head| {
-                        head.status == TaskStatus::Failed
-                            && matches!(&family.settled, Settled::Stuck(_))
-                    })
-                    .map(|head| last_failure_line(&failure_detail(tasks, head)));
+                let stuck_failed = head.is_some_and(|head| head.status == TaskStatus::Failed)
+                    && matches!(&family.settled, Settled::Stuck(_));
+                let key = (family.head, family.repairs, stuck_failed);
+                let cached = cache
+                    .get(&family.root)
+                    .filter(|entry| entry.0 == key)
+                    .cloned();
+                let (_, repair_cause, last_failure) = cached.unwrap_or_else(|| {
+                    let repair_cause = head
+                        .filter(|_| family.repairs > 0)
+                        .and_then(|head| head.repair_of)
+                        .and_then(|parent| snapshot.tasks.iter().find(|task| task.id == parent))
+                        .map(|parent| RepairCause::of(&failure_detail(tasks, parent)));
+                    let last_failure = head
+                        .filter(|_| stuck_failed)
+                        .map(|head| last_failure_line(&failure_detail(tasks, head)));
+                    let entry = (key, repair_cause, last_failure);
+                    cache.insert(family.root, entry.clone());
+                    entry
+                });
                 TaskOutcome {
                     repair_cause,
                     last_failure,
