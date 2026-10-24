@@ -344,7 +344,7 @@ impl Session {
         send: bool,
     ) -> Result<Plan, &'static str> {
         if self.status.active() {
-            return Err("Cancel or wait for the current reply");
+            return Err("Esc stops the reply, or wait for it");
         }
         if self.compacting.is_some() {
             return Err("Already summarising earlier turns");

@@ -259,6 +259,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
             " Approval pending · y approve · n deny · Esc cancels the turn ".to_string()
         }
         Some((tasks, target)) => crate::agent_view::prompt_title(tasks, target),
+        None if session.status.active() => " Prompt · Esc stop ".to_string(),
         None => " Prompt · Enter send ".to_string(),
     };
     let draft_width = rows[3].width.saturating_sub(4) as usize;
@@ -315,10 +316,17 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     } else {
         dashboard::Footer::Chat
     };
+    let turn = if session.status.active() {
+        dashboard::Turn::Running
+    } else if matches!(session.status, Status::Failed(_) | Status::Cancelled) {
+        dashboard::Turn::Interrupted
+    } else {
+        dashboard::Turn::Idle
+    };
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
-                dashboard::footer(context, usize::from(area.width)),
+                dashboard::footer(context, turn, usize::from(area.width)),
                 Style::default().fg(theme.color(Tone::Dim)),
             ),
             Line::styled(

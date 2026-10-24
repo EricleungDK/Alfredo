@@ -23,6 +23,22 @@ fn long(turns: usize) -> Session {
     session
 }
 
+#[test]
+fn enter_or_compaction_during_a_turn_names_the_esc_key() {
+    let mut session = Session::new("fixture".into());
+    session.insert("first");
+    session.begin().unwrap();
+    session.insert("second");
+    assert_eq!(
+        session.begin().unwrap_err(),
+        "Esc stops the reply, or wait for it"
+    );
+    assert_eq!(
+        session.start_compaction(None, true).unwrap_err(),
+        "Esc stops the reply, or wait for it"
+    );
+}
+
 fn compact(session: &mut Session, summary: &str) -> Outcome {
     let plan = session.start_compaction(None, true).unwrap();
     let attempt = session.attempt;

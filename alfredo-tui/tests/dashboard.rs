@@ -699,6 +699,42 @@ fn health_stays_right_aligned_on_the_mission_row_with_a_task_snapshot() {
 }
 
 #[test]
+fn chat_footer_keeps_esc_stop_while_a_turn_runs_and_drops_it_when_idle() {
+    use alfredo_tui::dashboard::{footer, Footer, Turn};
+    for context in [Footer::Chat, Footer::ChatExpanded] {
+        for width in [40, 60, 100, 140] {
+            let running = footer(context, Turn::Running, width);
+            assert!(running.contains("Esc stop"), "{width}: {running}");
+            assert!(running.contains("F1 help"), "{width}: {running}");
+            assert!(running.contains("^Q quit"), "{width}: {running}");
+            assert!(
+                unicode_width::UnicodeWidthStr::width(running.as_str()) <= width,
+                "{width}: {running}"
+            );
+            let idle = footer(context, Turn::Idle, width);
+            assert!(!idle.contains("Esc stop"), "{width}: {idle}");
+            assert!(!idle.contains("Ctrl+R"), "{width}: {idle}");
+        }
+    }
+}
+
+#[test]
+fn chat_footer_names_ctrl_r_after_an_interrupted_turn_until_idle() {
+    use alfredo_tui::dashboard::{footer, Footer, Turn};
+    for width in [40, 60, 100, 140] {
+        let line = footer(Footer::Chat, Turn::Interrupted, width);
+        assert!(line.contains("Ctrl+R retries"), "{width}: {line}");
+        assert!(!line.contains("Esc stop"), "{width}: {line}");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(line.as_str()) <= width,
+            "{width}: {line}"
+        );
+    }
+    // Only the chat footers carry turn hints.
+    assert!(!footer(Footer::Tasks, Turn::Running, 140).contains("Esc stop"));
+}
+
+#[test]
 fn layouts_fit_supported_sizes_and_degrade_at_40_by_12() {
     let mut fixture = calc_plan();
     fixture.select(2);

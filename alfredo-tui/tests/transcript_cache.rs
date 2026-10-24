@@ -101,7 +101,8 @@ fn scenario() -> Vec<String> {
 /// Captured on the uncached renderer (origin/main @ 52e5e90) before the cache existed;
 /// re-captured for #258, which adds the `^O expand results` footer hint (frame bodies
 /// are unchanged); re-captured for #404, which expands the tab in message 1's `\ttabbed` line
-/// to four spaces (the golden had it vanish).
+/// to four spaces (the golden had it vanish);
+/// re-captured for #399, which adds the `Ctrl+R retries` footer hint to the two failed-turn frames.
 const GOLDEN: [&str; 21] = [
     "8efcb6e369f15a7356a1633cf2d2ab64b47cd8a5e7904f0ba318fa54f709656a",
     "aa80a31ced18b14400d600e7670760f10ef4d28b81c4a6315033bcf771d81daf",
@@ -122,8 +123,8 @@ const GOLDEN: [&str; 21] = [
     "a39f3b71a19d1a109861a1d9e9cea3e6e680da31606d5934c69ecc1e4b78efcb",
     "f59395801898b6b88155105fab75c8a6e2cf1cb9aed3d83cff914f7514826c6e",
     "f59395801898b6b88155105fab75c8a6e2cf1cb9aed3d83cff914f7514826c6e",
-    "fc7a76f58c5ad64db333173cf7f68028e989b2b65f2960ef34abbbbc95d20cde",
-    "13830abb4ae1912bcd820b0a0458237835aa0b1f882f7576f6ba8959cf13a677",
+    "5bafd1e125329425b4a9c1807e2280ebededfc87aba146c0711418b687f56a32",
+    "c2492680b2b10d894c98a43c5d6d5558d7280d28142d58409a846d49b93611e8",
 ];
 
 #[test]
