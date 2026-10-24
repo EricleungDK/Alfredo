@@ -2365,7 +2365,7 @@ fn check_head_and_key(summary: &str) -> Option<(&str, String)> {
             .rev()
             .map(str::trim)
             .find(|line| {
-                !line.is_empty() && !(skip_note && line.ends_with("more failing lines omitted)"))
+                !(line.is_empty() || skip_note && line.ends_with("more failing lines omitted)"))
             })
             .map(str::to_string)
     };
