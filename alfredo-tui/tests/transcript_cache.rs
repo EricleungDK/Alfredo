@@ -207,6 +207,103 @@ fn fenced_code_is_styled_markers_dimmed_and_lines_cut_not_wrapped() {
     );
     assert!(per_row.iter().all(|n| *n < 40));
     assert!(row_text(&buffer).iter().any(|r| r.contains("after")));
+    let cut_row = row_text(&buffer)
+        .into_iter()
+        .find(|r| r.contains('Z'))
+        .unwrap();
+    assert!(
+        cut_row
+            .trim_end_matches('\u{2502}')
+            .trim_end()
+            .ends_with('\u{2026}'),
+        "cut row ends in the marker: {cut_row:?}"
+    );
+    assert_eq!(cut_row.matches('\u{2026}').count(), 1);
+}
+
+#[test]
+fn rows_that_fit_get_no_cut_marker() {
+    let app = chat(&[("user", "x"), (BODY, "```\nshort line\n```")]);
+    let text = row_text(&draw_buffer(&app, 40, 20)).join("\n");
+    assert!(text.contains("short line"));
+    assert!(!text.contains('\u{2026}'), "{text}");
+}
+
+#[test]
+fn cut_row_with_wide_char_at_the_boundary_still_ends_in_the_marker() {
+    use alfredo_tui::transcript_cache::cut_line;
+    use ratatui::text::{Line, Span};
+    let line = Line::from(vec![Span::raw("ab"), Span::raw("\u{4e2d}\u{6587}cd")]);
+    // width 5: "ab" + one wide char (4) leaves 1 column, which the marker takes.
+    let cut = cut_line(&line, 5);
+    let text: String = cut.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "ab\u{4e2d}\u{2026}");
+    assert_eq!(cut.width(), 5);
+    // width 4: the wide char would straddle the marker column, so it is dropped and
+    // the marker is padded into the last column.
+    let cut = cut_line(&line, 4);
+    let text: String = cut.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "ab \u{2026}");
+    assert_eq!(cut.width(), 4);
+    // A line that fits is returned unchanged.
+    let fits = cut_line(&line, 8);
+    assert_eq!(fits.width(), 8);
+    assert!(!fits.spans.iter().any(|s| s.content.contains('\u{2026}')));
+}
+
+#[test]
+fn asterisks_that_are_not_bold_render_verbatim() {
+    let lines = [
+        "Matches src/**/*.rs and tests/**/*.rs here; also 2 ** 3 and 4 ** 5.",
+        "Use 2 ** 3 and 4 ** 5 in python, and def f(**kw, **o).",
+        "a lone ** here and a trailing **",
+        "***both***",
+        "2**3 and 4**5",
+    ];
+    for line in lines {
+        let app = chat(&[("user", "x"), (BODY, line)]);
+        let buffer = draw_buffer(&app, 100, 12);
+        let text = row_text(&buffer).join("\n");
+        assert!(text.contains(line), "{line:?} kept verbatim in {text}");
+    }
+}
+
+#[test]
+fn flanked_bold_still_consumes_its_markers() {
+    for (line, bold, shown) in [
+        ("so **bold** here", "bold", "so bold here"),
+        ("**Note:** careful", "Note:", "Note: careful"),
+        ("see **a `b` c** end", "a ", "see a `b` c end"),
+        ("(**x**)", "x", "(x)"),
+        (
+            "**\u{4e2d}\u{6587}**\u{7684}",
+            "\u{4e2d}",
+            "\u{4e2d}\u{6587}\u{7684}",
+        ),
+        (
+            "\u{8fd9}\u{662f}**\u{91cd}\u{70b9}**",
+            "\u{91cd}",
+            "\u{8fd9}\u{662f}\u{91cd}\u{70b9}",
+        ),
+        ("**bold**text", "bold", "boldtext"),
+        ("**Note**: x", "Note", "Note: x"),
+        ("**bold**. y", "bold", "bold. y"),
+        ("**foo**'s y", "foo", "foo's y"),
+        ("- **Item**: text", "Item", "- Item: text"),
+        ("**1.** one", "1.", "1. one"),
+    ] {
+        let app = chat(&[("user", "x"), (BODY, line)]);
+        let buffer = draw_buffer(&app, 60, 12);
+        let text = row_text(&buffer).join("\n");
+        // Wide characters leave a skipped cell in the TestBackend buffer.
+        let squash = |t: &str| t.replace(' ', "");
+        assert!(
+            squash(&text).contains(&squash(shown)),
+            "{shown:?} in {text}"
+        );
+        assert!(!text.contains("**"), "{text}");
+        assert!(cell_of(&buffer, bold).modifier.contains(Modifier::BOLD));
+    }
 }
 
 #[test]
