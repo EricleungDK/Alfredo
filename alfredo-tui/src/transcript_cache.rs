@@ -135,8 +135,10 @@ fn markdown(text: &str) -> (Vec<Line<'static>>, Vec<bool>) {
 /// `line` limited to `width` columns (code rows are cut, not wrapped).
 pub fn cut_line(line: &Line<'static>, width: u16) -> Line<'static> {
     let mut left = usize::from(width);
-    let mut out = Line::default();
-    out.style = line.style;
+    let mut out = Line {
+        style: line.style,
+        ..Line::default()
+    };
     for span in &line.spans {
         let mut kept = String::new();
         for c in span.content.chars() {
