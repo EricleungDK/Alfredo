@@ -1772,11 +1772,27 @@ fn approval_card_lines(
     // The header, args and key line always fit: a preview taller than the rows
     // left shows its first lines and a count of the rest (issue #268).
     let head = lines.len() - 1;
+    let key_line = Line::styled(
+        match crate::chat_tools::allow::offer(card) {
+            Some(offer) => format!(
+                "  y approve · {} · n deny · Esc cancels the turn (deny)",
+                safe_visible(&offer)
+            ),
+            None => match crate::chat_tools::allow::unavailable_reason(card) {
+                Some(why) => format!(
+                    "  y approve · n deny · Esc cancels the turn (deny) · a not offered: {}",
+                    safe_visible(&why)
+                ),
+                None => "  y approve · n deny · Esc cancels the turn (deny)".into(),
+            },
+        },
+        warn,
+    );
     let fixed: usize = lines
         .iter()
         .map(|line| crate::transcript_cache::line_height(line, width as u16))
         .sum::<usize>()
-        + 1;
+        + crate::transcript_cache::line_height(&key_line, width.min(usize::from(u16::MAX)) as u16);
     let mut budget = rows.saturating_sub(fixed);
     // Tabs show as `→` plus padding, so a tab-only change never reads as no change
     // (issue #404); the stops count from the `+`/`-` column, as in `git diff`.
@@ -1800,7 +1816,11 @@ fn approval_card_lines(
         .collect();
     let heights: Vec<usize> = preview
         .iter()
-        .map(|(_, shown)| (shown.chars().count() + 2).div_ceil(width.max(1)).max(1))
+        .map(|(_, shown)| {
+            // Display columns, as drawn (issue #410): wide CJK and emoji take two each.
+            let row = Line::from(format!("  {shown}"));
+            crate::transcript_cache::line_height(&row, width.min(usize::from(u16::MAX)) as u16)
+        })
         .collect();
     let mut shown = preview.len();
     if heights.iter().sum::<usize>() > budget {
@@ -1835,22 +1855,7 @@ fn approval_card_lines(
             dim(),
         ));
     }
-    lines.push(Line::styled(
-        match crate::chat_tools::allow::offer(card) {
-            Some(offer) => format!(
-                "  y approve · {} · n deny · Esc cancels the turn (deny)",
-                safe_visible(&offer)
-            ),
-            None => match crate::chat_tools::allow::unavailable_reason(card) {
-                Some(why) => format!(
-                    "  y approve · n deny · Esc cancels the turn (deny) · a not offered: {}",
-                    safe_visible(&why)
-                ),
-                None => "  y approve · n deny · Esc cancels the turn (deny)".into(),
-            },
-        },
-        warn,
-    ));
+    lines.push(key_line);
     (lines, head)
 }
 
@@ -1858,6 +1863,69 @@ fn approval_card_lines(
 mod tests {
     use super::*;
     use crate::model::{Session, Update};
+
+    fn wide_card(preview_line: impl Fn(usize) -> String) -> crate::chat_tools::approval::Card {
+        use crate::chat_tools::approval::{Card, CardKind};
+        let preview: Vec<String> = (0..30).map(preview_line).collect();
+        Card {
+            tool: "write_file".into(),
+            arguments: serde_json::json!({"path": "notes.md", "content": "x"}),
+            kind: CardKind::Edit,
+            summary: "write notes.md".into(),
+            preview: preview.join("\n"),
+            fingerprint: String::new(),
+        }
+    }
+
+    /// Issue #410: the card's rows are counted in display columns, so wide
+    /// characters never push the header, args or key line off the screen.
+    #[test]
+    fn approval_card_fits_the_rows_with_wide_characters() {
+        type Make = Box<dyn Fn(usize) -> String>;
+        let cases: Vec<(&str, Make)> = vec![
+            ("cjk", Box::new(|n| format!("+{}{n}", "漢".repeat(40)))),
+            ("emoji", Box::new(|n| format!("+{}{n}", "🙂".repeat(40)))),
+            (
+                "mixed",
+                Box::new(|n| {
+                    if n % 2 == 0 {
+                        format!("+{}{n}", "漢".repeat(40))
+                    } else {
+                        format!("+{}{n}", "x".repeat(80))
+                    }
+                }),
+            ),
+            ("ascii", Box::new(|n| format!("+{}{n}", "x".repeat(80)))),
+        ];
+        for (name, make) in cases {
+            for (width, rows) in [(60usize, 20usize), (60, 12), (41, 15), (80, 10)] {
+                let card = wide_card(&make);
+                let (lines, head) = approval_card_lines(&card, width, rows);
+                let total: usize = lines
+                    .iter()
+                    .map(|l| crate::transcript_cache::line_height(l, width as u16))
+                    .sum();
+                assert!(total <= rows, "{name} {width}x{rows}: {total} rows");
+                assert!(head <= 2, "{name}: header and args come first");
+                let last = lines.last().unwrap().to_string();
+                assert!(last.contains("y approve"), "{name}: key line is last");
+                let drawn = lines
+                    .iter()
+                    .filter(|l| l.to_string().starts_with("  +"))
+                    .count();
+                let hidden = lines
+                    .iter()
+                    .find_map(|l| {
+                        l.to_string()
+                            .trim()
+                            .strip_prefix('[')
+                            .and_then(|s| s.split(' ').next()?.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                assert_eq!(drawn + hidden, 30, "{name} {width}x{rows}: all counted");
+            }
+        }
+    }
 
     #[test]
     fn capacity_wait_lines_clip_the_cat_to_the_width_and_drop_it_when_it_cannot_fit() {
