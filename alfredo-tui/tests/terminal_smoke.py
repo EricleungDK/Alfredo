@@ -836,7 +836,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Finish or cancel active conversations')
             self.assertNotIn('Open your work', visible_screen(output))
             os.write(master, b'\x15')
-            os.write(master, b'\x0e/mod\t\r')  # Completion fills /models, without submitting.
+            os.write(master, b'\x0e/mod\t')  # Type-ahead Tab fills /models, without submitting.
             wait_for(b'/models')
             os.write(master, b'\r')
             wait_for(b'Installed models')
