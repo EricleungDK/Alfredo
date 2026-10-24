@@ -505,12 +505,22 @@ class ModelPicker(unittest.TestCase):
             try:
                 terminal.wait_for('◈ ○ chat 1')
                 terminal.write(b'abc\ndef\x1b\rg')  # Ctrl+J, then Alt+Enter
-                terminal.wait_for('abc↵def↵g▏')
-                terminal.write(b'\x01X')  # Ctrl+A moves to the start of the draft
-                terminal.wait_for('X▏abc↵def↵g')
+                terminal.wait_for('g▏')
+                # Issue #398: each line has its own prompt row, no newline glyph.
+                self.assertRegex(terminal.screen(), r'(?m)^│ abc +│\n│ def +│\n│ g▏ +│$')
+                self.assertNotIn('↵', terminal.screen())
+                terminal.write(b'\x1b[A')  # Up moves to the middle line (same column), not history
+                terminal.write(b'X')
+                terminal.wait_for('dX▏ef')
+                self.assertRegex(terminal.screen(), r'(?m)^│ abc +│\n│ dX▏ef +│\n│ g +│$')
+                terminal.write(b'\x1b[B')  # Down moves back to the last line
+                terminal.write(b'Y')
+                terminal.wait_for('gY▏')
+                terminal.write(b'\x01Z')  # Ctrl+A moves to the start of the draft
+                terminal.wait_for('Z▏abc')
                 terminal.write(b'\x1bf\x0b')  # Alt+F moves a word, Ctrl+K kills to the end
-                terminal.wait_for('Xabc▏  ')  # nothing after the cursor any more
-                self.assertNotIn('↵def', terminal.screen())
+                terminal.wait_for('Zabc▏  ')  # nothing after the cursor any more
+                terminal.wait_gone('dXef')
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
             finally:

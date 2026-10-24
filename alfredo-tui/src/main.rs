@@ -1398,8 +1398,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 Err(error) => work.app.notice = error,
                             }
                         }
-                        KeyCode::Up => work.app.sessions[index].history_previous(),
-                        KeyCode::Down => work.app.sessions[index].history_next(),
+                        KeyCode::Up => {
+                            // Move within a multi-line draft; history on its first line.
+                            if !work.app.sessions[index].line_up() {
+                                work.app.sessions[index].history_previous();
+                            }
+                        }
+                        KeyCode::Down => {
+                            if !work.app.sessions[index].line_down() {
+                                work.app.sessions[index].history_next();
+                            }
+                        }
                         KeyCode::Char('n') if ctrl => work.app.add_session(),
                         KeyCode::Tab
                             if alfredo_tui::commands::Completion::accepts(

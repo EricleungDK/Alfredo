@@ -161,14 +161,14 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | Key | Action |
 | --- | --- |
 | Enter | Send prompt or command |
-| Ctrl+J / Alt+Enter | New line (shown as `↵`) on any terminal; Shift+Enter too where the terminal reports it, and paste also works |
+| Ctrl+J / Alt+Enter | New line on any terminal; Shift+Enter too where the terminal reports it, and paste also works. The prompt box grows to show up to six lines |
 | F1 | Command picker (empty prompt; type to filter); typing `/` lists matching commands, Tab or Enter completes |
 | F2 | Right pane: task detail / conversation |
 | F3 | Evidence for the selected task (task detail) |
 | F4 | Activity (saved task receipts) |
 | F5 | Pause / resume autopilot |
 | F6 | Focus the side pane (overlay below 88 columns); again or Esc returns to the prompt |
-| Up / Down | Prompt history; in task detail, select task; in the side pane, move |
+| Up / Down | Move between lines of a multi-line draft, then prompt history from its first / last line; in task detail, select task; in the side pane, move |
 | Tab (side pane) | Switch between missions and work |
 | Enter (side pane) | Open the row: a task's or the architect's agent view, group detail, chat, or switch mission |
 | Enter (agent view) | Instruct that agent: steer, queued note, repair, follow-up or plan revision |
