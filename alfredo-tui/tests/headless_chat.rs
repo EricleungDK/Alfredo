@@ -324,6 +324,89 @@ fn the_no_tool_support_notice_is_on_stderr_not_in_the_reply() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// User message of the first chat request the fixture saw.
+fn user_message(fixture: &Fixture) -> String {
+    let requests = fixture.requests.lock().unwrap();
+    let chat = requests
+        .iter()
+        .find(|r| r.path == "POST /api/chat")
+        .unwrap();
+    chat.body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "user")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn at_mentions_attach_files_like_interactive_chat_and_refusals_go_to_stderr() {
+    let root = repository("mentions");
+    let workspace = root.join("workspace");
+    fs::write(workspace.join("ignored.log"), "ignored text\n").unwrap();
+    fs::write(workspace.join(".gitignore"), "ignored.log\n").unwrap();
+    fs::write(workspace.join("draft.txt"), "uncommitted text\n").unwrap();
+    let fixture = scripted_chat(vec![done("ok")]);
+    let output = run(
+        &root,
+        &fixture,
+        &[
+            "--chat",
+            "review @greet.py and @draft.txt and @ignored.log and @missing.rs",
+            "--headless",
+        ],
+    );
+    let value = result(&output);
+    assert_eq!(value["state"], "done", "{value}");
+    assert_eq!(value["attached"], json!(["greet.py", "draft.txt"]));
+    let message = user_message(&fixture);
+    assert!(message.starts_with("review @greet.py"), "{message}");
+    assert!(message.contains("\nFILE greet.py\ndef greet(name):"));
+    assert!(message.contains("\nFILE draft.txt\nuncommitted text"));
+    assert!(!message.contains("ignored text"));
+    let err = stderr(&output);
+    let refused: Vec<&str> = err.lines().filter(|l| l.contains("not attached")).collect();
+    assert_eq!(refused.len(), 2, "{err}");
+    assert!(err.contains("@ignored.log: not attached (ignored by .gitignore"));
+    assert!(err.contains("@missing.rs: not attached (no such file"));
+    // A prompt without mentions adds no key and sends the words unchanged.
+    let plain = scripted_chat(vec![done("ok")]);
+    let value = result(&run(
+        &root,
+        &plain,
+        &["--chat", "hello there", "--headless"],
+    ));
+    assert!(value.get("attached").is_none(), "{value}");
+    assert_eq!(user_message(&plain), "hello there");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn at_mention_notices_are_single_safe_stderr_lines() {
+    let root = repository("mention-safe");
+    let fixture = scripted_chat(vec![done("ok")]);
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "see @a\u{202e}b/c.rs\u{1b}[31m now", "--headless"],
+    );
+    assert_eq!(result(&output)["state"], "done");
+    let err = stderr(&output);
+    assert!(
+        !err.contains('\u{202e}') && !err.contains('\u{1b}'),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.lines().filter(|l| l.contains("not attached")).count(),
+        1
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn max_turns_sets_the_cap_in_the_json_result() {
     let root = repository("step-cap-max-turns");

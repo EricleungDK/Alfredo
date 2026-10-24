@@ -831,11 +831,18 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
     if let Some((_, line)) = notes {
         say(line);
     }
+    // Same `@path` rules and bounds as interactive chat, on the workspace root the
+    // read tools are confined to (issue #282).
+    let attachment = runtime.block_on(alfredo_tui::chat_mentions::attach(&workspace, &prompt));
+    for notice in &attachment.notices {
+        say(notice);
+    }
+    let content = format!("{prompt}{}", attachment.block);
     let messages = vec![
         context,
         alfredo_tui::model::Message {
             role: "user".into(),
-            content: prompt,
+            content,
         },
     ];
     say(format!(
@@ -916,7 +923,10 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
     }
     turn.cap = chat.max_turns();
     let records = log.map_or_else(Vec::new, |log| log.records());
-    let value = turn.json(&model, policy, records.get(before..).unwrap_or(&[]));
+    let mut value = turn.json(&model, policy, records.get(before..).unwrap_or(&[]));
+    if !attachment.files.is_empty() {
+        value["attached"] = attachment.files.into();
+    }
     let _ = writeln!(std::io::stdout(), "{value}");
     let _ = std::io::stdout().flush();
     Ok(i32::from(value["state"] != "done"))
