@@ -245,6 +245,12 @@ Approval gate, answered by a scripted policy instead of a card:
   Format characters (such as U+202E) show as `<U+XXXX>` on stderr, and line separators
   (U+2028, U+2029) become spaces.
 
+`@path` mentions in the prompt are attached exactly as in interactive chat (working-tree
+content of regular files inside the repository; symlinks, ignored untracked files and
+excluded names are refused; at most 8 files and 32 KiB per prompt). Each mention that is not
+attached gets one stderr line (`@path: not attached (reason)`), and the JSON result gains
+`"attached": ["a.txt"]` only when something was attached.
+
 There is no other policy and no interactive equivalent: interactive chat always asks
 (ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
 `--headless`. Each outcome is appended to `chat-approvals.jsonl` like an interactive
@@ -1858,6 +1864,16 @@ rule `a` would add.
   a host rule never matches extra arguments.
   `a` on a red HOST card reads `a always allow on HOST (escalated rule) …` and adds a host
   rule.
+- **The hint shows the whole command (issue #409).** For `run_command` the key line shows
+  the command exactly as the card's `$` lines draw it: a tab as `→` plus padding (stops
+  counted from the start of the line, `$ ` included), a literal `→` or `↵` as
+  `<U+2192>`/`<U+21B5>`, and the command's lines joined by `↵` (a two-line command is two
+  `$` rows). `/allow` shows a rule's command the same way. Nothing is cut or removed. `a`
+  is not offered, and does nothing, when the command (trimmed) shows as more than 80
+  characters, holds a control character other than tab and newline (checked before
+  trimming, so `ls` + carriage return is refused), or contains text that looks like a
+  `<U+` escape; the key line then reads `… · a not offered: too long to always-allow …`
+  (or the matching reason). Answer `y` or `n`. Rules already in the file still match.
 - **Still checked.** A rule only replaces the keypress: refusals before asking still
   refuse, and the fingerprint (file content, repository state, cwd) is still checked at
   apply. The outcome goes to `chat-approvals.jsonl` with `"rule": ID`; F4 shows
