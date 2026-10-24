@@ -174,7 +174,10 @@ pub fn show_command(command: &str) -> String {
 /// `$` lines drop control characters other than tab and newline, so a command holding
 /// one is not shown faithfully either.
 fn hint_command(command: &str) -> Result<String, String> {
-    if command.chars().any(|c| c.is_control() && c != '\t' && c != '\n') {
+    if command
+        .chars()
+        .any(|c| c.is_control() && c != '\t' && c != '\n')
+    {
         return Err("has control characters it cannot show".into());
     }
     let shown = show_command(command);

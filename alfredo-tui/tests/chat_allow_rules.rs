@@ -664,8 +664,14 @@ fn the_hint_shows_commands_of_80_characters_and_drops_a_at_81() {
         assert!(rules_for_test().add_for(&card).is_err());
         let text = screen(card);
         assert!(!text.contains("a always allow"), "{text}");
-        assert!(text.contains("a not offered: too long to always-allow"), "{text}");
-        assert!(text.contains("y approve") && text.contains("n deny"), "{text}");
+        assert!(
+            text.contains("a not offered: too long to always-allow"),
+            "{text}"
+        );
+        assert!(
+            text.contains("y approve") && text.contains("n deny"),
+            "{text}"
+        );
         assert!(!text.contains("exactly"), "{text}");
     }
 }
@@ -688,7 +694,7 @@ fn the_hint_shows_a_tab_as_an_arrow_and_a_newline_as_a_return_arrow() {
     let multi = "printf 'a\tb\n'\tcat t.py";
     let hint = allow::offer(&shell(multi, false)).unwrap();
     assert!(hint.contains("'a→"), "{hint}");
-    assert!(hint.contains("\n'") == false && hint.contains("↵"), "{hint}");
+    assert!(!hint.contains('\n') && hint.contains("↵"), "{hint}");
     assert!(hint.contains("cat t.py"), "{hint}");
     let lines = allow::offer(&shell("echo one\necho two", false)).unwrap();
     assert!(lines.contains("`echo one↵echo two`"), "{lines}");
