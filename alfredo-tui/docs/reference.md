@@ -1889,7 +1889,11 @@ rule `a` would add.
   apply. The outcome goes to `chat-approvals.jsonl` with `"rule": ID`; F4 shows
   `… approved · applied · by always-allow rule #ID`.
 - **Storage.** `chat-allow.json` in the mission's State Directory; restored on restart. A
-  malformed file counts as no rules. At most 200 rules.
+  missing or empty (0 bytes) file is no rules. A present file that cannot be read (not
+  valid rules JSON, over 1 MiB, not a regular file) is an error naming the path (issue
+  #319): `/allow` shows it, no rule matches (every action asks), and `a`,
+  `/allow clear` and `/allow clear ID` refuse to write, leaving the file as it is. The
+  message gives the move-aside command (`mv FILE FILE.bad`). At most 200 rules.
 - **`/allow`** lists every rule in full, one wrapped row per rule under the transcript
   (`#ID`, tool, the exact command / ANY arguments / every call, sandboxed or HOST) until
   the next key; `/allow clear` removes all; `/allow clear ID` removes one.

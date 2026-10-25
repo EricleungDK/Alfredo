@@ -14,7 +14,8 @@
 //! - Rules ignore the call's `cwd`.
 //! - Command prefixes match whole whitespace-separated words. A command holding a
 //!   shell operator ([`METACHARS`]) matches only a rule that is exactly that command.
-//! - A malformed file is read as no rules (fail closed).
+//! - An unreadable (malformed or oversized) file is an error naming the path; it matches
+//!   nothing (fail closed) and is never overwritten. A missing or empty file is no rules.
 //!
 //! Matching only replaces the owner's keypress: the card is still previewed (refusals
 //! still refuse), the fingerprint is still checked at apply, and the outcome is logged
@@ -25,6 +26,8 @@ use std::path::{Path, PathBuf};
 
 /// Rules file name in the mission's State Directory.
 pub const FILE: &str = "chat-allow.json";
+/// The largest rules file read.
+const MAX_FILE: u64 = 1024 * 1024;
 /// Characters that make a command eligible only for an exact-command rule.
 pub const METACHARS: &[char] = &[
     ';', '&', '|', '`', '$', '>', '<', '\n', '\r', '\\', '(', ')',
@@ -294,18 +297,42 @@ impl Rules {
         Ok(Self::new(&store.conversation_directory()?))
     }
 
-    /// Rules, oldest first. A missing or malformed file is no rules.
-    pub fn list(&self) -> Vec<Rule> {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .filter(|text| text.len() <= 1024 * 1024)
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+    /// Rules, oldest first. A missing or empty (0 bytes) file is no rules. A file that is
+    /// present but unreadable (not valid rules JSON, over 1 MiB, not a regular file, an I/O
+    /// error) is an error naming the path; it is never treated as "no rules".
+    pub fn list(&self) -> Result<Vec<Rule>, String> {
+        use std::io::Read;
+        let unreadable = |problem: &str| {
+            let path = self.path.display();
+            format!(
+                "Always-allow rules file is unreadable: {problem} ({path}); original preserved, no rule applies until it is fixed. Move it aside (mv \"{path}\" \"{path}.bad\") to start with no rules"
+            )
+        };
+        match std::fs::metadata(&self.path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(unreadable(&error.to_string())),
+            Ok(meta) if !meta.is_file() => return Err(unreadable("not a regular file")),
+            Ok(_) => {}
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(&self.path)
+            .and_then(|file| file.take(MAX_FILE + 1).read_to_end(&mut bytes))
+            .map_err(|error| unreadable(&error.to_string()))?;
+        if bytes.len() as u64 > MAX_FILE {
+            return Err(unreadable("file exceeds 1 MiB"));
+        }
+        if bytes.is_empty() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_slice(&bytes).map_err(|_| unreadable("malformed JSON"))
     }
 
-    /// The first rule covering `card`.
+    /// The first rule covering `card`. An unreadable file matches nothing (fail closed).
     pub fn matching(&self, card: &Card) -> Option<Rule> {
-        self.list().into_iter().find(|rule| matches(rule, card))
+        self.list()
+            .ok()?
+            .into_iter()
+            .find(|rule| matches(rule, card))
     }
 
     /// Add the rule for `card` (an equal rule is reused).
@@ -360,7 +387,7 @@ impl Rules {
             .open(self.path.with_extension("lock"))
             .map_err(failed)?;
         lock.lock().map_err(failed)?;
-        let mut rules = self.list();
+        let mut rules = self.list()?;
         let result = change(&mut rules)?;
         let text = serde_json::to_string_pretty(&rules).map_err(|e| e.to_string())?;
         let temporary = self
@@ -381,7 +408,7 @@ pub fn slash(rules: &Rules, args: &str) -> Result<String, String> {
     let words: Vec<&str> = args.split_whitespace().collect();
     match words.as_slice() {
         [] => {
-            let list = rules.list();
+            let list = rules.list()?;
             if list.is_empty() {
                 return Ok("No always-allow rules · press a on an approval card to add one".into());
             }

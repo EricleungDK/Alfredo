@@ -110,7 +110,7 @@ fn rules_persist_and_restore_and_slash_command_lists_and_clears() {
     assert_eq!(rules.add_for(&shell("cargo test", false)).unwrap(), test);
     // Restored on restart: a fresh handle reads the file.
     let again = Rules::new(&state);
-    assert_eq!(again.list(), vec![edit.clone(), test.clone()]);
+    assert_eq!(again.list().unwrap(), vec![edit.clone(), test.clone()]);
     assert_eq!(
         again.matching(&plain("edit_file", CardKind::Edit)),
         Some(edit.clone())
@@ -131,9 +131,83 @@ fn rules_persist_and_restore_and_slash_command_lists_and_clears() {
         .unwrap_err()
         .starts_with("Usage: "));
     allow::slash(&again, &format!("clear {}", edit.id)).unwrap();
-    assert_eq!(Rules::new(&state).list(), vec![test]);
+    assert_eq!(Rules::new(&state).list().unwrap(), vec![test]);
     allow::slash(&again, "clear").unwrap();
-    assert!(Rules::new(&state).list().is_empty());
+    assert!(Rules::new(&state).list().unwrap().is_empty());
+    let _ = fs::remove_dir_all(state);
+}
+
+/// Issue #319: a present but unreadable rules file is an error, never "no rules".
+fn assert_refused_and_untouched(rules: &Rules, file: &Path, bytes: &[u8]) {
+    let path = file.display().to_string();
+    for error in [
+        rules.add_for(&shell("make", false)).unwrap_err(),
+        rules.remove(1).unwrap_err(),
+        rules.clear().unwrap_err(),
+    ] {
+        assert!(error.contains(&path), "{error}");
+        assert!(
+            error.contains(&format!("mv \"{path}\" \"{path}.bad\"")),
+            "{error}"
+        );
+        assert!(error.contains("original preserved"), "{error}");
+    }
+    let shown = allow::slash(rules, "").unwrap_err();
+    assert!(shown.contains(&path), "{shown}");
+    assert!(allow::slash(rules, "clear").is_err());
+    assert!(allow::slash(rules, "clear 1").is_err());
+    // Fail closed: nothing matches, even a call the old rules covered.
+    assert_eq!(rules.matching(&shell("cargo test", false)), None);
+    assert_eq!(fs::read(file).unwrap(), bytes, "the file was rewritten");
+}
+
+#[test]
+fn a_corrupt_rules_file_is_an_error_naming_the_path_and_is_never_overwritten() {
+    let state = dir("corrupt");
+    let rules = Rules::new(&state);
+    rules.add_for(&shell("cargo test", false)).unwrap();
+    let file = state.join(allow::FILE);
+    // One stray character, as a hand edit leaves it.
+    let corrupt = format!("{}x", fs::read_to_string(&file).unwrap());
+    fs::write(&file, &corrupt).unwrap();
+    assert_refused_and_untouched(&rules, &file, corrupt.as_bytes());
+    let _ = fs::remove_dir_all(state);
+}
+
+#[test]
+fn an_oversized_rules_file_is_an_error_naming_the_path_and_is_never_overwritten() {
+    let state = dir("big");
+    let rules = Rules::new(&state);
+    rules.add_for(&shell("cargo test", false)).unwrap();
+    let file = state.join(allow::FILE);
+    // Valid JSON, but one byte over 1 MiB.
+    let mut big = b"[".to_vec();
+    big.extend(vec![b' '; 1024 * 1024]);
+    big.extend(b"]");
+    assert!(big.len() > 1024 * 1024);
+    fs::write(&file, &big).unwrap();
+    assert_refused_and_untouched(&rules, &file, &big);
+    let _ = fs::remove_dir_all(state);
+}
+
+#[test]
+fn an_empty_rules_file_means_no_rules_and_a_missing_one_is_silent() {
+    let state = dir("empty-missing");
+    let rules = Rules::new(&state);
+    // Missing: no error anywhere.
+    assert!(allow::slash(&rules, "")
+        .unwrap()
+        .contains("No always-allow rules"));
+    assert_eq!(rules.matching(&shell("cargo test", false)), None);
+    // Empty (0 bytes): no rules either, and it is not an error. Adding works.
+    fs::write(state.join(allow::FILE), b"").unwrap();
+    assert!(allow::slash(&rules, "")
+        .unwrap()
+        .contains("No always-allow rules"));
+    assert_eq!(rules.matching(&shell("cargo test", false)), None);
+    assert_eq!(rules.clear().unwrap(), 0);
+    let added = rules.add_for(&shell("cargo test", false)).unwrap();
+    assert_eq!(rules.matching(&shell("cargo test", false)), Some(added));
     let _ = fs::remove_dir_all(state);
 }
 
@@ -151,7 +225,7 @@ fn push_is_never_allowlistable_even_from_a_hand_edited_file() {
         r#"[{"id":1,"tool":"git_push"},{"id":2,"tool":"run_command"},{"id":3,"tool":"git_push","command":"x","escalated":true}]"#,
     )
     .unwrap();
-    assert_eq!(rules.list().len(), 3);
+    assert_eq!(rules.list().unwrap().len(), 3);
     assert_eq!(rules.matching(&push), None);
     // A run_command rule without a command never matches.
     assert_eq!(rules.matching(&shell("ls", false)), None);
@@ -307,7 +381,7 @@ async fn always_allow_then_an_identical_action_runs_without_asking_and_is_logged
     let (first, asked) = gate(Decision::AlwaysAllow, &log, &rules);
     turn(&root, first).await;
     assert_eq!(*asked.lock().unwrap(), 1);
-    let rule = rules.list().pop().expect("rule created");
+    let rule = rules.list().unwrap().pop().expect("rule created");
     assert_eq!(rule.tool, "edit_file");
     fs::write(root.join("README.md"), README).unwrap();
     let (second, asked) = gate(Decision::Deny, &log, &rules);
@@ -609,7 +683,7 @@ fn escalated_rules_match_only_the_exact_command() {
         rules.matching(&shell("npm install attacker-pkg", true)),
         None
     );
-    assert!(!allow::describe(&rules.list()[0]).contains("longer"));
+    assert!(!allow::describe(&rules.list().unwrap()[0]).contains("longer"));
     let _ = fs::remove_dir_all(state);
 }
 
