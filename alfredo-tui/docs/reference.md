@@ -1191,7 +1191,7 @@ missions sharing this workspace and native runtime. Review it and use
 owner agreement only; it creates no plan, approval, agent or invocation.
 A replacement draft requires fresh confirmation. `/scope-retry` repeats the exact
 last scope write after an uncertain acknowledgment; `/tasks` returns to supervision.
-While a scope flow is active, chat has no tools. `/scope-clear` leaves Wayfinder: chat
+While a scope flow is active, chat has no tools, and the footer says so on entry and on each chat turn ("Wayfinder chat: tools off here · /scope-clear gives them back"). `/scope-clear` leaves Wayfinder: chat
 gets its tools and task context back, also after a restart. Scope receipts are kept;
 a later `/scope` draft or confirmation re-activates the flow. Tools still need the usual
 approval cards.

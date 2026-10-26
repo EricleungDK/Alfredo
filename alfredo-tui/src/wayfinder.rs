@@ -127,6 +127,10 @@ pub fn entry_mode(prompt: &str) -> Option<Mode> {
     (explicit.is_some() || new || consequential).then_some(Mode::Chart)
 }
 
+/// Footer notice while a Wayfinder discussion is tool-free (issue #334).
+pub const TOOLS_OFF_NOTICE: &str =
+    "Wayfinder chat: tools off here · /scope-clear gives them back";
+
 /// Chat turns get the coding tools (and task context) outside Wayfinder: with no scope
 /// revision, or after `/scope-clear` at the current revision.
 pub fn tools_enabled(store: &Store, revision: u64) -> bool {
