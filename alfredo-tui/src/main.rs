@@ -1573,7 +1573,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             Err(error) => work.app.notice = format!("Could not switch work: {error}; current work retained"),
                                             }
                                         },
-                                        Ok(None) => work.app.notice = "Workspace selection cancelled; current work retained".into(),
+                                        Ok(None) => {
+                                            work.app.sessions[index].clear_draft();
+                                            work.app.notice = "Workspace selection cancelled; current work retained".into();
+                                        }
                                         Err(error) => work.app.notice = format!("Workspace selection failed: {error}; current work retained"),
                                     }
                                     terminal.clear()?;
