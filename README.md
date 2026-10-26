@@ -185,6 +185,7 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | Ctrl+O (Plan draft) | Readable task list / raw draft JSON |
 | Alt+Left / Alt+Right | Collapse / expand a task branch |
 | PageUp / PageDown | Scroll transcript, agent view, details or evidence |
+| Home / End (empty prompt), Ctrl+Home / Ctrl+End | Jump to the oldest / latest transcript row; End resumes following new output. With text in the prompt, Home / End move the cursor |
 | Tab / Shift+Tab | Next / previous conversation |
 | Ctrl+N | New conversation (max 8); `/clear` restarts the current one, `/compact` summarises its older turns |
 | Esc | Cancel the current model request (keeps partial reply); close pickers. You can then send a new prompt or switch `/model`. Esc (or Ctrl+Q, which also quits) stops a running chat `run_command`; `/stop` does too |

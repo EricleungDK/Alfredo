@@ -1,0 +1,2 @@
+### Fixed
+- `/accept`, `/reject` and `/cancel-task` on a task that cannot take them now say the task's status and a next command (for example "Task #1 is already accepted" or "Task #1 failed; /repair 1 <hint>") instead of a `/review` template or "no successful check evidence". The `/review` template hint appears only for a review-ready task, and the `/approve` and `/cancel-task` refusals name the current status. Allowed transitions are unchanged.

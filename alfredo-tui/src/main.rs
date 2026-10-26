@@ -1473,8 +1473,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('k') if ctrl => work.app.sessions[index].kill_to_end(),
                         KeyCode::Left => work.app.sessions[index].left(),
                         KeyCode::Right => work.app.sessions[index].right(),
-                        KeyCode::Home => work.app.sessions[index].home(),
-                        KeyCode::End => work.app.sessions[index].end(),
+                        // Empty prompt, or Ctrl: jump the transcript (issue #393).
+                        KeyCode::Home | KeyCode::End
+                            if work.tasks.agent_shown().is_some()
+                                || work.app.models_visible
+                                || work.tasks.visible =>
+                        {
+                            if key.code == KeyCode::Home {
+                                work.app.sessions[index].home()
+                            } else {
+                                work.app.sessions[index].end()
+                            }
+                        }
+                        KeyCode::Home => work.app.sessions[index].home_key(ctrl),
+                        KeyCode::End => work.app.sessions[index].end_key(ctrl),
                         KeyCode::Delete => work.app.sessions[index].delete(),
                         KeyCode::Char('w') if ctrl => work.app.sessions[index].delete_word(),
                         KeyCode::Char('u') if ctrl => work.app.sessions[index].clear_draft(),
@@ -2515,6 +2527,7 @@ const HELP_LINES: &[&str] = &[
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
     "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
+    "Chat transcript: Home/End (empty prompt) or Ctrl+Home/Ctrl+End jump to the oldest/latest row; End resumes following new output. With text in the prompt, Home/End move the cursor.",
     "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
     "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals): read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {model, state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
     "--model NAME: in the terminal it is the model for new conversations (a restored conversation keeps its saved model). With --headless (--go or --chat) and --doctor an explicit --model is the model for that run even when the conversation has a saved one: it is checked against the installed list first (exit 2 names it), never saved, and echoed as \"model\" in the JSON and on one stderr line. Without --model (or with only ALFREDO_MODEL) the conversation's saved model applies.",

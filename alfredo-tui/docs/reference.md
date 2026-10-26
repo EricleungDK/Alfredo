@@ -314,6 +314,10 @@ PageUp lets you read older output while a response continues streaming. PageDown
 moves toward the latest text and resumes following when it reaches the bottom.
 Each conversation keeps its own reading point while you switch sessions or views.
 
+Home jumps to the oldest row and End to the latest, resuming following new output,
+while the prompt is empty. Ctrl+Home and Ctrl+End do the same even with text in the
+prompt; with text, plain Home and End still move the prompt cursor.
+
 ## Run an explicit inference diagnostic
 
 The standalone runner is opt-in and uses isolated repositories and missions. It
