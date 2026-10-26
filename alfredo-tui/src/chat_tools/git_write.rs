@@ -228,6 +228,19 @@ fn full(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(output)
 }
 
+/// [`full`] for a listing that decides a secret check: git's stderr warnings refuse it
+/// too (see [`git_read::git_complete_listing`]).
+fn full_complete(root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = git_read::git_complete_listing(root, args, FULL)?;
+    if output.len() >= FULL {
+        return Err(format!(
+            "git {} output is too large to check safely; refused",
+            verb(args)
+        ));
+    }
+    Ok(output)
+}
+
 /// The git subcommand of an argument list, for messages (`git` alone when empty).
 fn verb<'a>(args: &[&'a str]) -> &'a str {
     args.first().copied().unwrap_or("git")
@@ -542,12 +555,43 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
             }
         }
     }
+    // Status shows a rename only when both names are in the pathspec, and the staged
+    // name listing above shows a copy as a plain add, so a secret staged under a new
+    // name (`git mv .npmrc docs/notes.txt`, `cp .npmrc config.txt`) is found here: the
+    // sources of every staged rename or copy in the whole index, in either mode.
+    let index = full_complete(
+        root,
+        &[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--find-renames",
+            "--find-copies",
+            "--find-copies-harder",
+            "-l0",
+            "--name-status",
+            "-z",
+            "--",
+        ],
+    )?;
+    // Read lossily: a replacement character may hide the bytes that made a name secret.
+    if index.contains('\u{FFFD}') {
+        return Err("a staged file name is not UTF-8; the commit is refused".into());
+    }
+    let mut fields = index.split('\0').filter(|f| !f.is_empty());
+    while let Some(status) = fields.next() {
+        let first = fields.next();
+        if status.starts_with(['R', 'C']) {
+            names.extend(first.map(String::from));
+            fields.next();
+        }
+    }
     match names
         .iter()
-        .find(|name| crate::planning_context::secret(&name.to_lowercase()))
+        .find(|name| crate::planning_context::secret(name))
     {
         Some(name) => Err(format!(
-            "refused: {name} looks like a secret (.env*, *.pem, *.key, *.p12, *.pfx or .git); commit it by hand if intended"
+            "refused: {name} looks like a secret or credential file (see the secret-file list in docs/reference.md); commit it by hand if intended"
         )),
         None => Ok(()),
     }
@@ -564,24 +608,58 @@ fn commit_run(root: &Path, arguments: &Value) -> Result<String, String> {
     if !plan.pathspecs.is_empty() {
         let mut add = vec!["add", "--"];
         add.extend(plan.pathspecs.iter().map(String::as_str));
+        let intent = intent_to_add(root)?;
         let index = write(root, &["write-tree"], Env::Local)?;
         let index = index.trim();
         write(root, &add, Env::Local).map_err(|error| error + &leftovers(root))?;
+        // Re-check the staged set the commit will take: a plain-named file holding a copy
+        // of a secret is only visible once it is staged (`plan_commit` saw it untracked).
+        if let Err(error) = refuse_secrets(root, &plan.pathspecs) {
+            return Err(error + &restore_index(root, index, &intent) + &leftovers(root));
+        }
         args.push("--");
         args.extend(plan.pathspecs.iter().map(String::as_str));
         if let Err(error) = write(root, &args, Env::Local) {
-            let restored = match write(root, &["read-tree", "--end-of-options", index], Env::Local)
-            {
-                Ok(_) => "; the index was restored".to_string(),
-                Err(reset) => format!("; restoring the index failed ({reset})"),
-            };
-            return Err(error + &restored + &leftovers(root));
+            return Err(error + &restore_index(root, index, &intent) + &leftovers(root));
         }
     } else {
         write(root, &args, Env::Local).map_err(|error| error + &leftovers(root))?;
     }
     let made = git_read::git(root, &["log", "-1", "--no-color", "--format=%h %s"])?;
     Ok(format!("committed on {}: {}", plan.branch, made.trim()))
+}
+
+/// Put the index back to the tree `write-tree` recorded before `git add`; the message
+/// says whether that worked.
+/// `read-tree` drops intent-to-add entries (`git add -N`), so they are added again.
+fn restore_index(root: &Path, index: &str, intent: &[String]) -> String {
+    let restored =
+        write(root, &["read-tree", "--end-of-options", index], Env::Local).and_then(|_| {
+            if intent.is_empty() {
+                return Ok(String::new());
+            }
+            let mut args = vec!["add", "--intent-to-add", "--"];
+            args.extend(intent.iter().map(String::as_str));
+            write(root, &args, Env::Local)
+        });
+    match restored {
+        Ok(_) => "; the index was restored".to_string(),
+        Err(reset) => format!("; restoring the index failed ({reset})"),
+    }
+}
+
+/// Paths that are intent-to-add entries in the index (new to the index, not to the
+/// worktree; the worktree diff lists them as added).
+fn intent_to_add(root: &Path) -> Result<Vec<String>, String> {
+    let out = full(
+        root,
+        &["diff", "--name-only", "--diff-filter=A", "-z", "--"],
+    )?;
+    Ok(out
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 struct SwitchPlan {
