@@ -1290,6 +1290,9 @@ impl Session {
         if let Some(timing) = &mut self.timing {
             timing.pause(now);
         }
+        // A new card is unseen until a draw says otherwise (issue #303).
+        self.approval_header_drawn.set(false);
+        self.approval_whole.set(false);
         self.approval = Some((card, None));
         true
     }
@@ -1370,6 +1373,8 @@ impl Session {
         self.restore_queue();
         self.compacting = None;
         self.approval = None;
+        self.approval_header_drawn.set(false);
+        self.approval_whole.set(false);
         self.running_command = false;
         self.pending_rule = None;
         if self.status.active() {

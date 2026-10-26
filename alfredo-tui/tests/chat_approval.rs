@@ -1074,6 +1074,29 @@ fn a_run_command_card_too_long_to_show_is_deny_only_with_a_note() {
     }
 }
 
+/// Issue #303: what a draw said about the previous card never carries to a new one.
+#[test]
+fn a_new_card_is_not_answerable_by_y_until_it_is_drawn() {
+    let mut session = pending_session();
+    let card = session.pending_approval().unwrap().clone();
+    let attempt = session.attempt;
+    let now = Instant::now();
+    assert!(session.await_approval(attempt, card.clone(), now));
+    // Mirrors the main loop: visible only when the last draw showed the header.
+    session.approval_visible(session.approval_header_drawn(), now);
+    let armed = now + approval::ARM * 2;
+    assert_eq!(session.answer_approval('y', armed), None, "not drawn yet");
+    assert_eq!(
+        session.answer_approval('n', armed),
+        None,
+        "header not drawn yet"
+    );
+    // A cancelled turn forgets the draw too.
+    let mut session = pending_session();
+    session.cancel();
+    assert!(!session.approval_whole() && !session.approval_header_drawn());
+}
+
 #[test]
 fn cancel_and_restore_drop_the_pending_action() {
     let mut session = pending_session();
