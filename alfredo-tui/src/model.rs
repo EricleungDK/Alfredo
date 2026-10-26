@@ -12,6 +12,10 @@ pub const NO_TEXT: &str = "Model returned no text; Ctrl+R retries or send again"
 /// Failure text when a reply or tool step would pass [`MAX_TEXT`]; names the ways out.
 pub const OUTPUT_LIMIT: &str = "Conversation output limit reached; run /compact or /clear, or press Ctrl+N for a new conversation";
 pub const MAX_DRAFT: usize = 16 * 1024;
+/// Messages that can wait behind a running turn, and their total size (issue #338).
+pub const MAX_QUEUED: usize = 3;
+const MAX_QUEUED_BYTES: usize = MAX_DRAFT / 2;
+const BUSY: &str = "Esc stops the reply, or wait for it";
 pub const MAX_SESSIONS: usize = 8;
 pub const MAX_MESSAGES: usize = 4096;
 /// Notice shown when a paste is cut by [`MAX_DRAFT`]. Typed keys show no notice.
@@ -300,6 +304,12 @@ pub struct Session {
     pub tool_results_expanded: bool,
     #[serde(skip)]
     queued: bool,
+    /// Messages entered while a turn runs (issue #338): shown as `You · queued`, sent in
+    /// order once the turn completes, and returned to the prompt as a draft when it is
+    /// cancelled or fails. Not saved: a restart restores them as the draft (see
+    /// [`Session::checkpoint`]). Unrelated to `queued`, which is waiting for admission.
+    #[serde(skip)]
+    queue: Vec<String>,
     #[serde(skip)]
     queue_observation: Option<crate::inference_admission::Observation>,
     /// Live capacity of another Alfredo process this request is waiting out.
@@ -374,6 +384,7 @@ impl Session {
             transcript_cache: Default::default(),
             tool_results_expanded: false,
             queued: false,
+            queue: Vec::new(),
             queue_observation: None,
             capacity_wait: None,
             thinking: false,
@@ -512,6 +523,8 @@ impl Session {
             snapshot.cursor = chat.len();
         }
         snapshot.aside = None;
+        // A restart never replays queued text: it comes back as the draft (issue #338).
+        snapshot.restore_queue();
         snapshot.queued = false;
         snapshot.queue_observation = None;
         snapshot.capacity_wait = None;
@@ -855,7 +868,7 @@ impl Session {
 
     pub fn begin(&mut self) -> Result<Vec<Message>, &'static str> {
         if self.status.active() {
-            return Err("Esc stops the reply, or wait for it");
+            return Err(BUSY);
         }
         let prompt = self.draft.trim().to_string();
         if prompt.is_empty() {
@@ -883,6 +896,83 @@ impl Session {
         });
         self.clear_draft();
         Ok(self.start())
+    }
+
+    /// Enter while a turn runs (issue #338): queue the prompt instead of sending it. The
+    /// prompt is cleared on success; on refusal (full queue, a command, an approval card
+    /// waiting) the text stays in the prompt.
+    pub fn queue_draft(&mut self) -> Result<(), &'static str> {
+        // A card keeps its own keys (#264); queued text never answers it.
+        if !self.status.active() || self.pending_approval().is_some() {
+            return Err(BUSY);
+        }
+        let text = self.draft.trim().to_string();
+        if text.is_empty() {
+            return Err("Enter a prompt");
+        }
+        if text.starts_with('/') {
+            return Err("Commands cannot be queued; press Enter again when the reply ends");
+        }
+        let held: usize = self.queue.iter().map(String::len).sum();
+        if self.queue.len() >= MAX_QUEUED || held + text.len() > MAX_QUEUED_BYTES {
+            return Err("Queue full (3 messages); your text stays in the prompt until one is sent");
+        }
+        self.remember_submission();
+        self.queue.push(text);
+        self.clear_draft();
+        Ok(())
+    }
+
+    /// The messages waiting for the running turn to end, oldest first.
+    pub fn queued_messages(&self) -> &[String] {
+        &self.queue
+    }
+
+    /// After a completed turn: send the oldest queued message as the next turn. The text
+    /// being typed stays in the prompt. `None` when nothing is queued or the turn did not
+    /// complete; on a refusal the queue returns to the prompt instead.
+    pub fn begin_queued(&mut self) -> Option<Result<Vec<Message>, &'static str>> {
+        if self.queue.is_empty() || self.status != Status::Complete {
+            return None;
+        }
+        let text = self.queue.remove(0);
+        let (draft, cursor) = (std::mem::take(&mut self.draft), self.cursor);
+        self.draft = text.clone();
+        let result = self.begin();
+        if result.is_ok() {
+            self.draft = draft;
+            self.cursor = cursor;
+        } else {
+            self.draft = draft;
+            self.queue.insert(0, text);
+            self.restore_queue();
+        }
+        Some(result)
+    }
+
+    /// Return queued messages to the front of the prompt, one per line, never sent.
+    pub fn restore_queue(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let queued: Vec<String> = std::mem::take(&mut self.queue);
+        let joined = queued.join("\n");
+        let draft = if self.draft.trim().is_empty() {
+            joined
+        } else {
+            format!("{joined}\n{}", self.draft)
+        };
+        if draft.len() <= MAX_DRAFT {
+            self.draft = draft;
+            self.history_index = None;
+            self.unsent = None;
+            self.end();
+        } else {
+            // Too long to join the text being typed: keep each in the Up-arrow history.
+            for text in queued {
+                self.remember(text);
+            }
+        }
     }
 
     /// Whether the user message at `user_index` opened a turn that was cancelled
@@ -1226,6 +1316,7 @@ impl Session {
     }
 
     pub fn cancel(&mut self) {
+        self.restore_queue();
         self.compacting = None;
         self.approval = None;
         self.running_command = false;
@@ -2098,6 +2189,9 @@ impl Session {
             Update::Failed(reason) => self.status = Status::Failed(reason),
         }
         if !self.status.active() {
+            if matches!(self.status, Status::Failed(_)) {
+                self.restore_queue();
+            }
             self.running_command = false;
             self.pending_rule = None;
             self.retry = None;

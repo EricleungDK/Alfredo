@@ -168,6 +168,7 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | Key | Action |
 | --- | --- |
 | Enter | Send prompt or command |
+| Enter (while a reply runs) | Queue the prompt (`You · queued`); it is sent when the reply completes. Esc or a failed reply returns it to the prompt, never sent |
 | Ctrl+J / Alt+Enter | New line on any terminal; Shift+Enter too where the terminal reports it, and paste also works. The prompt box grows to show up to six lines |
 | F1 | Command picker (empty prompt; type to filter); typing `/` lists matching commands, Tab or Enter completes |
 | F2 | Right pane: task detail / conversation |

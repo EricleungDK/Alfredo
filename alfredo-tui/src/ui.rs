@@ -1452,6 +1452,15 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             heading: Line::styled(heading, Style::default().fg(color)),
         });
     }
+    // Messages entered during the running turn wait here until it ends (issue #338).
+    for text in session.queued_messages() {
+        lines.push(Line::styled(
+            "You · queued",
+            Style::default().fg(Color::DarkGray),
+        ));
+        lines.extend(text.lines().map(|line| Line::from(safe(line))));
+        lines.push(Line::default());
+    }
     // A failed request keeps its reason in the transcript until the next attempt.
     if let Status::Failed(error) = &session.status {
         // The empty-reply text already names Ctrl+R (issue #397).
