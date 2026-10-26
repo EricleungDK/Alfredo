@@ -20,7 +20,7 @@ const DEFAULT_COMMITS: u64 = 20;
 const MAX_COMMITS: u64 = 200;
 /// Longest ref or path argument accepted.
 const MAX_ARG: usize = 256;
-/// Largest name listing git_diff checks for secrets; a longer one is refused, not cut.
+/// Largest name listing `git_diff` checks for secrets; a longer one is refused, not cut.
 const DIFF_NAMES: usize = 4 << 20;
 
 pub const GIT_STATUS: Tool = Tool {

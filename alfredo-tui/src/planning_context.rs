@@ -75,7 +75,8 @@ pub(crate) fn secret(path: &str) -> bool {
             || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
                 .iter()
                 .any(|prefix| part.starts_with(prefix))
-            || (part.starts_with("credentials") && part.ends_with(".json"))
+            || (part.starts_with("credentials")
+                && Path::new(part).extension().is_some_and(|ext| ext == "json"))
             || [
                 ".pem",
                 ".key",
