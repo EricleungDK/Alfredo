@@ -433,6 +433,15 @@ thread_local! {
     static CALL_CLOCK: Cell<Option<Clock>> = const { Cell::new(None) };
 }
 
+/// Clears the running call's budget when the call ends, also when it unwinds.
+struct LeaveCallScope;
+
+impl Drop for LeaveCallScope {
+    fn drop(&mut self) {
+        CALL_CLOCK.with(|clock| clock.set(None));
+    }
+}
+
 /// Runs one tool call (or one approval step of a git write) under one budget: every
 /// verification and git process it starts draws on `deadline` together, so the call as a
 /// whole stops at it. A call already inside a scope keeps the outer budget.
@@ -440,14 +449,8 @@ pub(crate) fn call_scope<T>(deadline: Duration, run: impl FnOnce() -> T) -> T {
     if CALL_CLOCK.with(Cell::get).is_some() {
         return run();
     }
-    struct Leave;
-    impl Drop for Leave {
-        fn drop(&mut self) {
-            CALL_CLOCK.with(|clock| clock.set(None));
-        }
-    }
     CALL_CLOCK.with(|clock| clock.set(Some(Clock::start(deadline))));
-    let _leave = Leave;
+    let _leave = LeaveCallScope;
     run()
 }
 
@@ -768,9 +771,8 @@ fn read_control_file(path: &Path, clock: Clock, refusal: &str) -> Result<Option<
     }
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_file() => {}
-        Ok(_) => return Err(refusal.to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(refusal.to_string()),
+        Ok(_) | Err(_) => return Err(refusal.to_string()),
     }
     let file = fs::OpenOptions::new()
         .read(true)
