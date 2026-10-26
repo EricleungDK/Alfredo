@@ -18,6 +18,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "REVISION — confirm the exact reviewed draft",
     ),
     ("/scope-retry", "repeat the exact last scope request"),
+    (
+        "/scope-clear",
+        "leave Wayfinder and give chat its tools back",
+    ),
     ("/plan", "request — generate a reviewable task draft"),
     ("/plan-revise", "request — refine the current unsaved draft"),
     (
@@ -190,6 +194,7 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
             "/scope",
             "/scope-confirm",
             "/scope-retry",
+            "/scope-clear",
         ],
     ),
     (

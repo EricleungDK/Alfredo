@@ -307,6 +307,9 @@ fn canonical_wayfinder_routes_first_contact_and_reuses_flow_across_missions() {
         "Build a new app for scheduling",
         "Migrate the architecture",
         "A cross-cutting change",
+        "Plan a migration from Postgres to SQLite",
+        "Redesign the architecture of the importer",
+        "Let's design a new architecture for billing",
     ] {
         assert_eq!(entry_mode(prompt), Some(Mode::Chart), "{prompt}");
     }
@@ -317,6 +320,12 @@ fn canonical_wayfinder_routes_first_contact_and_reuses_flow_across_missions() {
         "Status of the new project",
         "How does platform-wide scheduling work?",
         "ordinary discussion",
+        // Bare consequential words are not project-start phrasing (issue #334).
+        "Run the migration script in migrations/ and fix any errors",
+        "Add a database migration for users",
+        "fix the typo in the architecture diagram caption",
+        "Rename the redesign flag in the config",
+        "migrate this test to the new helper",
     ] {
         assert_eq!(entry_mode(prompt), None, "{prompt}");
     }

@@ -373,8 +373,9 @@ Control characters are dropped as before and bidi controls in a reply show as `<
 
 ## Establish scope in conversation
 
-Describe a new project or consequential architectural change to enter Wayfinder
-Chart mode. A reference such as “Wayfinder ticket #42” enters Work-through. Ordinary
+Describe a new project or a planned architectural change (for example "plan a
+migration", "redesign the architecture", "new app") to enter Wayfinder Chart mode.
+The bare words "migration" or "architecture" in an ordinary request do not enter it. A reference such as “Wayfinder ticket #42” enters Work-through. Ordinary
 read-only questions stay outside automatic entry. A saved flow continues across
 missions and restarts. New-project `/plan`, `/task` and `/after` requests also enter
 this flow before creating work.
@@ -1190,6 +1191,10 @@ missions sharing this workspace and native runtime. Review it and use
 owner agreement only; it creates no plan, approval, agent or invocation.
 A replacement draft requires fresh confirmation. `/scope-retry` repeats the exact
 last scope write after an uncertain acknowledgment; `/tasks` returns to supervision.
+While a scope flow is active, chat has no tools. `/scope-clear` leaves Wayfinder: chat
+gets its tools and task context back, also after a restart. Scope receipts are kept;
+a later `/scope` draft or confirmation re-activates the flow. Tools still need the usual
+approval cards.
 
 While pending, the task store refuses new proposals, saved plans, policy/assignment/
 approval changes, repairs and run claims. Model discussion and transient plan previews,

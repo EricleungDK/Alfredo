@@ -658,6 +658,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Ok(decision) => {
                         let revision = decision.state.revision;
+                        // `/scope-clear` leaves Wayfinder: tools and task context return.
+                        let tools_back = alfredo_tui::wayfinder::tools_enabled(
+                            &work.tasks.store().understanding(),
+                            revision,
+                        );
                         let reference = serde_json::to_string(&decision.state.binding())
                             .expect("scope serializes");
                         work.tasks.observe_scope(decision.state);
@@ -709,7 +714,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     messages = session.request_through(turn.user_message);
                                 }
                             }
-                            if revision == 0 {
+                            if tools_back {
                                 let (context, notes) = work.tasks.chat_context_with_notes();
                                 messages.insert(0, context);
                                 // A transcript row, once per conversation and per
@@ -743,7 +748,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             // Plain chat runs the tool loop on the Coding Workspace (issue #233);
                             // a Wayfinder scope discussion stays tool-free.
                             let workspace =
-                                (revision == 0).then(|| work.tasks.workspace().to_path_buf());
+                                tools_back.then(|| work.tasks.workspace().to_path_buf());
                             jobs[turn.session] = Some(runtime.spawn(async move {
                                 match workspace {
                                     Some(workspace) => {
@@ -1887,6 +1892,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         .into();
                                 continue;
                             }
+                            if text == "/scope-clear" {
+                                work.app.notice = match work
+                                    .tasks
+                                    .store()
+                                    .understanding()
+                                    .clear_flow()
+                                {
+                                    Ok(state) => {
+                                        work.tasks.observe_scope(state);
+                                        work.app.sessions[index].remember_submission();
+                                        work.app.sessions[index].clear_draft();
+                                        "Left Wayfinder: chat tools are back; scope receipts are kept (/scope)".into()
+                                    }
+                                    Err(error) => format!("/scope-clear: {error}"),
+                                };
+                                continue;
+                            }
                             let prepared = if let Some(selector) =
                                 text.strip_prefix("/retry-command ")
                             {
@@ -2565,7 +2587,7 @@ const HELP_LINES: &[&str] = &[
     "/go GOAL · /go (runs the open or saved /plan, no re-planning) · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)",
     "/task description · /after 1,2 description · /approve ID · /cancel-task ID",
     "/permit ID JSON · /run ID · /evidence ID · /recover ID [requeue] · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /requeue ID · /resolve-repair ID · /branch ID",
-    "@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry",
+    "@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry · /scope-clear",
     "/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off",
     "/watch ID|architect · /tell ID|architect TEXT",
     "@path in a chat prompt attaches that file's working-tree text (8 mentions, 32 KiB per prompt; no spaces or quotes in the path; secrets, symlinks, ignored, binary and files over 256 KiB are refused); each refusal is listed in the transcript",
