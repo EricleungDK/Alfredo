@@ -1965,6 +1965,15 @@ size limit, and it is kept in memory only (not restored after a restart).
 - Anything that looks like a path (contains `/` or `.`) but cannot be attached shows a
   notice naming it and the reason, for example `@calc.py: not attached (no such file or
   directory: calc.py)`. A bare `@word` that is not a readable file is left alone silently.
+- Every refusal of a prompt is its own dim row above the transcript (replaced by the next
+  prompt's, wrapped to the width, shown with invisible characters as `<U+XXXX>`, never sent
+  to the model or saved); the footer only counts them. Nothing is cut off.
+- Paths with spaces and quoted paths are not supported, and are never attached. A mention
+  ends at whitespace, so in `@my file.txt` the mention is `@my`; when a sibling entry
+  starts with `my ` it says `@my: not found (paths with spaces are not supported)`. A
+  quoted form (`@"my file.txt"`, `@'...'`, `` @`...` ``) says `quoted paths and paths with
+  spaces are not supported`, even when the file exists. Rename the file or mention a
+  space-free path.
 - Not included: directory mentions, Tab completion of paths, mentions in `/go` goals or
   commands. `@wayfinder REQUEST` is unchanged. Planner and worker references still use
   committed HEAD content.

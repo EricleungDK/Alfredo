@@ -468,6 +468,16 @@ class ChatFileMentions(unittest.TestCase):
                 terminal.write(b'check @missing.rs mail a@b.com @everyone\r')
                 terminal.wait_for('@missing.rs: not attached (no such file')
                 self.assertNotIn('everyone: not attached', terminal.screen())
+                # Several refusals each get their own row, none cut off (issue #391), and a
+                # mention cut at a space says so.
+                terminal.wait_for('MENTION_REPLY_3')
+                Path(repo, 'my file.txt').write_text('SPACED\n')
+                terminal.write(b'try @gone1.rs @gone2.rs @my file.txt and @"my file.txt"\r')
+                terminal.wait_for('@my: not found (paths with spaces are not supported)')
+                shown = terminal.screen()
+                for expected in ('@gone1.rs: not attached', '@gone2.rs: not attached', 'quoted paths and paths with spaces are'):
+                    self.assertIn(expected, shown)
+                self.assertNotIn('SPACED', shown)
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
             finally:
