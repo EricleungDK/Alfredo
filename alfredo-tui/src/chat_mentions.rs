@@ -18,6 +18,9 @@ pub struct Candidate {
     pub path: String,
     /// Looks like a path (has `/` or `.`): a failure earns a notice.
     pub strict: bool,
+    /// Written as `@"..."`, `@'...'` or `` @`...` ``: never read, always refused with a
+    /// notice (quoted and spaced paths are not supported).
+    pub quoted: bool,
 }
 
 fn separator(c: char) -> bool {
@@ -53,6 +56,17 @@ pub fn parse(prompt: &str) -> Vec<Candidate> {
             continue;
         }
         let rest = &prompt[at + 1..];
+        if rest.starts_with(['"', '\'', '`']) {
+            let shown = quoted_text(rest);
+            if !found.iter().any(|existing| existing.path == shown) {
+                found.push(Candidate {
+                    path: shown,
+                    strict: true,
+                    quoted: true,
+                });
+            }
+            continue;
+        }
         let end = rest.find(separator).unwrap_or(rest.len());
         let token = rest[..end].trim_end_matches(['.', '!', '?']);
         let token = token.strip_prefix("./").unwrap_or(token);
@@ -63,10 +77,35 @@ pub fn parse(prompt: &str) -> Vec<Candidate> {
             found.push(Candidate {
                 path: token.into(),
                 strict: token.contains('/') || token.contains('.'),
+                quoted: false,
             });
         }
     }
     found
+}
+
+/// What a quoted mention looked like, for the notice: the opening quote and the text up
+/// to its closing quote (or the end of the line), at most 60 characters. Never read.
+fn quoted_text(rest: &str) -> String {
+    let quote = rest.chars().next().unwrap_or('"');
+    let body = &rest[quote.len_utf8()..];
+    let line = body.lines().next().unwrap_or("");
+    let (inner, closed) = match line.find(quote) {
+        Some(close) => (&line[..close], true),
+        None => (line, false),
+    };
+    let mut shown: String = inner.chars().take(60).collect();
+    if inner.chars().count() > 60 {
+        shown.push('…');
+    }
+    format!(
+        "{quote}{shown}{}",
+        if closed {
+            quote.to_string()
+        } else {
+            String::new()
+        }
+    )
 }
 
 #[derive(Debug, Default)]
@@ -78,27 +117,41 @@ pub struct Attachment {
     pub files: Vec<String>,
 }
 
+/// A notice is shown on screen and stderr: invisible and control characters of the
+/// typed path or an error text appear as `<U+XXXX>` (issue #305, #391).
+fn visible(notice: String) -> String {
+    crate::dashboard::safe_visible(&notice).replace('\n', " ")
+}
+
 /// Built from already-read files; split out so bounds are unit-testable.
 pub fn assemble(
     candidates: &[Candidate],
     mut read: impl FnMut(&str) -> Result<String, String>,
+    mut spaced: impl FnMut(&str) -> bool,
 ) -> Attachment {
     let mut out = Attachment::default();
     let mut budget = MAX_BYTES;
     let mut files = String::new();
     for (index, candidate) in candidates.iter().enumerate() {
         if index >= MAX_MENTIONS {
-            out.notices.push(format!(
+            out.notices.push(visible(format!(
                 "@{}: not attached (limit {MAX_MENTIONS} mentions per prompt)",
                 candidate.path
-            ));
+            )));
+            continue;
+        }
+        if candidate.quoted {
+            out.notices.push(visible(format!(
+                "@{}: not attached (quoted paths and paths with spaces are not supported)",
+                candidate.path
+            )));
             continue;
         }
         match read(&candidate.path) {
-            Ok(_) if budget == 0 => out.notices.push(format!(
+            Ok(_) if budget == 0 => out.notices.push(visible(format!(
                 "@{}: not attached (32 KiB per-prompt limit reached)",
                 candidate.path
-            )),
+            ))),
             Ok(text) => {
                 let mut end = text.len().min(budget);
                 while !text.is_char_boundary(end) {
@@ -115,9 +168,16 @@ pub fn assemble(
                 budget -= end;
             }
             Err(reason) => {
-                if candidate.strict {
-                    out.notices
-                        .push(format!("@{}: not attached ({reason})", candidate.path));
+                if spaced(&candidate.path) {
+                    out.notices.push(visible(format!(
+                        "@{}: not found (paths with spaces are not supported)",
+                        candidate.path
+                    )));
+                } else if candidate.strict {
+                    out.notices.push(visible(format!(
+                        "@{}: not attached ({reason})",
+                        candidate.path
+                    )));
                 }
             }
         }
@@ -200,6 +260,39 @@ fn ignored_untracked(root: &Path, relative: &str, check_failed: &mut bool) -> bo
     }
 }
 
+/// True when `path` (relative, no symlink on the way) names no file, but a sibling entry
+/// of the same directory starts with `<name> `: the mention was cut at a space. Only
+/// directory entry names are compared; nothing is read and nothing is echoed.
+fn cut_at_space(root: &Path, path: &str) -> bool {
+    const SCAN: usize = 20_000;
+    let relative = Path::new(path.trim());
+    let mut dir = root.to_path_buf();
+    let mut name = None;
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(part) = component else {
+            return false;
+        };
+        if components.peek().is_some() {
+            dir.push(part);
+            match std::fs::symlink_metadata(&dir) {
+                Ok(metadata) if metadata.is_dir() => {}
+                _ => return false,
+            }
+        } else {
+            name = part.to_str();
+        }
+    }
+    let Some(name) = name else { return false };
+    let prefix = format!("{name} ");
+    std::fs::read_dir(&dir).is_ok_and(|entries| {
+        entries
+            .take(SCAN)
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+    })
+}
+
 /// Resolve the mentions of `prompt` against the working tree of the workspace at `root`.
 pub async fn attach(root: &Path, prompt: &str) -> Attachment {
     let candidates = parse(prompt);
@@ -207,9 +300,11 @@ pub async fn attach(root: &Path, prompt: &str) -> Attachment {
         return Attachment::default();
     }
     let mut check_failed = false;
-    assemble(&candidates, |path| {
-        read_mention(root, path, &mut check_failed)
-    })
+    assemble(
+        &candidates,
+        |path| read_mention(root, path, &mut check_failed),
+        |path| cut_at_space(root, path),
+    )
 }
 
 #[cfg(test)]
@@ -246,9 +341,10 @@ mod tests {
             .map(|i| Candidate {
                 path: format!("f{i}.txt"),
                 strict: true,
+                quoted: false,
             })
             .collect();
-        let out = assemble(&many, |_| Ok("x\n".into()));
+        let out = assemble(&many, |_| Ok("x\n".into()), |_| false);
         assert_eq!(out.block.matches("\nFILE ").count(), MAX_MENTIONS);
         assert_eq!(out.notices.len(), 2);
         assert!(out.notices[0].contains("f8.txt") && out.notices[0].contains("limit 8"));
@@ -256,8 +352,9 @@ mod tests {
         let big = vec![Candidate {
             path: "big.txt".into(),
             strict: true,
+            quoted: false,
         }];
-        let out = assemble(&big, |_| Ok("€".repeat(20_000)));
+        let out = assemble(&big, |_| Ok("€".repeat(20_000)), |_| false);
         let total = 60_000;
         assert!(out
             .block
@@ -267,13 +364,15 @@ mod tests {
             Candidate {
                 path: "a.txt".into(),
                 strict: true,
+                quoted: false,
             },
             Candidate {
                 path: "b.txt".into(),
                 strict: true,
+                quoted: false,
             },
         ];
-        let out = assemble(&two, |_| Ok("y".repeat(MAX_BYTES)));
+        let out = assemble(&two, |_| Ok("y".repeat(MAX_BYTES)), |_| false);
         assert!(!out.block.contains("FILE b.txt"));
         assert!(out.notices[0].contains("b.txt") && out.notices[0].contains("32 KiB"));
     }
@@ -281,7 +380,7 @@ mod tests {
     #[test]
     fn unresolved_strict_mentions_notify_and_soft_ones_stay_silent() {
         let list = parse("@gone.rs and @everyone");
-        let out = assemble(&list, |_| Err("not found".into()));
+        let out = assemble(&list, |_| Err("not found".into()), |_| false);
         assert_eq!(out.notices, ["@gone.rs: not attached (not found)"]);
         assert!(out.block.is_empty());
     }

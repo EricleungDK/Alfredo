@@ -693,9 +693,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         work.tasks.workspace(),
                                         &prompt,
                                     ));
+                                // One transcript row per refusal; the footer only points at them.
                                 if !attachment.notices.is_empty() {
-                                    work.app.notice = attachment.notices.join(" · ");
+                                    work.app.notice = format!(
+                                        "{} @path mention(s) not attached · reasons are listed in the transcript",
+                                        attachment.notices.len()
+                                    );
                                 }
+                                work.app.sessions[turn.session].show_mention_refusals(
+                                    turn.user_message,
+                                    attachment.notices.clone(),
+                                );
                                 if !attachment.block.is_empty() {
                                     let session = &mut work.app.sessions[turn.session];
                                     session.attach(turn.user_message, attachment.block);
@@ -2561,6 +2569,7 @@ const HELP_LINES: &[&str] = &[
     "@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry",
     "/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off",
     "/watch ID|architect · /tell ID|architect TEXT",
+    "@path in a chat prompt attaches that file's working-tree text (8 mentions, 32 KiB per prompt; no spaces or quotes in the path; secrets, symlinks, ignored, binary and files over 256 KiB are refused); each refusal is listed in the transcript",
     "/clear start this conversation fresh (tasks are kept)",
     "/compact summarise older turns into a short note now (also automatic near the size limit)",
     "/allow list always-allow rules (a on an approval card adds one; never for push) · /allow clear [ID]",
