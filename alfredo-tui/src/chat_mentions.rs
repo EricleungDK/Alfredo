@@ -308,6 +308,7 @@ fn cut_at_space(root: &Path, path: &str) -> bool {
 }
 
 /// Resolve the mentions of `prompt` against the working tree of the workspace at `root`.
+#[must_use]
 pub fn attach(root: &Path, prompt: &str) -> Attachment {
     let candidates = parse(prompt);
     if candidates.is_empty() {
