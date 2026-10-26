@@ -10,5 +10,5 @@
 - `git_diff` and `git_commit` also catch a secret renamed or copied to a plain name,
   within git's similarity threshold, including in a repository with more than 1000 files
   and for files that `git_commit` stages itself (the staging is undone on a refusal). A
-  copy edited beyond that threshold, a plain file overwritten with secret bytes and hard
-  links are not detected.
+  copy edited beyond that threshold, a copy of a secret that was never committed, a plain
+  file overwritten with secret bytes and hard links are not detected.

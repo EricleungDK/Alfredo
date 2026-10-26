@@ -608,18 +608,19 @@ fn commit_run(root: &Path, arguments: &Value) -> Result<String, String> {
     if !plan.pathspecs.is_empty() {
         let mut add = vec!["add", "--"];
         add.extend(plan.pathspecs.iter().map(String::as_str));
+        let intent = intent_to_add(root)?;
         let index = write(root, &["write-tree"], Env::Local)?;
         let index = index.trim();
         write(root, &add, Env::Local).map_err(|error| error + &leftovers(root))?;
         // Re-check the staged set the commit will take: a plain-named file holding a copy
         // of a secret is only visible once it is staged (`plan_commit` saw it untracked).
         if let Err(error) = refuse_secrets(root, &plan.pathspecs) {
-            return Err(error + &restore_index(root, index) + &leftovers(root));
+            return Err(error + &restore_index(root, index, &intent) + &leftovers(root));
         }
         args.push("--");
         args.extend(plan.pathspecs.iter().map(String::as_str));
         if let Err(error) = write(root, &args, Env::Local) {
-            return Err(error + &restore_index(root, index) + &leftovers(root));
+            return Err(error + &restore_index(root, index, &intent) + &leftovers(root));
         }
     } else {
         write(root, &args, Env::Local).map_err(|error| error + &leftovers(root))?;
@@ -630,11 +631,35 @@ fn commit_run(root: &Path, arguments: &Value) -> Result<String, String> {
 
 /// Put the index back to the tree `write-tree` recorded before `git add`; the message
 /// says whether that worked.
-fn restore_index(root: &Path, index: &str) -> String {
-    match write(root, &["read-tree", "--end-of-options", index], Env::Local) {
+/// `read-tree` drops intent-to-add entries (`git add -N`), so they are added again.
+fn restore_index(root: &Path, index: &str, intent: &[String]) -> String {
+    let restored =
+        write(root, &["read-tree", "--end-of-options", index], Env::Local).and_then(|_| {
+            if intent.is_empty() {
+                return Ok(String::new());
+            }
+            let mut args = vec!["add", "--intent-to-add", "--"];
+            args.extend(intent.iter().map(String::as_str));
+            write(root, &args, Env::Local)
+        });
+    match restored {
         Ok(_) => "; the index was restored".to_string(),
         Err(reset) => format!("; restoring the index failed ({reset})"),
     }
+}
+
+/// Paths that are intent-to-add entries in the index (new to the index, not to the
+/// worktree; the worktree diff lists them as added).
+fn intent_to_add(root: &Path) -> Result<Vec<String>, String> {
+    let out = full(
+        root,
+        &["diff", "--name-only", "--diff-filter=A", "-z", "--"],
+    )?;
+    Ok(out
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 struct SwitchPlan {

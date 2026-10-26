@@ -1626,7 +1626,9 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   git_diff and in git_commit (staged files, and unstaged files that the commit adds, are
   checked again after `git add` and the staging is undone on a refusal). Not detected: a
   copy or rename edited beyond the threshold, a tracked innocent file overwritten with
-  secret bytes, and a hard link to a secret. A copy search git cuts short past its
+  secret bytes, and a hard link to a secret. Copy detection compares the index with HEAD,
+  so a copy of a secret that was never committed (an untracked `.env` copied to
+  `config.txt` by an approved `run_command` or by hand) is not detected. A copy search git cuts short past its
   rename limit is refused, not shown. git_diff reads the changed names and the patch in
   two git calls, so a file changed between them is not covered.
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
