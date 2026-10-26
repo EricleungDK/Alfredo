@@ -102,27 +102,29 @@ fn scenario() -> Vec<String> {
 /// re-captured for #258, which adds the `^O expand results` footer hint (frame bodies
 /// are unchanged); re-captured for #404, which expands the tab in message 1's `\ttabbed` line
 /// to four spaces (the golden had it vanish);
-/// re-captured for #399, which adds the `Ctrl+R retries` footer hint to the two failed-turn frames.
+/// re-captured for #399, which adds the `Ctrl+R retries` footer hint to the two failed-turn frames;
+/// re-captured for #393, which widens the chat footer's scroll hint to `PgUp/Dn/Home/End scroll`
+/// (the changed frames are the wide ones that show that hint; bodies are unchanged).
 const GOLDEN: [&str; 21] = [
-    "8efcb6e369f15a7356a1633cf2d2ab64b47cd8a5e7904f0ba318fa54f709656a",
-    "aa80a31ced18b14400d600e7670760f10ef4d28b81c4a6315033bcf771d81daf",
-    "d5f8bf37b43885cdbadf736e24e8defdd42745aa05e3a13045156383ebabe5f6",
-    "735cebf0c341119efe9b47b010f92cf3d0dd8affc0b8fac32ec68297dec4be06",
-    "a5b3f244a93390f75334ea4f7ac7a1a3032c576b5e22bc37a51b70339bcabf58",
+    "79e33b494ca7e0b0cb7efaab742759b360f99eee302a32277dc3072722b42b53",
+    "d10d31cdc917e429a66da765248b31f13eed56bef302b23ce67adeef890a560a",
+    "f4fafc9f1f3e032579c6f39e5bdd69fe8a4f7ea7eaf0dc90d92dca15efaa3a6b",
+    "57025740de7158f351fc48ac47ee16e091fd625e7c1020554611edc06092dbe9",
+    "5e820ea5757ea8491a6a75ab4de22053f3b14227e90a3ef0e034cda1182010aa",
     "883f3792bad3aa6dc22f39c5516a802955be399d32550955d33ef1db0a199958",
     "0d160dafacaba7ffc2020e5c7ed81af2efb3dacbedbd6f60ff35c9c2ae498c66",
-    "f94667678349f12a94d8859d6e27ca3399a0ac5f91f9a65c3e713d59d16db56b",
-    "c8de1b79a3e98afd3776c0cb006446365f254606c57e8ca547b9cd609dc349bf",
+    "8fadde1e14d4d87cda5adb5720c30b88dd90e5184f8193a96d0e348f5e32f95a",
+    "36846bf02582e75bf51e282bab99b4e75844967430d9f7507aeff9fea813fbd7",
     "fc4ca5b9376d952cbcf62f5e9fbb371c58c6e087223afd22f605894cf92a6cd7",
     "fc4ca5b9376d952cbcf62f5e9fbb371c58c6e087223afd22f605894cf92a6cd7",
-    "74137953f371429fb1a28dbf22fb6f7223c09365871672e4372b108f3c658666",
-    "faf96de0ac8d0168e9f6f51ca9a6b94d92e99ff7e2b936c393952a74606a594c",
-    "829a0ee7e3da89fbac9738e8598f32d2eff9e19f9d8b57e28351ce1b902676fb",
-    "8efcb6e369f15a7356a1633cf2d2ab64b47cd8a5e7904f0ba318fa54f709656a",
-    "66535fad939251375f37f0614b28cacefd1b0df7c2c9ca6dc393221ce1b6ec02",
-    "a39f3b71a19d1a109861a1d9e9cea3e6e680da31606d5934c69ecc1e4b78efcb",
-    "f59395801898b6b88155105fab75c8a6e2cf1cb9aed3d83cff914f7514826c6e",
-    "f59395801898b6b88155105fab75c8a6e2cf1cb9aed3d83cff914f7514826c6e",
+    "bfbbefefaaff5d19f25d0c8765b289619655e24648378a3206a689644a63fb39",
+    "aa6a34899781549760aa6bf14e88ea43b7f79b3584069a44a8c9b324360e241c",
+    "88fdba48d3cad1878c13c2b654f1e4303189df075d2b4c5e1dfa020e4a73184f",
+    "79e33b494ca7e0b0cb7efaab742759b360f99eee302a32277dc3072722b42b53",
+    "67e61da96f70b321c2c04f48f2143c92268b82e19dff3bc4ed6d271c7eac2474",
+    "27cbd2754954363982606a6a6fe9482ad1ac544d75073539149b60ffdf608378",
+    "4c3814088036ee7f49c1322fc883a5fd1ce6653307274002a3de4840e65fbe3b",
+    "4c3814088036ee7f49c1322fc883a5fd1ce6653307274002a3de4840e65fbe3b",
     "5bafd1e125329425b4a9c1807e2280ebededfc87aba146c0711418b687f56a32",
     "c2492680b2b10d894c98a43c5d6d5558d7280d28142d58409a846d49b93611e8",
 ];
