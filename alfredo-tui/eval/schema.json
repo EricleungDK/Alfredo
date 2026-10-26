@@ -40,6 +40,7 @@
         "properties": {
           "task": {"type": "string"},
           "kind": {"enum": ["positive", "negative_control"]},
+          "mode": {"enum": ["go", "chat"]},
           "trial": {"type": "integer", "minimum": 1},
           "pass": {"type": "boolean"},
           "outcome": {"enum": ["done", "failed", "timeout", "crashed", "harness_error"]},
