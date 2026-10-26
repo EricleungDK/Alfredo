@@ -47,7 +47,7 @@ pub const READ_FILE: Tool = Tool {
 pub const LIST_FILES: Tool = Tool {
     name: "list_files",
     tier: Tier::Read,
-    description: "List files (recursively) in the Coding Workspace or one of its directories, one relative path per line. Skips .git, secrets (credential files such as .env*, *.key, *.pem, .npmrc, id_rsa*, .ssh/, .aws/, secrets.y*ml; the full list is in docs/reference.md) and generated or vendor trees.",
+    description: "List files (recursively) in the Coding Workspace or one of its directories, one relative path per line. Skips .git, secrets (.env*, *.key, .npmrc) and generated/vendor trees.",
     parameters: || {
         json!({
             "type": "object",
