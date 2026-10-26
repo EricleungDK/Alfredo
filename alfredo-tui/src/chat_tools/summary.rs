@@ -59,20 +59,7 @@ pub fn summarize_within(name: &str, arguments: &Value, width: usize) -> Option<S
                 None => reference,
             }
         }
-        "git_diff" => {
-            let range = match (text("base"), text("target")) {
-                (Some(base), Some(target)) => {
-                    format!("{}...{}", cut(base, false), cut(target, false))
-                }
-                (Some(base), None) => cut(base, false),
-                _ if flag("staged") => "staged".into(),
-                _ => "working tree".into(),
-            };
-            match text("path") {
-                Some(only) => format!("{range} {}", cut(only, false)),
-                None => range,
-            }
-        }
+        "git_diff" => git_diff_summary(arguments),
         "write_file" => {
             let lines = text("content").map_or(0, |content| content.lines().count());
             let unit = if lines == 1 { "line" } else { "lines" };
@@ -109,21 +96,7 @@ pub fn summarize_within(name: &str, arguments: &Value, width: usize) -> Option<S
                 None => format!("{remote} (current branch)"),
             }
         }
-        "run_command" => {
-            let mut notes = Vec::new();
-            if let Some(cwd) = text("cwd") {
-                notes.push(format!("in {}", cut(cwd, false)));
-            }
-            if flag("escalate") {
-                notes.push("on host".to_string());
-            }
-            let command = quoted_raw(text("command"));
-            if notes.is_empty() {
-                command
-            } else {
-                format!("{command} ({})", notes.join(", "))
-            }
-        }
+        "run_command" => run_command_summary(arguments),
         "propose_plan" => {
             let mode = match text("mode") {
                 Some("plan") => "/plan",
@@ -134,6 +107,42 @@ pub fn summarize_within(name: &str, arguments: &Value, width: usize) -> Option<S
         }
         _ => return None,
     })
+}
+
+/// The `git_diff` row: the compared range, then the path filter if any.
+fn git_diff_summary(arguments: &Value) -> String {
+    let text = |key: &str| arguments.get(key).and_then(Value::as_str);
+    let staged = arguments.get("staged").and_then(Value::as_bool) == Some(true);
+    let range = match (text("base"), text("target")) {
+        (Some(base), Some(target)) => {
+            format!("{}...{}", cut(base, false), cut(target, false))
+        }
+        (Some(base), None) => cut(base, false),
+        _ if staged => "staged".into(),
+        _ => "working tree".into(),
+    };
+    match text("path") {
+        Some(only) => format!("{range} {}", cut(only, false)),
+        None => range,
+    }
+}
+
+/// The `run_command` row: the command, then where and how it runs.
+fn run_command_summary(arguments: &Value) -> String {
+    let text = |key: &str| arguments.get(key).and_then(Value::as_str);
+    let mut notes = Vec::new();
+    if let Some(cwd) = text("cwd") {
+        notes.push(format!("in {}", cut(cwd, false)));
+    }
+    if arguments.get("escalate").and_then(Value::as_bool) == Some(true) {
+        notes.push("on host".to_string());
+    }
+    let command = quoted_raw(text("command"));
+    if notes.is_empty() {
+        command
+    } else {
+        format!("{command} ({})", notes.join(", "))
+    }
 }
 
 /// A shell command shown as written (not quoted), cut like other text.
