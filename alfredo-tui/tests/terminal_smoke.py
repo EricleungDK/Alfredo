@@ -1375,7 +1375,8 @@ class TerminalSmoke(unittest.TestCase):
             self.assertEqual(selection_journal.read_bytes(), before_cancel)
             with tempfile.TemporaryDirectory(prefix='alfredo-switch-workspace-') as other:
                 subprocess.run(['git', '-C', other, 'init', '-q', '--template='], check=True)
-                os.write(master, b'\x15/workspace\r')
+                # Issue #353: a cancelled selector leaves the draft empty, so no Ctrl-U is needed.
+                os.write(master, b'/workspace\r')
                 wait_for(b'Workspace selection required')
                 os.write(master, b'\x15' + other.encode() + b'\r')
                 wait_for(b'Mission selection required')
