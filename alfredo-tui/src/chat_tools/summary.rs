@@ -18,13 +18,18 @@ pub fn summarize(name: &str, arguments: &Value) -> Option<String> {
     let text = |key: &str| arguments.get(key).and_then(Value::as_str);
     let flag = |key: &str| arguments.get(key).and_then(Value::as_bool) == Some(true);
     let path = |key: &str| text(key).map_or_else(|| "?".to_string(), |value| cut(value, false));
+    let file_path = |key: &str| {
+        text(key).map_or_else(|| "?".to_string(), |value| shorten_path(value, MAX_TEXT))
+    };
     let quoted = |key: &str| text(key).map_or_else(|| "?".to_string(), |value| cut(value, true));
     Some(match name {
         "read_file" => match arguments.get("start_line").and_then(Value::as_u64) {
-            Some(line) if line > 1 => format!("{} (from line {line})", path("path")),
-            _ => path("path"),
+            Some(line) if line > 1 => format!("{} (from line {line})", file_path("path")),
+            _ => file_path("path"),
         },
-        "list_files" => text("path").map_or_else(|| ".".into(), |value| cut(value, false)),
+        "list_files" => {
+            text("path").map_or_else(|| ".".into(), |value| shorten_path(value, MAX_TEXT))
+        }
         "grep" => {
             let place = text("path").map_or_else(|| ".".into(), |value| cut(value, false));
             let case = if flag("ignore_case") {
@@ -59,9 +64,9 @@ pub fn summarize(name: &str, arguments: &Value) -> Option<String> {
         "write_file" => {
             let lines = text("content").map_or(0, |content| content.lines().count());
             let unit = if lines == 1 { "line" } else { "lines" };
-            format!("{} ({lines} {unit})", path("path"))
+            format!("{} ({lines} {unit})", file_path("path"))
         }
-        "edit_file" => path("path"),
+        "edit_file" => file_path("path"),
         "git_commit" => {
             let scope = match arguments.get("files").and_then(Value::as_array) {
                 Some(files) if !files.is_empty() => {
@@ -121,6 +126,75 @@ pub fn summarize(name: &str, arguments: &Value) -> Option<String> {
 /// A shell command shown as written (not quoted), cut like other text.
 fn quoted_raw(command: Option<&str>) -> String {
     command.map_or_else(|| "?".to_string(), |value| cut(value, false))
+}
+
+/// A path shortened to at most `width` display columns for a `⚙` row (issue #392): the
+/// file name stays whole and as many leading directories as fit are kept, joined with
+/// `…/` (`src/very/…/with/main.rs` becomes `src/very/…/main.rs`). A file name wider
+/// than the room is cut at its front instead, so the extension survives. Only the first
+/// line is used; hidden format characters show as `<U+XXXX>` like the rest of the row.
+pub fn shorten_path(path: &str, width: usize) -> String {
+    let more_lines = path.lines().nth(1).is_some();
+    let clean = crate::dashboard::safe_visible(path.lines().next().unwrap_or(""));
+    // A second line costs one trailing `…`, like `cut`.
+    let room = width.saturating_sub(usize::from(more_lines));
+    let mut out = shorten_line(&clean, room);
+    if more_lines {
+        out.push('…');
+    }
+    out
+}
+
+fn shorten_line(path: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if path.width() <= width {
+        return path.to_string();
+    }
+    let root = if path.starts_with('/') { "/" } else { "" };
+    let rest = &path[root.len()..];
+    let (dirs, name) = match rest.trim_end_matches('/').rfind('/') {
+        Some(at) => (&rest[..at], &rest[at + 1..]),
+        None => ("", rest),
+    };
+    // `…/` joins the kept directories to the name.
+    let name_room = width.saturating_sub(root.width() + 2);
+    if name.width() > name_room || width < 3 {
+        return front_cut(name, width);
+    }
+    let mut kept = String::new();
+    let mut used = root.width() + 2 + name.width();
+    for dir in dirs.split('/').filter(|dir| !dir.is_empty()) {
+        let cost = dir.width() + 1;
+        if used + cost > width {
+            break;
+        }
+        kept.push_str(dir);
+        kept.push('/');
+        used += cost;
+    }
+    format!("{root}{kept}…/{name}")
+}
+
+/// `…` plus the longest tail of `text` that fits in `width` columns, never splitting a
+/// character and never starting on a zero-width mark.
+fn front_cut(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if width == 0 {
+        return String::new();
+    }
+    let mut used = 1;
+    let mut start = text.len();
+    for (index, ch) in text.char_indices().rev() {
+        let cells = ch.width().unwrap_or(0);
+        if used + cells > width {
+            break;
+        }
+        used += cells;
+        start = index;
+    }
+    let tail = text[start..].trim_start_matches(|ch: char| ch.width().unwrap_or(0) == 0);
+    debug_assert!(tail.width() < width);
+    format!("…{tail}")
 }
 
 /// `text` cut to [`MAX_TEXT`] characters (never bytes) and its first line, with `…`
@@ -281,6 +355,118 @@ mod tests {
         assert!(!multi.contains('\n'), "{multi:?}");
         let path = row("edit_file", json!({"path": "d/".repeat(100)}));
         assert!(path.chars().count() <= MAX_TEXT + 1, "{path}");
+    }
+
+    /// Columns left for a path after the `⚙ read_file ` prefix of a row.
+    fn room(columns: usize) -> usize {
+        use unicode_width::UnicodeWidthStr;
+        columns - "⚙ read_file ".width()
+    }
+
+    const DEEP: &str = "src/very/deep/nested/module/directory/structure/with/main.rs";
+
+    #[test]
+    fn long_paths_keep_the_file_name_at_40_60_and_100_columns() {
+        use unicode_width::UnicodeWidthStr;
+        for columns in [40, 60, 100] {
+            let shown = shorten_path(DEEP, room(columns));
+            assert!(shown.width() <= room(columns), "{columns}: {shown}");
+            assert!(shown.ends_with("/main.rs"), "{columns}: {shown}");
+            if DEEP.width() > room(columns) {
+                assert!(shown.contains('…'), "{columns}: {shown}");
+            }
+        }
+        assert_eq!(shorten_path(DEEP, 100), DEEP);
+        assert_eq!(shorten_path(DEEP, 28), "src/very/deep/…/main.rs");
+        assert_eq!(
+            shorten_path("/home/me/project/deep/dir/lib.rs", 20),
+            "/home/me/…/lib.rs"
+        );
+    }
+
+    #[test]
+    fn sibling_files_render_differently_at_every_width() {
+        let a = "src/very/deep/nested/module/directory/structure/with/alpha.rs";
+        let b = "src/very/deep/nested/module/directory/structure/with/beta.rs";
+        for columns in [40, 60, 100] {
+            assert_ne!(
+                shorten_path(a, room(columns)),
+                shorten_path(b, room(columns))
+            );
+        }
+        let rows = |tool: &str, name: &str| {
+            row(
+                tool,
+                json!({"path": format!("src/very/deep/nested/module/directory/structure/with/{name}")}),
+            )
+        };
+        for tool in ["read_file", "edit_file", "write_file", "list_files"] {
+            let (one, two) = (rows(tool, "alpha.rs"), rows(tool, "beta.rs"));
+            assert_ne!(one, two);
+            assert!(
+                one.contains("alpha.rs") && two.contains("beta.rs"),
+                "{one} {two}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_name_longer_than_the_room_is_cut_at_the_front() {
+        use unicode_width::UnicodeWidthStr;
+        let shown = shorten_path("a/b/a_really_long_file_name_for_tests.rs", 16);
+        assert!(shown.width() <= 16, "{shown}");
+        assert!(shown.starts_with('…') && shown.ends_with(".rs"), "{shown}");
+    }
+
+    #[test]
+    fn cjk_and_accented_paths_are_cut_on_display_width_not_mid_character() {
+        use unicode_width::UnicodeWidthStr;
+        let cjk = format!("{}文件.rs", "目录/".repeat(30));
+        let accents = format!("{}é.rs", "dossier_éàü/".repeat(10));
+        for path in [cjk, accents, "文".repeat(50)] {
+            for width in [1, 2, 5, 17, 28, 48, 60] {
+                let shown = shorten_path(&path, width);
+                assert!(shown.width() <= width, "{width}: {shown}");
+            }
+        }
+        let shown = shorten_path(&format!("{}文件.rs", "目录/".repeat(30)), 28);
+        assert!(shown.ends_with("/文件.rs"), "{shown}");
+    }
+
+    #[test]
+    fn path_rows_stay_within_the_text_limit_and_sanitised() {
+        use unicode_width::UnicodeWidthStr;
+        let hidden = format!("src/{}evil/{}/main.rs", '\u{202E}', "d/".repeat(60));
+        for tool in ["read_file", "edit_file", "write_file", "list_files"] {
+            let shown = row(tool, json!({"path": hidden, "content": ""}));
+            assert!(!shown.contains('\u{202E}'), "{shown:?}");
+            assert!(shown.contains("main.rs"), "{shown}");
+            assert!(shown.width() <= MAX_TEXT + " (0 lines)".len(), "{shown}");
+        }
+        let short = row("read_file", json!({"path": "a\u{202E}b.rs"}));
+        assert!(!short.contains('\u{202E}'), "{short:?}");
+        let multi = row("read_file", json!({"path": "a.rs\nsecond"}));
+        assert!(
+            !multi.contains('\n') && multi.starts_with("a.rs"),
+            "{multi:?}"
+        );
+    }
+
+    #[test]
+    fn command_grep_and_git_rows_still_cut_at_the_end() {
+        let long = format!("{}/main.rs", "d".repeat(100));
+        for shown in [
+            row("run_command", json!({"command": long})),
+            row("grep", json!({"pattern": "x", "path": long})),
+            row("git_diff", json!({"path": long})),
+            row("git_switch", json!({"branch": long})),
+        ] {
+            assert!(
+                shown.contains(&"d".repeat(40)) && !shown.contains("main.rs"),
+                "{shown}"
+            );
+            assert!(shown.contains('…'), "{shown}");
+        }
     }
 
     #[test]
