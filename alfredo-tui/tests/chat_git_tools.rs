@@ -9,7 +9,11 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    time::Duration,
 };
 
 static ID: AtomicU64 = AtomicU64::new(0);
@@ -587,6 +591,100 @@ fn a_linked_object_store_or_pack_directory_into_another_repository_is_never_read
         );
         assert!(!output.contains("add creds"), "{variant}: {output}");
         assert!(output.starts_with("error:"), "{variant}: {output}");
+    }
+}
+
+/// Runs one tool call on its own thread and waits at most `limit`. A call that does not
+/// return (a read that blocks on a FIFO) fails the test instead of hanging it (issue #359,
+/// review 3). The stuck thread is left behind; the test process exits without it.
+fn dispatch_within(root: &Path, tool: &str, arguments: serde_json::Value) -> String {
+    let (sender, receiver) = mpsc::channel();
+    let (root, name) = (root.to_path_buf(), tool.to_string());
+    std::thread::spawn(move || {
+        let output = chat_tools::dispatch(
+            &root,
+            &ToolCall {
+                name,
+                arguments,
+            },
+        );
+        let _ = sender.send(output);
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|_| panic!("{tool} did not return within 10 s: a FIFO blocked it"))
+}
+
+fn mkfifo(path: &Path) {
+    assert!(Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap()
+        .success());
+}
+
+/// Issue #359 (review 3): a FIFO where the object store's `info/alternates` is read would
+/// block the read forever. The tool refuses at once, with an error, instead.
+#[test]
+fn an_alternates_fifo_refuses_promptly_and_never_hangs() {
+    let repo = Repo::new();
+    let alternates = repo.root.join(".git/objects/info/alternates");
+    fs::create_dir_all(alternates.parent().unwrap()).unwrap();
+    mkfifo(&alternates);
+    for (tool, arguments) in [
+        ("git_status", json!({})),
+        ("git_log", json!({})),
+        ("git_diff", json!({"base": "HEAD~1", "target": "HEAD"})),
+    ] {
+        let output = dispatch_within(&repo.root, tool, arguments);
+        assert!(output.starts_with("error:"), "{tool}: {output}");
+    }
+}
+
+/// Issue #359 (review 3): a linked worktree whose `gitdir` back-reference is a FIFO would
+/// block the read of that back-reference forever. The tool refuses at once instead.
+#[test]
+fn a_worktree_back_reference_fifo_refuses_promptly_and_never_hangs() {
+    let repo = Repo::new();
+    let wt = repo.base.join("wt");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt-branch",
+            wt.to_str().unwrap(),
+        ],
+    );
+    let back = repo.root.join(".git/worktrees/wt/gitdir");
+    fs::remove_file(&back).unwrap();
+    mkfifo(&back);
+    for (tool, arguments) in [("git_status", json!({})), ("git_log", json!({}))] {
+        let output = dispatch_within(&wt, tool, arguments);
+        assert!(output.starts_with("error:"), "{tool}: {output}");
+    }
+}
+
+/// Issue #359 (review 3): a reflog under `logs/` that is a symlink into another repository
+/// is refused like a link in `refs/` or `info/`, however deep it sits.
+#[test]
+fn a_reflog_symlink_into_another_repository_is_never_read() {
+    let other = Repo::new();
+    fs::write(other.root.join("creds.txt"), "AWS_SECRET=hunter2\n").unwrap();
+    git(&other.root, &["add", "creds.txt"]);
+    git(&other.root, &["commit", "-q", "-m", "add creds"]);
+    let repo = Repo::new();
+    let heads = repo.root.join(".git/logs/refs/heads");
+    fs::create_dir_all(&heads).unwrap();
+    // A fresh repository already has its own reflog for main: replace it with the link.
+    fs::remove_file(heads.join("main")).unwrap();
+    std::os::unix::fs::symlink(other.root.join(".git/logs/HEAD"), heads.join("main")).unwrap();
+    for (tool, arguments) in [("git_status", json!({})), ("git_log", json!({}))] {
+        let output = dispatch_within(&repo.root, tool, arguments);
+        assert!(!output.contains("hunter2"), "{tool}: {output}");
+        assert!(output.starts_with("error:"), "{tool}: {output}");
     }
 }
 
