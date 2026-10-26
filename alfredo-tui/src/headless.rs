@@ -839,7 +839,7 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
     }
     // Same `@path` rules and bounds as interactive chat, on the workspace root the
     // read tools are confined to (issue #282).
-    let attachment = runtime.block_on(alfredo_tui::chat_mentions::attach(&workspace, &prompt));
+    let attachment = alfredo_tui::chat_mentions::attach(&workspace, &prompt);
     for notice in &attachment.notices {
         say(notice);
     }

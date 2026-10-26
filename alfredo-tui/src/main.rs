@@ -688,11 +688,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     .get(turn.user_message)
                                     .map(|message| message.content.clone())
                                     .unwrap_or_default();
-                                let attachment =
-                                    runtime.block_on(alfredo_tui::chat_mentions::attach(
-                                        work.tasks.workspace(),
-                                        &prompt,
-                                    ));
+                                let attachment = alfredo_tui::chat_mentions::attach(
+                                    work.tasks.workspace(),
+                                    &prompt,
+                                );
                                 // One transcript row per refusal; the footer only points at them.
                                 if !attachment.notices.is_empty() {
                                     work.app.notice = format!(
