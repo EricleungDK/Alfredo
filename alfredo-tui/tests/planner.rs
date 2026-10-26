@@ -1607,6 +1607,62 @@ fn empty_policy_files_name_the_task() {
 }
 
 #[test]
+fn plan_rejects_hidden_characters_naming_field_and_code_point() {
+    type Edit = fn(&mut Plan);
+    let cases: [(Edit, &str); 5] = [
+        (
+            |p| p.tasks[1].policy.check[2] = "unit\u{202E}test".into(),
+            "Plan task 2 check argument 3 contains hidden character U+202E",
+        ),
+        (
+            |p| p.tasks[0].title = "Title\u{200B}".into(),
+            "Plan task 1 title contains hidden character U+200B",
+        ),
+        (
+            |p| p.prompt = "Goal\u{2066}".into(),
+            "Plan prompt contains hidden character U+2066",
+        ),
+        (
+            |p| p.tasks[0].acceptance[0] = "ok\u{2028}more".into(),
+            "Plan task 1 acceptance 1 contains hidden character U+2028",
+        ),
+        (
+            |p| p.tasks[0].policy.check[0] = "py\u{200B}thon3".into(),
+            "Plan task 1 check argument 1 contains hidden character U+200B",
+        ),
+    ];
+    for (edit, message) in cases {
+        let mut plan = plan();
+        edit(&mut plan);
+        let error = plan.validate().unwrap_err();
+        assert!(error.starts_with(message), "{error}");
+    }
+}
+
+#[test]
+fn plan_with_non_ascii_letters_still_validates() {
+    let mut plan = plan();
+    plan.tasks[0].title = "Café résumé 日本語の計算".into();
+    plan.tasks[0].acceptance = vec!["Même résultat 結果が同じ".into()];
+    plan.tasks[0].policy.check = vec!["python3".into(), "-k".into(), "café_日本".into()];
+    plan.validate().unwrap();
+}
+
+#[test]
+fn legacy_plan_with_hidden_check_character_is_shown_not_dropped() {
+    let fixture = Fixture::new();
+    let mut draft = plan();
+    draft.tasks[0].policy.check = vec!["python3".into(), "ok\u{202E}evil".into()];
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_visible(true);
+    control.planner.visible = true;
+    control.planner.draft = Some(draft);
+    let text = draw_text(&control, 140, 36);
+    assert!(text.contains("check: python3 ok<U+202E>evil"), "{text}");
+    assert!(!text.contains('\u{202E}'), "{text}");
+}
+
+#[test]
 fn manual_plan_shows_validation_warnings_without_blocking_save() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let fixture = Fixture::new();
