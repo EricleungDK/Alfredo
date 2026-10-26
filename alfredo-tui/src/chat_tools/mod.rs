@@ -192,6 +192,24 @@ pub(crate) fn cap_to(text: String, limit: usize) -> String {
     )
 }
 
+/// Whether stderr shows a command wanted a terminal prompt it does not have
+/// (ssh, sudo, or git with `GIT_TERMINAL_PROMPT=0`). Shared by `run_command`
+/// and the git write tools.
+pub(crate) fn needed_terminal(stderr: &str) -> bool {
+    let stderr = stderr.to_lowercase();
+    [
+        "/dev/tty",
+        "no tty",
+        "a terminal is required",
+        "host key verification failed",
+        "terminal prompts disabled",
+        "could not read username",
+        "could not read password",
+    ]
+    .iter()
+    .any(|needle| stderr.contains(needle))
+}
+
 /// Optional string argument.
 pub(crate) fn text_arg<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
     match arguments.get(name) {

@@ -7220,7 +7220,7 @@ async fn repair_after_a_steer_starts_fresh_and_never_replays_or_parses_the_parti
 }
 
 #[test]
-fn accept_refusal_leads_with_the_review_template_for_the_tasks_real_criteria() {
+fn accept_on_a_proposed_task_with_criteria_names_its_status_not_the_review_template() {
     use alfredo_tui::planner::{Plan, Step};
     let fixture = Fixture::new();
     fixture.permit();
@@ -7246,7 +7246,7 @@ fn accept_refusal_leads_with_the_review_template_for_the_tasks_real_criteria() {
             }],
         },
     });
-    // The criteria guard runs before status checks, so no run is needed.
+    // The template is offered only for a review-ready task; this one is still proposed.
     let revision = fixture.store.snapshot().unwrap().revision;
     let message = fixture
         .store
@@ -7260,12 +7260,9 @@ fn accept_refusal_leads_with_the_review_template_for_the_tasks_real_criteria() {
         })
         .unwrap_err()
         .to_string();
-    assert!(message.starts_with("Use /review 2 {"), "{message}");
-    assert!(message.contains(r#""criterion":2"#), "{message}");
-    assert!(!message.contains("/accept"), "{message}");
-    assert!(message
-        .chars()
-        .take(80)
-        .collect::<String>()
-        .contains("/review 2"));
+    assert_eq!(
+        message, "Task #2 is proposed; /approve 2, then /run 2",
+        "{message}"
+    );
+    assert!(!message.contains("Use /review"), "{message}");
 }

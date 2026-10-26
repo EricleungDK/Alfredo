@@ -497,7 +497,7 @@ fn unknown_task_is_refused_with_next_step_and_no_retry_hint() {
 
 #[test]
 fn accept_without_run_evidence_is_refused_with_next_step() {
-    refused_without_retry_hint("/accept 1", "Task #1 has not run; /run 1 first");
+    refused_without_retry_hint("/accept 1", "Task #1 is proposed; /approve 1, then /run 1");
 }
 
 #[test]

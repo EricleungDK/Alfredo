@@ -1,7 +1,8 @@
 use super::{
-    dim, frame_block, safe, short_phase, side_pane, single_line, task_state_word, truncate,
-    wrap_words, Clear, Color, Constraint, Frame, Instant, Layout, Line, Modifier, Paragraph, Rect,
-    Span, Style, TaskControl, Theme, Tone, UnicodeWidthStr, Wrap, GAP, LABEL, MAX_DEPTH,
+    dim, frame_block, safe, safe_visible, short_phase, side_pane, single_line, task_state_word,
+    truncate, wrap_words, Clear, Color, Constraint, Frame, Instant, Layout, Line, Modifier,
+    Paragraph, Rect, Span, Style, TaskControl, Theme, Tone, UnicodeWidthStr, Wrap, GAP, LABEL,
+    MAX_DEPTH,
 };
 
 /// `Label    value`: dim label column, value wrapped with a hanging indent.
@@ -376,7 +377,12 @@ fn work_detail(
     let pinned = if live.is_some() { lines.len() } else { 0 };
     if let Some(policy) = &task.policy {
         lines.extend(labeled("Files", &policy.files.join(", "), width, normal));
-        lines.extend(labeled("Check", &policy.check.join(" "), width, normal));
+        lines.extend(labeled(
+            "Check",
+            &safe_visible(&policy.check.join(" ")),
+            width,
+            normal,
+        ));
     }
     if !task.dependencies.is_empty() {
         let text = task

@@ -20,7 +20,7 @@ use super::{
     approval::CardKind,
     edit::Change,
     git_read::{self, ref_arg},
-    text_arg, Tier, Tool, MAX_OUTPUT,
+    needed_terminal, text_arg, Tier, Tool, MAX_OUTPUT,
 };
 use serde_json::{json, Value};
 use std::{path::Path, process::Command, time::Duration};
@@ -1133,12 +1133,29 @@ fn detach_from_terminal(command: &mut Command) {
     let _ = command;
 }
 
-/// Whether git's stderr shows ssh wanted a prompt it could not have.
-fn needed_terminal(error: &str) -> bool {
-    let error = error.to_lowercase();
-    ["/dev/tty", "no tty", "host key verification failed"]
-        .iter()
-        .any(|needle| error.contains(needle))
+/// Git's own error lines, with the terminal hint appended when a remote command needed a
+/// prompt, so the real failure (for example an HTTPS credential error) is never lost.
+fn failure_message(args: &[&str], error: &str, remote: bool) -> String {
+    let lines: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("hint:"))
+        .map(|line| {
+            line.trim_start_matches("fatal: ")
+                .trim_start_matches("error: ")
+        })
+        .take(4)
+        .collect();
+    let message = if lines.is_empty() {
+        format!("git {} failed", verb(args))
+    } else {
+        lines.join("; ")
+    };
+    if remote && needed_terminal(error) {
+        format!("{message}\n{TERMINAL_HINT}")
+    } else {
+        message
+    }
 }
 
 /// Run a writing git command in `root`. `Err` is git's message.
@@ -1174,24 +1191,7 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
             verb(args)
         )),
         Some(status) if !status.success() => {
-            if matches!(env, Env::Remote) && needed_terminal(&error) {
-                return Err(TERMINAL_HINT.to_string());
-            }
-            let lines: Vec<&str> = error
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty() && !line.starts_with("hint:"))
-                .map(|line| {
-                    line.trim_start_matches("fatal: ")
-                        .trim_start_matches("error: ")
-                })
-                .take(4)
-                .collect();
-            Err(if lines.is_empty() {
-                format!("git {} failed", verb(args))
-            } else {
-                lines.join("; ")
-            })
+            Err(failure_message(args, &error, matches!(env, Env::Remote)))
         }
         Some(_) => Ok(String::from_utf8_lossy(&out).into_owned()),
     }
@@ -1278,6 +1278,20 @@ mod tests {
             "***@github.com:o/r.git"
         );
         assert_eq!(redacted("/tmp/r\u{1b}[2J.git"), "/tmp/r\\u{1b}[2J.git");
+    }
+
+    #[test]
+    fn terminal_failures_keep_git_error_and_add_the_hint() {
+        let https =
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n";
+        let message = failure_message(&["push"], https, true);
+        assert!(message.contains("could not read Username"), "{message}");
+        assert!(message.ends_with(TERMINAL_HINT), "{message}");
+        let ssh = failure_message(&["push"], "Host key verification failed.\n", true);
+        assert!(ssh.contains("Host key verification failed"), "{ssh}");
+        assert!(ssh.ends_with(TERMINAL_HINT), "{ssh}");
+        let local = failure_message(&["commit"], "fatal: could not read Username\n", false);
+        assert!(!local.contains(TERMINAL_HINT), "{local}");
     }
 
     #[test]

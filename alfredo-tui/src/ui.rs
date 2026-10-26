@@ -860,7 +860,7 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
                 frame,
                 area,
                 tasks,
-                safe(&tasks.planner.view())
+                safe_visible(&tasks.planner.view())
                     .lines()
                     .map(|s| Line::from(s.to_owned()))
                     .collect(),
