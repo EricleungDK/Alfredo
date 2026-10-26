@@ -601,13 +601,7 @@ fn dispatch_within(root: &Path, tool: &str, arguments: serde_json::Value) -> Str
     let (sender, receiver) = mpsc::channel();
     let (root, name) = (root.to_path_buf(), tool.to_string());
     std::thread::spawn(move || {
-        let output = chat_tools::dispatch(
-            &root,
-            &ToolCall {
-                name,
-                arguments,
-            },
-        );
+        let output = chat_tools::dispatch(&root, &ToolCall { name, arguments });
         let _ = sender.send(output);
     });
     receiver
@@ -616,11 +610,7 @@ fn dispatch_within(root: &Path, tool: &str, arguments: serde_json::Value) -> Str
 }
 
 fn mkfifo(path: &Path) {
-    assert!(Command::new("mkfifo")
-        .arg(path)
-        .status()
-        .unwrap()
-        .success());
+    assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
 }
 
 /// Issue #359 (review 3): a FIFO where the object store's `info/alternates` is read would

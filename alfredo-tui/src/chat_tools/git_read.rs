@@ -9,6 +9,7 @@ use std::{
     collections::HashSet,
     fs,
     io::Read,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
@@ -653,7 +654,8 @@ pub(crate) fn verified_git_dir_within(
         let entry_of_main = git_dir != common_dir
             && !common_dir.starts_with(&root)
             && git_dir.parent() == Some(common_dir.join("worktrees").as_path());
-        let back = fs::read_to_string(git_dir.join("gitdir")).map_err(|_| OUTSIDE.to_string())?;
+        let back = read_control_file(&git_dir.join("gitdir"), clock, OUTSIDE)?
+            .ok_or_else(|| OUTSIDE.to_string())?;
         let back = git_dir.join(back.trim_end());
         entry_of_main && back.canonicalize().is_ok_and(|back| back == dot_git)
     } else {
@@ -667,7 +669,7 @@ pub(crate) fn verified_git_dir_within(
     // and kept inside the repository: a link or a borrowed store shows another repository.
     walk_without_links(&git_dir, clock, false)?;
     walk_without_links(&common_dir, clock, false)?;
-    for tree in ["refs", "info"] {
+    for tree in ["refs", "info", "logs"] {
         walk_without_links(&common_dir.join(tree), clock, true)?;
         if git_dir != common_dir {
             walk_without_links(&git_dir.join(tree), clock, true)?;
@@ -729,10 +731,10 @@ fn object_stores_within(common_dir: &Path, clock: Clock) -> Result<(), String> {
             return Err(UNCHECKED.to_string());
         }
         walk_without_links(&store, clock, true)?;
-        let text = match fs::read_to_string(store.join("info").join("alternates")) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(ALTERNATES.to_string()),
+        let Some(text) =
+            read_control_file(&store.join("info").join("alternates"), clock, ALTERNATES)?
+        else {
+            continue;
         };
         for line in text.lines().map(str::trim) {
             if line.is_empty() || line.starts_with('#') {
@@ -749,6 +751,43 @@ fn object_stores_within(common_dir: &Path, clock: Clock) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Most bytes of a control file git reads here (`gitdir`, `info/alternates`).
+const CONTROL_FILE_LIMIT: u64 = 64 << 10;
+
+/// The text of `path` when it is an ordinary file, `None` when it does not exist, and the
+/// `refusal` for anything else: a FIFO, device, socket, directory or symbolic link. Reading
+/// a FIFO blocks until a writer comes, so nothing is read before the file type is known
+/// (issue #359, review 3). The file is opened without following links and without blocking,
+/// then its type is checked again on the open file, so a swap between the two checks is
+/// refused too. Charged to `clock`: a spent budget is a refusal, never a partial read.
+fn read_control_file(path: &Path, clock: Clock, refusal: &str) -> Result<Option<String>, String> {
+    if clock.left().is_zero() {
+        return Err(UNCHECKED.to_string());
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err(refusal.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(refusal.to_string()),
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| refusal.to_string())?;
+    if !file.metadata().map_err(|_| refusal.to_string())?.is_file() {
+        return Err(refusal.to_string());
+    }
+    let mut text = String::new();
+    file.take(CONTROL_FILE_LIMIT + 1)
+        .read_to_string(&mut text)
+        .map_err(|_| refusal.to_string())?;
+    if text.len() as u64 > CONTROL_FILE_LIMIT {
+        return Err(refusal.to_string());
+    }
+    Ok(Some(text))
 }
 
 /// A git-reported directory, canonical, or the refusal when it is not a directory.
