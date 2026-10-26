@@ -1323,7 +1323,18 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
     // (task, first line, block index, phases); the group is always last.
     let mut group: Option<(Option<u64>, usize, usize, Vec<Phase>)> = None;
     let width = usize::from(area.width.saturating_sub(4)).max(20);
+    let (refused_after, refusal_rows) = session.mention_refusals();
     for index in 0..=session.messages.len() {
+        // `@path` refusals of the latest prompt (issue #391): one row each right after
+        // that prompt, display only.
+        if index == refused_after + 1 && !refusal_rows.is_empty() {
+            lines.extend(
+                refusal_rows
+                    .iter()
+                    .map(|row| Line::styled(safe_visible(row), dim())),
+            );
+            lines.push(Line::default());
+        }
         loop {
             let receipt = receipts.peek().filter(|item| item.after_messages == index);
             let command = commands.peek().filter(|item| item.after_messages == index);

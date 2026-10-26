@@ -298,6 +298,74 @@ fn project_notes_arrival_row_is_shown_once_reset_by_clear_and_never_sent_or_save
     assert!(session.show_project_notes(1, line.into()));
 }
 
+/// Issue #391: each `@path` refusal is its own display-only transcript row.
+#[test]
+fn every_mention_refusal_is_a_transcript_row_replaced_by_the_next_prompt_and_never_sent_or_saved() {
+    use ratatui::{backend::TestBackend, Terminal};
+    fn screen(session: &Session, width: u16) -> String {
+        let mut app = App::new("fixture".into());
+        app.sessions[0] = session.clone();
+        let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+        terminal
+            .draw(|frame| alfredo_tui::ui::draw(frame, &app))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+    let mut session = started();
+    let (status, messages) = (session.status.clone(), session.messages.clone());
+    let request = session.request_through(0);
+    let rows: Vec<String> = (0..6)
+        .map(|i| format!("@file{i}.txt: not attached (no such file or directory)"))
+        .collect();
+    session.show_mention_refusals(0, rows.clone());
+    let shown = screen(&session, 120);
+    for row in &rows {
+        assert!(shown.contains(row.as_str()), "{row}\n{shown}");
+    }
+    // They sit right after the prompt they belong to, not at the top of the transcript.
+    assert!(
+        shown.find("Explain this repository").unwrap() < shown.find("@file0.txt").unwrap(),
+        "{shown}"
+    );
+    // A later prompt replaces them; an empty list clears them.
+    session.show_mention_refusals(0, vec!["@x.rs: not attached (binary)".into()]);
+    let shown = screen(&session, 120);
+    assert!(shown.contains("@x.rs: not attached") && !shown.contains("@file0.txt"));
+    // Invisible characters never reach the screen.
+    session.show_mention_refusals(0, vec!["@a\u{202e}b.txt: not attached (binary)".into()]);
+    let shown = screen(&session, 120);
+    assert!(
+        shown.contains("<U+202E>") && !shown.contains('\u{202e}'),
+        "{shown}"
+    );
+    session.show_mention_refusals(0, Vec::new());
+    assert!(!screen(&session, 120).contains("not attached"));
+    // Never sent, never saved, no effect on the turn.
+    session.show_mention_refusals(0, rows);
+    assert_eq!(session.request_through(0), request);
+    assert_eq!(
+        (session.status.clone(), session.messages.clone()),
+        (status, messages)
+    );
+    let json = serde_json::to_string(&session).unwrap();
+    assert!(!json.contains("not attached"), "{json}");
+    // A long row wraps instead of being cut off.
+    session.show_mention_refusals(
+        0,
+        vec![format!(
+            "@{}.txt: not attached (no such file or directory)",
+            "d/".repeat(30)
+        )],
+    );
+    assert!(screen(&session, 40).contains("no such file or directory"));
+}
+
 #[test]
 fn client_timing_is_attempt_bound_visible_and_not_restored_as_live_time() {
     use ratatui::{backend::TestBackend, Terminal};

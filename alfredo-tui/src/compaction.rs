@@ -400,6 +400,11 @@ impl Session {
         shift(&mut self.attachments, cut);
         shift(&mut self.tool_steps, cut);
         shift(&mut self.rule_marks, cut);
+        // `@path` refusal rows follow their prompt, or go with it (issue #391).
+        self.mention_refusals = match self.mention_refusals.0.checked_sub(cut) {
+            Some(index) => (index, std::mem::take(&mut self.mention_refusals.1)),
+            None => (0, Vec::new()),
+        };
         self.interrupted = self
             .interrupted
             .iter()

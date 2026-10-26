@@ -290,6 +290,10 @@ pub struct Session {
     notes_lines: Vec<String>,
     #[serde(skip)]
     notes_fingerprint: Option<u64>,
+    /// The user message of the latest prompt with refused `@path` mentions and one row
+    /// per refusal (issue #391). Display only: never sent to the model, never saved.
+    #[serde(skip)]
+    mention_refusals: (usize, Vec<String>),
     pub scroll: std::cell::Cell<u16>,
     #[serde(
         default,
@@ -379,6 +383,7 @@ impl Session {
             pending_rule: None,
             notes_lines: Vec::new(),
             notes_fingerprint: None,
+            mention_refusals: (0, Vec::new()),
             scroll: std::cell::Cell::new(0),
             reading: Default::default(),
             transcript_cache: Default::default(),
@@ -1117,6 +1122,18 @@ impl Session {
         let extra = self.notes_lines.len().saturating_sub(4);
         self.notes_lines.drain(..extra);
         true
+    }
+
+    /// Replace the `@path` refusal rows with `rows`, one per refused mention of the
+    /// prompt at message `user_message` (issue #391); they are drawn right after it.
+    /// Display only: not a message, grants nothing.
+    pub fn show_mention_refusals(&mut self, user_message: usize, rows: Vec<String>) {
+        self.mention_refusals = (user_message, rows);
+    }
+
+    /// The `@path` refusal rows and the user message they follow.
+    pub fn mention_refusals(&self) -> (usize, &[String]) {
+        (self.mention_refusals.0, &self.mention_refusals.1)
     }
 
     /// Arrival lines to draw above the transcript.
@@ -1917,6 +1934,7 @@ impl Session {
                 })
                 // Project notes (#322) render above the transcript.
                 + self.notes_lines.len()
+                + self.mention_refusals.1.len() + 1
                 + 1
         };
         let reading = self.reading.get();

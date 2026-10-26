@@ -168,6 +168,22 @@ fn index_bound_state_follows_the_kept_turns() {
 }
 
 /// A turn whose reply was cancelled; it becomes an interrupted turn once the next one starts.
+/// Issue #391: `@path` refusal rows follow their prompt through a compaction.
+#[test]
+fn mention_refusal_rows_follow_their_prompt_or_go_with_a_compacted_one() {
+    let mut kept = long(7);
+    kept.show_mention_refusals(12, vec!["@a.rs: not attached (binary)".into()]);
+    compact(&mut kept, "note");
+    let (after, rows) = kept.mention_refusals();
+    assert_eq!((after, rows.len()), (2, 1));
+    assert!(kept.messages[after].content.starts_with("turn7 "));
+
+    let mut gone = long(7);
+    gone.show_mention_refusals(2, vec!["@a.rs: not attached (binary)".into()]);
+    compact(&mut gone, "note");
+    assert!(gone.mention_refusals().1.is_empty());
+}
+
 fn cancelled_turn(session: &mut Session, number: usize) {
     session.insert(&format!("turn{number} {}", "x".repeat(PASTE - 10)));
     session.begin().unwrap();
