@@ -7,7 +7,10 @@ use std::path::{Component, Path, PathBuf};
 
 /// Largest file write_file or edit_file produces or edits, in bytes.
 const MAX_FILE: usize = 1024 * 1024;
-/// Diff lines shown on an approval card before it is cut.
+/// Most lines an approval card's diff may hold (issue #269). The count is every line of
+/// the diff text: the `@@` header, `-`/`+` lines, line-ending notes and the
+/// `new directories:` line. A change over it is refused before any card is shown, so
+/// the owner never approves lines the card cut off.
 const MAX_PREVIEW_LINES: usize = 80;
 
 pub const WRITE_FILE: Tool = Tool {
@@ -487,7 +490,24 @@ fn plan_write(
     } else {
         None
     };
+    refuse_over_cap(
+        old.as_deref().unwrap_or(""),
+        content,
+        usize::from(!new_dirs.is_empty()),
+    )?;
     Ok((target, old, content.to_string(), new_dirs))
+}
+
+/// Refuses a change whose card diff (plus `extra` card lines) would pass
+/// [`MAX_PREVIEW_LINES`], before anything is asked or written.
+fn refuse_over_cap(old: &str, new: &str, extra: usize) -> Result<(), String> {
+    let lines = diff(old, new).lines().count() + extra;
+    if lines > MAX_PREVIEW_LINES {
+        return Err(format!(
+            "the change's diff is {lines} lines, over the {MAX_PREVIEW_LINES}-line approval card limit; nothing was written. Split it into smaller edits (edit_file on a part, or several write_file calls to separate files)"
+        ));
+    }
+    Ok(())
 }
 
 /// (target, current content, edited content)
@@ -545,6 +565,7 @@ fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String)
                     "edit_file keeps the file's CRLF endings; use write_file to change them".into()
                 });
             }
+            refuse_over_cap(&current, &edited, 0)?;
             Ok((target, current, edited))
         }
         count => Err(format!(
@@ -590,7 +611,8 @@ fn edit_file(root: &Path, arguments: &Value) -> Result<String, String> {
 }
 
 /// Line diff: unchanged head and tail are skipped; the changed middle shows as
-/// `-` old lines then `+` new lines, cut at [`MAX_PREVIEW_LINES`].
+/// `-` old lines then `+` new lines. Never cut: callers refuse a change over
+/// [`MAX_PREVIEW_LINES`] first (see [`refuse_over_cap`]).
 pub(crate) fn diff(old: &str, new: &str) -> String {
     let (old_text, new_text) = (old, new);
     let old: Vec<&str> = old.lines().collect();
@@ -612,11 +634,6 @@ pub(crate) fn diff(old: &str, new: &str) -> String {
         } else {
             notes.join("\n")
         };
-    }
-    let total = lines.len();
-    if total > MAX_PREVIEW_LINES {
-        lines.truncate(MAX_PREVIEW_LINES);
-        lines.push(format!("[{} more diff lines]", total - MAX_PREVIEW_LINES));
     }
     lines.extend(notes);
     lines.join("\n")

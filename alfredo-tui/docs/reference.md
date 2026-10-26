@@ -1696,11 +1696,23 @@ Approval (ADR 0004); there is no skip-approval mode.
 - **Read-only files.** `write_file` and `edit_file` refuse an existing file without the owner write bit (for example `chmod 444`) with `<path> is read-only; …`, before any approval card is raised and again before the write, and leave the file unchanged.
 
 - **Card.** The transcript shows `? Approve edit_file · edit README.md`, the arguments,
-  and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads
+  and a line diff (`-` old, `+` new). The prompt title reads
   `Approval pending · y approve · n deny · Esc cancels the turn`. On a short terminal the
   diff is cut to the rows that fit (`[N more diff lines]`) so the header, arguments and
   key line stay on screen; the 0.5 s delay below starts only once the header rows are
   drawn, and PageUp that scrolls them out of view disarms `y`/`n` until they return.
+- **Over-cap changes are refused, not cut (issue #269).** A card never hides lines the
+  owner is asked to approve. `write_file` and `edit_file` are refused when the card's
+  diff would pass 80 lines, counted as every line of the diff text: the `@@` header, the
+  `-` and `+` lines, a line-ending note (`final newline added`, `line endings CRLF → LF`)
+  and the `new directories:` line. Exactly 80 passes; 81 is refused with
+  `the change's diff is 81 lines, over the 80-line approval card limit; nothing was written. Split it …`
+  before any card is shown, again at apply, and the file (and any directory) is left
+  untouched. `git_commit` (file listing) and `git_merge` (`--stat` listing, one line per
+  file plus the summary line) are refused the same way above 40 lines, with the index,
+  HEAD and working tree untouched. Secret, protected-path and read-only refusals are
+  checked first and still win. On a terminal too short for a whole card the display cuts
+  the diff to the rows that fit (`[N more diff lines]`, below); that is viewport cutting.
 - **Waiting on you.** While a card is pending the chat's side-pane row and its frame title
   read `approve?` (amber `●`, no spinner) instead of `thinking`, and the timing line says
   `waiting for approval`. The turn clock leaves out the time the card waited, so the

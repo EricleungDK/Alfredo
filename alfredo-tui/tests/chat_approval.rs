@@ -603,6 +603,166 @@ fn edit_file_refuses_line_ending_only_change_in_crlf_file() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #269: the card shows the whole diff or the call is refused. The cap counts every
+/// line the card diff holds (the `@@` header, `-`/`+` lines, line-ending notes and the
+/// `new directories:` line): 80 passes, 81 is refused before any card or write.
+fn numbered(count: usize) -> String {
+    (1..=count).map(|n| format!("line {n}\n")).collect()
+}
+
+#[test]
+fn write_file_diff_of_exactly_80_lines_gets_a_whole_card() {
+    let root = workspace("cap-write-80");
+    // Header + 79 added lines = 80.
+    let write = call(
+        "write_file",
+        json!({"path": "ok.txt", "content": numbered(79)}),
+    );
+    let card = approval::card(&root, &write).unwrap();
+    assert_eq!(card.preview.lines().count(), 80, "{}", card.preview);
+    assert!(!card.preview.contains("more"), "{}", card.preview);
+    assert!(card.preview.contains("+line 79"), "{}", card.preview);
+    approval::apply(&root, &card).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("ok.txt")).unwrap(),
+        numbered(79)
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn write_file_diff_of_81_lines_is_refused_naming_the_cap_and_writes_nothing() {
+    let root = workspace("cap-write-81");
+    let write = call(
+        "write_file",
+        json!({"path": "big.txt", "content": numbered(80)}),
+    );
+    let error = approval::card(&root, &write).unwrap_err();
+    assert!(
+        error.contains("81 lines") && error.contains("80-line"),
+        "{error}"
+    );
+    assert!(error.contains("smaller"), "{error}");
+    let result = chat_tools::dispatch(&root, &write);
+    assert!(
+        result.starts_with("error: ") && result.contains("80-line"),
+        "{result}"
+    );
+    assert!(!root.join("big.txt").exists());
+    // Replacing an existing file is held to the same cap and left byte-identical.
+    fs::write(root.join("old.txt"), numbered(3)).unwrap();
+    let replace = call(
+        "write_file",
+        json!({"path": "old.txt", "content": numbered(200)}),
+    );
+    assert!(approval::card(&root, &replace)
+        .unwrap_err()
+        .contains("80-line"));
+    assert!(chat_tools::dispatch(&root, &replace).starts_with("error: "));
+    assert_eq!(
+        fs::read_to_string(root.join("old.txt")).unwrap(),
+        numbered(3)
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_new_directories_line_counts_toward_the_write_file_cap() {
+    let root = workspace("cap-write-dirs");
+    // new directories line + header + 78 added lines = 80.
+    let at_cap = call(
+        "write_file",
+        json!({"path": "a/b/ok.txt", "content": numbered(78)}),
+    );
+    let card = approval::card(&root, &at_cap).unwrap();
+    assert_eq!(card.preview.lines().count(), 80, "{}", card.preview);
+    let over = call(
+        "write_file",
+        json!({"path": "a/b/big.txt", "content": numbered(79)}),
+    );
+    assert!(approval::card(&root, &over)
+        .unwrap_err()
+        .contains("80-line"));
+    assert!(chat_tools::dispatch(&root, &over).starts_with("error: "));
+    assert!(!root.join("a").exists(), "no directory may be created");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn edit_file_diff_of_exactly_80_lines_passes_and_81_is_refused_unchanged() {
+    let root = workspace("cap-edit");
+    let old = numbered(40);
+    fs::write(root.join("f.txt"), &old).unwrap();
+    // Header + 39 removed + 40 added = 80.
+    let at_cap = call(
+        "edit_file",
+        json!({"path": "f.txt", "old_text": &old[..old.len() - "line 40\n".len()],
+               "new_text": (1..=40).map(|n| format!("new {n}\n")).collect::<String>()}),
+    );
+    let card = approval::card(&root, &at_cap).unwrap();
+    assert_eq!(card.preview.lines().count(), 80, "{}", card.preview);
+    assert!(!card.preview.contains("more"), "{}", card.preview);
+    // Header + 40 removed + 40 added = 81.
+    let over = call(
+        "edit_file",
+        json!({"path": "f.txt", "old_text": &old,
+               "new_text": (1..=40).map(|n| format!("new {n}\n")).collect::<String>()}),
+    );
+    let error = approval::card(&root, &over).unwrap_err();
+    assert!(
+        error.contains("81 lines") && error.contains("80-line"),
+        "{error}"
+    );
+    let result = chat_tools::dispatch(&root, &over);
+    assert!(
+        result.starts_with("error: ") && result.contains("80-line"),
+        "{result}"
+    );
+    assert_eq!(fs::read(root.join("f.txt")).unwrap(), old.as_bytes());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_line_ending_note_counts_toward_the_cap() {
+    let root = workspace("cap-note");
+    fs::write(root.join("n.txt"), "x").unwrap();
+    // Header + `-x` + 77 added = 79, plus "final newline added" = 80.
+    let at_cap = call(
+        "write_file",
+        json!({"path": "n.txt", "content": numbered(77)}),
+    );
+    assert_eq!(
+        approval::card(&root, &at_cap)
+            .unwrap()
+            .preview
+            .lines()
+            .count(),
+        80
+    );
+    let over = call(
+        "write_file",
+        json!({"path": "n.txt", "content": numbered(78)}),
+    );
+    assert!(approval::card(&root, &over)
+        .unwrap_err()
+        .contains("80-line"));
+    assert_eq!(fs::read_to_string(root.join("n.txt")).unwrap(), "x");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn earlier_refusals_still_win_over_the_diff_cap() {
+    let root = workspace("cap-order");
+    fs::write(root.join(".env"), "a\n").unwrap();
+    let secret = call(
+        "write_file",
+        json!({"path": ".env", "content": numbered(200)}),
+    );
+    let error = approval::card(&root, &secret).unwrap_err();
+    assert!(!error.contains("80-line"), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn outcomes_are_logged_after_execution_and_shown_in_activity() {
     let dir = log_dir("outcomes");
@@ -894,7 +1054,8 @@ fn a_card_in_a_background_chat_posts_a_needs_approval_notice() {
 
 fn tall_pending_session() -> Session {
     let root = workspace("tall");
-    let body: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+    // 79 lines: the whole diff (80 with its header) fits the cap, but not a 24-row screen.
+    let body: String = (1..=79).map(|n| format!("line {n}\n")).collect();
     let card = approval::card(
         &root,
         &call("write_file", json!({"path": "long.txt", "content": body})),

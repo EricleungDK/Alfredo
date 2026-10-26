@@ -295,6 +295,104 @@ fn commit_with_nothing_to_commit_is_refused_before_asking() {
     assert!(error.contains("message"), "{error}");
 }
 
+/// Issue #269: a commit or merge file list is shown whole or the call is refused. The
+/// cap is 40 listed lines: 40 passes, 41 is refused before the index, HEAD or tree move.
+fn add_files(repo: &Repo, count: usize) {
+    for index in 0..count {
+        fs::write(repo.root.join(format!("f{index:03}.txt")), "u\n").unwrap();
+    }
+    git(&repo.root, &["add", "."]);
+}
+
+#[test]
+fn commit_listing_of_exactly_40_files_is_shown_whole() {
+    let repo = Repo::new();
+    add_files(&repo, 40);
+    let card = repo
+        .card("git_commit", json!({"message": "forty"}))
+        .unwrap();
+    assert!(!card.preview.contains("more"), "{}", card.preview);
+    assert!(card.preview.contains("f039.txt"), "{}", card.preview);
+    approval::apply(&repo.root, &card).unwrap();
+    assert!(git(&repo.root, &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+fn commit_listing_of_41_files_is_refused_and_nothing_moves() {
+    let repo = Repo::new();
+    add_files(&repo, 41);
+    let (head, index) = (repo.head(), git(&repo.root, &["ls-files", "-s"]));
+    let status = git(&repo.root, &["status", "--porcelain"]);
+    let error = repo
+        .card("git_commit", json!({"message": "x"}))
+        .unwrap_err();
+    assert!(error.contains("41") && error.contains("40-line"), "{error}");
+    assert!(error.contains("fewer files"), "{error}");
+    // Named files hit the same cap; so does the apply path.
+    let names: Vec<String> = (0..41).map(|i| format!("f{i:03}.txt")).collect();
+    git(&repo.root, &["reset", "-q"]);
+    let error = repo
+        .card("git_commit", json!({"message": "x", "files": names}))
+        .unwrap_err();
+    assert!(error.contains("40-line"), "{error}");
+    git(&repo.root, &["add", "."]);
+    let error = repo
+        .approve("git_commit", json!({"message": "x"}))
+        .unwrap_err();
+    assert!(error.contains("40-line"), "{error}");
+    assert_eq!(repo.head(), head);
+    assert_eq!(git(&repo.root, &["ls-files", "-s"]), index);
+    assert_eq!(git(&repo.root, &["status", "--porcelain"]), status);
+}
+
+#[test]
+fn a_secret_in_an_over_cap_commit_is_still_refused_as_a_secret() {
+    let repo = Repo::new();
+    add_files(&repo, 45);
+    fs::write(repo.root.join(".env"), "KEY=1\n").unwrap();
+    git(&repo.root, &["add", "-f", ".env"]);
+    let error = repo
+        .card("git_commit", json!({"message": "x"}))
+        .unwrap_err();
+    assert!(!error.contains("40-line"), "{error}");
+}
+
+/// A branch `wide` that adds `count` files, merged from `main`.
+fn wide_branch(repo: &Repo, count: usize) {
+    git(&repo.root, &["checkout", "-q", "-b", "wide"]);
+    add_files(repo, count);
+    git(&repo.root, &["commit", "-q", "-m", "wide"]);
+    git(&repo.root, &["checkout", "-q", "main"]);
+}
+
+#[test]
+fn merge_file_list_of_exactly_40_lines_is_shown_whole_and_41_is_refused() {
+    // `--stat` is one line per file plus a summary line: 39 files = 40 lines.
+    let repo = Repo::new();
+    wide_branch(&repo, 39);
+    let card = repo.card("git_merge", json!({"source": "wide"})).unwrap();
+    assert!(!card.preview.contains("more"), "{}", card.preview);
+    assert!(card.preview.contains("f038.txt"), "{}", card.preview);
+    approval::apply(&repo.root, &card).unwrap();
+    assert!(repo.root.join("f038.txt").exists());
+
+    let repo = Repo::new();
+    wide_branch(&repo, 40);
+    let head = repo.head();
+    let error = repo
+        .card("git_merge", json!({"source": "wide"}))
+        .unwrap_err();
+    assert!(error.contains("41") && error.contains("40-line"), "{error}");
+    let error = repo
+        .approve("git_merge", json!({"source": "wide"}))
+        .unwrap_err();
+    assert!(error.contains("40-line"), "{error}");
+    assert_eq!(repo.head(), head);
+    assert!(!repo.root.join("f000.txt").exists());
+    assert!(git(&repo.root, &["status", "--porcelain"]).is_empty());
+    assert!(!repo.root.join(".git/MERGE_HEAD").exists());
+}
+
 #[test]
 fn commit_hooks_do_not_run() {
     let repo = Repo::new();
@@ -1087,20 +1185,20 @@ fn repository_merge_drivers_and_gpg_programs_are_refused() {
 }
 
 #[test]
-fn large_listings_are_marked_and_fingerprinted_in_full() {
+fn large_listings_are_refused_rather_than_cut() {
     let repo = Repo::new();
     let long = "x".repeat(60);
     for index in 0..1500 {
         fs::write(repo.root.join(format!("{long}{index:05}.txt")), "u\n").unwrap();
     }
     git(&repo.root, &["add", "."]);
-    let card = repo.card("git_commit", json!({"message": "many"})).unwrap();
-    assert!(card.preview.contains("more"), "{}", card.preview);
-    assert!(card.summary.contains("1500 files"), "{}", card.summary);
-    // A change past the first 32 KiB of status still counts.
-    fs::write(repo.root.join("zzzz-late.txt"), "late\n").unwrap();
-    let error = approval::apply(&repo.root, &card).unwrap_err();
-    assert!(error.contains("changed"), "{error}");
+    let error = repo
+        .card("git_commit", json!({"message": "many"}))
+        .unwrap_err();
+    assert!(
+        error.contains("1500") && error.contains("40-line"),
+        "{error}"
+    );
 }
 
 #[test]
