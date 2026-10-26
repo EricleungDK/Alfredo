@@ -1,3 +1,4 @@
+use alfredo_tui::conversations::Snapshot;
 use alfredo_tui::model::{App, Event, Session, Status, Update, MAX_DRAFT, MAX_TEXT};
 
 fn started() -> Session {
@@ -34,6 +35,176 @@ fn cancellation_is_terminal_and_late_events_cannot_resurrect_it() {
     session.apply(1, Update::Done);
     assert_eq!(session.status, Status::Cancelled);
     assert_eq!(session.messages[1].content, "partial");
+}
+
+// Issue #338: Enter while a turn runs queues the message.
+
+fn running() -> Session {
+    let mut session = started();
+    session.apply(1, Update::Token("partial".into()));
+    session
+}
+
+#[test]
+fn enter_during_a_turn_queues_the_prompt_and_clears_it() {
+    for phase in ["connecting", "streaming"] {
+        let mut session = started();
+        if phase == "streaming" {
+            session.apply(1, Update::Token("partial".into()));
+        }
+        assert!(session.status.active());
+        session.insert("and then?");
+        session.queue_draft().unwrap();
+        assert_eq!(session.queued_messages(), ["and then?"], "{phase}");
+        assert_eq!(session.draft, "");
+        assert_eq!(session.messages.len(), 2, "nothing is sent");
+    }
+}
+
+#[test]
+fn queueing_refuses_empty_prompts_and_commands_and_keeps_the_text() {
+    let mut session = running();
+    assert_eq!(session.queue_draft().unwrap_err(), "Enter a prompt");
+    session.insert("/clear");
+    assert!(session.queue_draft().is_err());
+    assert_eq!(session.draft, "/clear");
+    assert!(session.queued_messages().is_empty());
+}
+
+#[test]
+fn a_completed_turn_sends_queued_messages_in_order_one_turn_each() {
+    let mut session = running();
+    for text in ["first", "second"] {
+        session.insert(text);
+        session.queue_draft().unwrap();
+    }
+    session.insert("still typing");
+    assert!(
+        session.begin_queued().is_none(),
+        "the turn is still running"
+    );
+    session.apply(1, Update::Done);
+    let request = session.begin_queued().unwrap().unwrap();
+    assert_eq!(request.last().unwrap().content, "first");
+    assert_eq!(session.messages[2].content, "first");
+    assert_eq!(session.status, Status::Connecting);
+    assert_eq!(session.draft, "still typing", "typed text is untouched");
+    assert_eq!(session.queued_messages(), ["second"]);
+    session.apply(2, Update::Token("answer".into()));
+    session.apply(2, Update::Done);
+    let request = session.begin_queued().unwrap().unwrap();
+    assert_eq!(request.last().unwrap().content, "second");
+    assert!(session.queued_messages().is_empty());
+    session.apply(3, Update::Token("again".into()));
+    session.apply(3, Update::Done);
+    assert!(session.begin_queued().is_none());
+    assert_eq!(session.draft, "still typing");
+}
+
+#[test]
+fn cancel_returns_queued_text_to_the_prompt_and_never_sends_it() {
+    let mut session = running();
+    for text in ["one", "two"] {
+        session.insert(text);
+        session.queue_draft().unwrap();
+    }
+    session.insert("typed");
+    session.cancel();
+    assert_eq!(session.draft, "one\ntwo\ntyped");
+    assert!(session.queued_messages().is_empty());
+    assert!(session.begin_queued().is_none());
+    assert_eq!(session.messages.len(), 2, "nothing was sent");
+}
+
+#[test]
+fn a_failed_turn_returns_queued_text_to_the_prompt_and_never_sends_it() {
+    let mut session = running();
+    session.insert("later");
+    session.queue_draft().unwrap();
+    session.apply(1, Update::Failed("connection lost".into()));
+    assert_eq!(session.draft, "later");
+    assert!(session.queued_messages().is_empty());
+    assert!(session.begin_queued().is_none());
+    assert_eq!(session.messages.len(), 2);
+}
+
+#[test]
+fn an_empty_reply_failure_also_returns_the_queue() {
+    let mut session = started();
+    session.insert("later");
+    session.queue_draft().unwrap();
+    session.apply(1, Update::Done);
+    assert!(matches!(session.status, Status::Failed(_)));
+    assert_eq!(session.draft, "later");
+    assert!(session.begin_queued().is_none());
+}
+
+#[test]
+fn the_queue_holds_three_messages_and_the_fourth_stays_in_the_prompt() {
+    let mut session = running();
+    for text in ["a", "b", "c"] {
+        session.insert(text);
+        session.queue_draft().unwrap();
+    }
+    session.insert("d");
+    let error = session.queue_draft().unwrap_err();
+    assert!(error.contains("Queue full"), "{error}");
+    assert_eq!(session.draft, "d");
+    assert_eq!(session.queued_messages(), ["a", "b", "c"]);
+}
+
+#[test]
+fn a_restart_restores_queued_text_as_the_draft_and_never_replays_it() {
+    let mut session = running();
+    for text in ["one", "two"] {
+        session.insert(text);
+        session.queue_draft().unwrap();
+    }
+    session.insert("typed");
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let json = serde_json::to_string(&Snapshot::capture(&app, "default")).unwrap();
+    let restored = serde_json::from_str::<Snapshot>(&json).unwrap().restore();
+    let restored = &restored.sessions[0];
+    assert!(restored.queued_messages().is_empty());
+    assert_eq!(restored.draft, "one\ntwo\ntyped");
+    let session = &app.sessions[0];
+    // The live session still holds its queue.
+    assert_eq!(session.queued_messages(), ["one", "two"]);
+}
+
+#[test]
+fn a_saved_copy_keeps_queued_text_even_beside_a_nearly_full_draft() {
+    let mut session = running();
+    for text in ["one", "two", "three"] {
+        session.insert(text);
+        session.queue_draft().unwrap();
+    }
+    session.insert(&"x".repeat(MAX_DRAFT - 10));
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let json = serde_json::to_string(&Snapshot::capture(&app, "default")).unwrap();
+    let restored = serde_json::from_str::<Snapshot>(&json).unwrap().restore();
+    let draft = &restored.sessions[0].draft;
+    assert!(draft.starts_with("one\ntwo\nthree\nx"), "{}", &draft[..30]);
+    assert!(draft.len() <= MAX_DRAFT);
+}
+
+#[test]
+fn an_unselected_session_drains_its_own_queue_without_touching_others() {
+    let mut app = App::new("m".into());
+    app.sessions[0] = running();
+    app.sessions[0].insert("next");
+    app.sessions[0].queue_draft().unwrap();
+    app.add_session();
+    app.sessions[1].insert("other chat prompt");
+    assert_eq!(app.selected, 1);
+    app.sessions[0].apply(1, Update::Done);
+    let request = app.sessions[0].begin_queued().unwrap().unwrap();
+    assert_eq!(request.last().unwrap().content, "next");
+    assert_eq!(app.sessions[1].draft, "other chat prompt");
+    assert_eq!(app.sessions[1].status, Status::Ready);
+    assert!(app.sessions[1].begin_queued().is_none());
 }
 
 #[test]

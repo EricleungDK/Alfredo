@@ -1035,6 +1035,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
+            // A completed turn sends the oldest message queued behind it (issue #338); near
+            // the size limit the queue returns to the prompt for an explicit Enter instead.
+            let mut queued_for = None;
+            if resume.is_none() {
+                let ready = work.app.sessions.iter().position(|session| {
+                    session.status == alfredo_tui::model::Status::Complete
+                        && !session.queued_messages().is_empty()
+                        && !session.compacting()
+                });
+                if let Some(at) = ready {
+                    if work.app.sessions[at].compaction_due(provider.num_ctx()) {
+                        work.app.sessions[at].restore_queue();
+                        work.app.notice = format!(
+                            "Chat {} is near its size limit; queued text is back in the prompt, press Enter to summarise and send",
+                            at + 1
+                        );
+                    } else {
+                        resume = work.app.sessions[at].begin_queued();
+                        queued_for = Some(at);
+                    }
+                    dirty = true;
+                }
+            }
             for (session, job) in work.app.sessions.iter().zip(jobs.iter_mut()) {
                 if !session.status.active() && !session.compacting() {
                     if let Some(handle) = job.take() {
@@ -1449,7 +1472,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 job.abort();
                             }
                             let summarising = work.app.sessions[index].compacting();
+                            let held = !work.app.sessions[index].queued_messages().is_empty();
                             work.app.sessions[index].cancel();
+                            if held {
+                                work.app.notice =
+                                    "Queued text is back in the prompt; nothing was sent".into();
+                            }
                             if summarising {
                                 work.app.notice =
                                     "Summary cancelled; your prompt is kept in the draft".into();
@@ -2021,6 +2049,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 Err(error) => work.app.notice = error,
                             }
                         }
+                        // A turn is running: queue the prompt, sent when it completes (#338).
+                        // An approval card keeps the old refusal (#264).
+                        KeyCode::Enter
+                            if work.app.sessions[index].status.active()
+                                && work.app.sessions[index].pending_approval().is_none() =>
+                        {
+                            work.app.notice = match work.app.sessions[index].queue_draft() {
+                                Ok(()) => "Queued · sent when the reply ends · Esc returns it to the prompt".into(),
+                                Err(error) => error.into(),
+                            };
+                        }
                         KeyCode::Enter => {
                             work.app.models_visible = false;
                             work.tasks.set_visible(false);
@@ -2106,7 +2145,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(request) = request {
                 match request {
                     Ok(messages) => {
-                        let index = work.app.selected;
+                        // Only a drained request (no key this pass) belongs to another session.
+                        let index = queued_for.filter(|_| resumed).unwrap_or(work.app.selected);
                         if let Some(job) = jobs[index].take() {
                             job.abort();
                         }

@@ -1040,6 +1040,46 @@ fn y_or_n_never_decides_while_the_draft_has_text() {
 }
 
 #[test]
+fn queued_messages_show_as_you_queued_rows_and_the_prompt_is_empty() {
+    // Issue #338.
+    let mut app = App::new("m".into());
+    app.sessions[0].insert("first question");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].insert("second\nquestion");
+    app.sessions[0].queue_draft().unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let rows: Vec<String> = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(120)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect();
+    let at = rows
+        .iter()
+        .position(|row| row.contains("You · queued"))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(rows[at + 1].contains("second"), "{rows:#?}");
+    assert!(rows[at + 2].contains("question"), "{rows:#?}");
+    assert_eq!(rows.iter().filter(|row| row.contains("second")).count(), 1);
+}
+
+#[test]
+fn enter_while_a_card_waits_is_refused_and_queued_text_never_answers_it() {
+    // Issue #338: a card keeps today's Enter behaviour; nothing is queued behind it.
+    let mut session = pending_session();
+    session.insert("yes please");
+    assert_eq!(
+        session.queue_draft().unwrap_err(),
+        "Esc stops the reply, or wait for it"
+    );
+    assert_eq!(session.draft, "yes please");
+    assert!(session.queued_messages().is_empty());
+    assert!(session.pending_approval().is_some());
+}
+
+#[test]
 fn y_with_an_empty_draft_needs_a_quiet_half_second() {
     let mut session = pending_session();
     let t0 = Instant::now() + Duration::from_secs(1);

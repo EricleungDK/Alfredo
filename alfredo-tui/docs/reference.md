@@ -938,6 +938,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Key | Action |
 | --- | --- |
 | Enter | Send current prompt (or fill draft when command picker is open) |
+| Enter (while a reply runs) | Queue the prompt (`You · queued`, up to 3 messages / 8 KiB, plain text only, no `/` commands); each is sent as its own turn, in order, when the reply completes. Esc, a failed reply or a restart returns queued text to the prompt as a draft and never sends it; a full queue keeps the text in the prompt and says so; an approval card keeps its own keys |
 | F1 | Open command picker when draft is empty (`/help` opens it too) |
 | Tab after `/prefix` | Fill the selected matching slash command |
 | Up / Down in conversation | Move between lines of a multi-line draft; from its first / last line (or a single-line draft) browse prompt history and restore unsent draft |

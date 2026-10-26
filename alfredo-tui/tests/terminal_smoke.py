@@ -328,6 +328,84 @@ class ChatHarnessContext(unittest.TestCase):
                 server.shutdown()
 
 
+    def test_enter_during_a_running_turn_queues_and_sends_it_when_the_turn_ends(self):
+        # Issue #338: Enter while a reply streams queues the text (`You · queued`, prompt
+        # cleared); it is sent once the turn completes, and Esc returns it to the prompt.
+        chats = []
+        release = {'hold a': threading.Event(), 'hold c': threading.Event()}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps({'models': [{'name': 'fixture'}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-ndjson')
+                self.end_headers()
+                if self.path != '/api/chat':
+                    self.wfile.write(b'{"done":true,"done_reason":"load"}\n')
+                    return
+                text = request['messages'][-1]['content']
+                chats.append(text)
+                if text in release:
+                    self.wfile.write(json.dumps({'message': {'content': 'PARTIAL_' + text.replace(' ', '_')}, 'done': False}).encode() + b'\n')
+                    self.wfile.flush()
+                    release[text].wait(30)
+                self.wfile.write(json.dumps({'message': {'content': 'ANSWER_' + text.replace(' ', '_')}, 'done': True}).encode() + b'\n')
+
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory(prefix='alfredo-queue-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-queue-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'hold a\r')
+                terminal.wait_for('PARTIAL_hold_a')
+                terminal.write(b'queued b\r')
+                terminal.wait_for('You · queued')
+                terminal.wait_for('Queued · sent when the reply ends')
+                self.assertEqual(terminal.screen().count('queued b'), 1, terminal.screen())  # prompt cleared
+                self.assertEqual(chats, ['hold a'])
+                release['hold a'].set()
+                terminal.wait_for('ANSWER_queued_b')
+                terminal.wait_gone('You · queued')
+                self.assertEqual(chats, ['hold a', 'queued b'])
+                # Esc returns queued text to the prompt and nothing is sent.
+                terminal.write(b'hold c\r')
+                terminal.wait_for('PARTIAL_hold_c')
+                terminal.write(b'never sent\r')
+                terminal.wait_for('You · queued')
+                terminal.write(b'\x1b')
+                terminal.wait_for('Queued text is back in the prompt')
+                terminal.wait_gone('You · queued')
+                self.assertIn('never sent', terminal.screen())
+                release['hold c'].set()
+                time.sleep(1)
+                self.assertEqual(chats, ['hold a', 'queued b', 'hold c'])
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                release['hold a'].set()
+                release['hold c'].set()
+                terminal.close()
+                server.shutdown()
+
+
 class ChatFileMentions(unittest.TestCase):
     def test_at_path_attaches_working_tree_file_and_missing_file_notices(self):
         chats = []
