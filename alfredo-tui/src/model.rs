@@ -1242,6 +1242,24 @@ impl Session {
         }
     }
 
+    /// Home / Ctrl+Home in the chat: jump to the oldest row when the prompt is empty (or
+    /// with Ctrl); otherwise move the prompt cursor as before (issue #393).
+    pub fn home_key(&mut self, ctrl: bool) {
+        if ctrl || self.draft.is_empty() {
+            // The same setter PgUp uses, so the saved anchor bookkeeping applies.
+            self.scroll_rows(-(i32::MAX / 2));
+        } else {
+            self.home();
+        }
+    }
+    /// End / Ctrl+End: jump to the latest row and follow new output, or move the cursor.
+    pub fn end_key(&mut self, ctrl: bool) {
+        if ctrl || self.draft.is_empty() {
+            self.scroll_rows(i32::MAX / 2);
+        } else {
+            self.end();
+        }
+    }
     pub fn scroll_rows(&self, rows: i32) {
         let mut reading = self.reading.get();
         reading.move_rows(rows);

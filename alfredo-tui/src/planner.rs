@@ -54,6 +54,7 @@ impl Plan {
                 return Err("Architect revision requires exactly one repair step with acceptance criteria and no new dependencies".into());
             }
         }
+        self.reject_hidden_text()?;
         let text = |s: &str, max| {
             !s.trim().is_empty() && s.len() <= max && !s.chars().any(char::is_control)
         };
@@ -97,6 +98,35 @@ impl Plan {
         }
         if serde_json::to_vec(self).map_err(|e| e.to_string())?.len() > 128 * 1024 {
             return Err("Plan exceeds 128 KiB".into());
+        }
+        Ok(())
+    }
+}
+
+impl Plan {
+    /// Model-written text the owner reviews before `/approve`. Invisible and
+    /// bidirectional characters could make a check line read differently from
+    /// the argv that runs, so they are refused with a reason, never stripped.
+    fn reject_hidden_text(&self) -> Result<(), String> {
+        fn scan(field: &str, value: &str) -> Result<(), String> {
+            match value.chars().find(|c| crate::dashboard::hidden(*c)) {
+                Some(c) => Err(format!(
+                    "Plan {field} contains hidden character U+{:04X}; remove invisible or bidirectional characters",
+                    c as u32
+                )),
+                None => Ok(()),
+            }
+        }
+        scan("prompt", &self.prompt)?;
+        for (index, step) in self.tasks.iter().enumerate() {
+            let n = index + 1;
+            scan(&format!("task {n} title"), &step.title)?;
+            for (i, line) in step.acceptance.iter().enumerate() {
+                scan(&format!("task {n} acceptance {}", i + 1), line)?;
+            }
+            for (i, arg) in step.policy.check.iter().enumerate() {
+                scan(&format!("task {n} check argument {}", i + 1), arg)?;
+            }
         }
         Ok(())
     }

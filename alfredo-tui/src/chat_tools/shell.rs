@@ -5,7 +5,7 @@
 //! (network on) behind a visibly different card. Both run in their own process
 //! group: a timeout kills the whole tree; output is capped. A sandbox that cannot
 //! start is reported with a suggestion to escalate; nothing is retried on the host.
-use super::{display, resolve, text_arg, Tier, Tool};
+use super::{display, needed_terminal, resolve, text_arg, Tier, Tool};
 use crate::execution::{
     self, ControlSignal, ExecutionAuthority, ExecutionCallbacks, ExecutionLimits, ExecutionRequest,
     ExecutionSandbox, ProcessOutcomeStatus, RustExecutionProvider,
@@ -627,19 +627,6 @@ fn report(plan: &Plan, ran: Ran) -> Result<String, String> {
     }
 }
 
-/// Whether stderr shows the command wanted a terminal it does not have.
-fn needed_terminal(stderr: &str) -> bool {
-    let stderr = stderr.to_lowercase();
-    [
-        "/dev/tty",
-        "no tty",
-        "a terminal is required",
-        "host key verification failed",
-    ]
-    .iter()
-    .any(|needle| stderr.contains(needle))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,5 +643,28 @@ mod tests {
         assert!(error.contains("nothing ran on the host"), "{error}");
         assert!(!root.join("ran").exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terminal_needs_are_recognised_from_every_needle() {
+        for stderr in [
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "fatal: could not read Username for 'https://github.com'",
+            "fatal: could not read Password for 'https://u@github.com'",
+            "fatal: terminal prompts disabled",
+            "sudo: a terminal is required to read the password",
+            "sudo: no tty present",
+            "could not open /dev/tty: No such device",
+            "Host key verification failed.",
+        ] {
+            assert!(needed_terminal(stderr), "{stderr}");
+        }
+        for stderr in [
+            "Permission denied (publickey).",
+            "fatal: repository not found",
+            "",
+        ] {
+            assert!(!needed_terminal(stderr), "{stderr}");
+        }
     }
 }

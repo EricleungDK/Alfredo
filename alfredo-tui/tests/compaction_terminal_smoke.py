@@ -137,6 +137,21 @@ class Compaction(unittest.TestCase):
         self.assertTrue(final[-1]['content'].startswith('PASTE3'), 'the new prompt is last')
         self.assertEqual(final[0]['role'], 'system')
 
+    def test_home_and_end_jump_the_transcript_when_the_prompt_is_empty(self):
+        self.fill()
+        self.send('PASTE3')
+        self.terminal.wait_for('REPLY_4')
+        self.terminal.wait_for('1 earlier turn compacted into a summary')  # footer notice
+        self.terminal.write(b'\x1b[H')  # Home: one key to the oldest row (issue #393)
+        self.terminal.wait_for('SUMMARY_NOTE_OF_EARLIER_TURNS')
+        self.terminal.write(b'\x1b[F')  # End: back to the latest row
+        self.terminal.wait_for('REPLY_4')
+        self.assertNotIn('SUMMARY_NOTE_OF_EARLIER_TURNS', self.terminal.screen())
+        self.terminal.write(b'\x1b[1;5H')  # Ctrl+Home
+        self.terminal.wait_for('SUMMARY_NOTE_OF_EARLIER_TURNS')
+        self.terminal.write(b'\x1b[1;5F')  # Ctrl+End
+        self.terminal.wait_for('REPLY_4')
+
     def test_failed_summary_keeps_the_prompt_and_names_the_ways_forward(self):
         self.fill()
         self.fixture.fail_summary = True
