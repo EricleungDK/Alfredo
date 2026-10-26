@@ -611,21 +611,30 @@ fn commit_run(root: &Path, arguments: &Value) -> Result<String, String> {
         let index = write(root, &["write-tree"], Env::Local)?;
         let index = index.trim();
         write(root, &add, Env::Local).map_err(|error| error + &leftovers(root))?;
+        // Re-check the staged set the commit will take: a plain-named file holding a copy
+        // of a secret is only visible once it is staged (`plan_commit` saw it untracked).
+        if let Err(error) = refuse_secrets(root, &plan.pathspecs) {
+            return Err(error + &restore_index(root, index) + &leftovers(root));
+        }
         args.push("--");
         args.extend(plan.pathspecs.iter().map(String::as_str));
         if let Err(error) = write(root, &args, Env::Local) {
-            let restored = match write(root, &["read-tree", "--end-of-options", index], Env::Local)
-            {
-                Ok(_) => "; the index was restored".to_string(),
-                Err(reset) => format!("; restoring the index failed ({reset})"),
-            };
-            return Err(error + &restored + &leftovers(root));
+            return Err(error + &restore_index(root, index) + &leftovers(root));
         }
     } else {
         write(root, &args, Env::Local).map_err(|error| error + &leftovers(root))?;
     }
     let made = git_read::git(root, &["log", "-1", "--no-color", "--format=%h %s"])?;
     Ok(format!("committed on {}: {}", plan.branch, made.trim()))
+}
+
+/// Put the index back to the tree `write-tree` recorded before `git add`; the message
+/// says whether that worked.
+fn restore_index(root: &Path, index: &str) -> String {
+    match write(root, &["read-tree", "--end-of-options", index], Env::Local) {
+        Ok(_) => "; the index was restored".to_string(),
+        Err(reset) => format!("; restoring the index failed ({reset})"),
+    }
 }
 
 struct SwitchPlan {

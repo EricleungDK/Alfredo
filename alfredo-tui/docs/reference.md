@@ -1617,13 +1617,18 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `.git`, `.ssh`, `.gnupg`, `.aws` and `.kube` directories (everything under them);
   `.env*` and `*.env` (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`,
   `.git-credentials`; names starting `id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa`
-  (keys and their `.pub` copies); `credentials*.json`; `secrets.yml`, `secrets.yaml`;
+  (keys and their `.pub` copies); `credentials*.json`; `secrets.y*ml` (starts `secrets.y`, ends `ml`);
   `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars` and
   `*.tfvars.json`. Names that only look similar stay readable, for example
   `environment.rs`, `keys.md`, `credentials.md`, `secrets.md` and `ssh_client.rs`.
-  Limits: a secret renamed and heavily edited in one change, below git's rename similarity
-  threshold, is not recognised as that secret, and git_diff reads the changed names and
-  the patch in two git calls, so a file changed between them is not covered.
+  Limits: the list matches names only; file content is never scanned. Git's rename and
+  copy detection finds a secret's copy or rename within git's similarity threshold, in
+  git_diff and in git_commit (staged files, and unstaged files that the commit adds, are
+  checked again after `git add` and the staging is undone on a refusal). Not detected: a
+  copy or rename edited beyond the threshold, a tracked innocent file overwritten with
+  secret bytes, and a hard link to a secret. A copy search git cuts short past its
+  rename limit is refused, not shown. git_diff reads the changed names and the patch in
+  two git calls, so a file changed between them is not covered.
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
   tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
   no external diff or textconv. `ref`, `base` and `target` must be plain ref names

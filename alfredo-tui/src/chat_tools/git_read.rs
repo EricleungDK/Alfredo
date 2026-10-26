@@ -395,10 +395,17 @@ pub(crate) fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<St
     }
 }
 
-/// [`git_limited`] for a listing that decides a secret check. Git must also print nothing
-/// on stderr: a copy search past its rename limit warns (`only found copies from modified
-/// paths due to too many files`) and skips the copies it did not compare, yet exits 0, so
-/// the listing would be incomplete. Such a listing is refused.
+/// Git's warnings that its copy or rename search was cut short by the rename limit
+/// (the listing then misses copies and renames). Matched against stderr lines.
+const CUT_SEARCH_WARNINGS: [&str; 3] = [
+    "only found copies from modified paths",
+    "inexact rename detection was skipped",
+    "diff.renameLimit",
+];
+
+/// [`git_limited`] for a listing that decides a secret check. A copy or rename search that
+/// git cut short (see [`CUT_SEARCH_WARNINGS`]) still exits 0 with an incomplete listing, so
+/// that stderr refuses it; other stderr is ignored.
 pub(crate) fn git_complete_listing(
     root: &Path,
     args: &[&str],
@@ -420,9 +427,15 @@ pub(crate) fn git_complete_listing(
             None => format!("git {} failed", args[0]),
         });
     }
-    if let Some(line) = error.lines().find(|line| !line.trim().is_empty()) {
+    // Only git's copy and rename search warnings mean the listing is incomplete. Other
+    // stderr (line-ending notes under core.autocrlf, for example) does not change it.
+    if let Some(line) = error.lines().find(|line| {
+        CUT_SEARCH_WARNINGS
+            .iter()
+            .any(|warning| line.contains(warning))
+    }) {
         return Err(format!(
-            "git {} printed a warning, so its listing is incomplete ({}); refused",
+            "git {} cut its copy or rename search short, so its listing is incomplete ({}); refused",
             args[0],
             line.trim()
         ));
@@ -892,9 +905,10 @@ pub(crate) fn run_bounded(
     let started = Instant::now();
     let stderr = child.stderr.take().map(|stderr| {
         std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = stderr.take(4096).read_to_string(&mut text);
-            text
+            // Lossy: a non-UTF-8 warning must still be seen by the listing check.
+            let mut bytes = Vec::new();
+            let _ = stderr.take(4096).read_to_end(&mut bytes);
+            String::from_utf8_lossy(&bytes).into_owned()
         })
     });
     let Some(stdout) = child.stdout.take() else {
@@ -1082,7 +1096,10 @@ mod tests {
             git_complete_listing(&root, &args, 1 << 20)
         };
         let warned = search("-l1").unwrap_err();
-        assert!(warned.contains("printed a warning"), "{warned}");
+        assert!(
+            warned.contains("cut its copy or rename search short"),
+            "{warned}"
+        );
         assert!(search("-l0").is_ok());
         let _ = fs::remove_dir_all(&root);
     }

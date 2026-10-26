@@ -45,8 +45,8 @@ pub(crate) fn path_valid(path: &str) -> bool {
 /// so a directory such as `.aws/` or `.ssh/` excludes everything under it.
 ///
 /// - Directories: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`.
-/// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `secrets.yml`,
-///   `secrets.yaml`.
+/// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `secrets.y*ml`
+///   (starts `secrets.y`, ends `ml`).
 /// - Name prefixes: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa` (private keys and
 ///   their `.pub`/backup siblings; a name that merely starts so is refused too), and
 ///   `credentials` with a `.json` ending (`credentials*.json`).
@@ -69,9 +69,8 @@ pub(crate) fn secret(path: &str) -> bool {
                 | ".netrc"
                 | ".pgpass"
                 | ".git-credentials"
-                | "secrets.yml"
-                | "secrets.yaml"
         ) || part.starts_with(".env")
+            || (part.starts_with("secrets.y") && part.ends_with("ml"))
             || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
                 .iter()
                 .any(|prefix| part.starts_with(prefix))
@@ -508,6 +507,8 @@ mod tests {
             "envs/prod.tfvars.json",
             "secrets.yml",
             "config/secrets.yaml",
+            "secrets.yaml.yml",
+            "secrets.y-prod.yml",
         ] {
             assert!(secret(path), "{path} must be a secret");
             assert!(excluded(path), "{path} must be excluded");
@@ -523,6 +524,7 @@ mod tests {
             "Id_RSA",
             "A/.SSH/x",
             "Secrets.YAML",
+            "Config/SECRETS.Y-PROD.YML",
             "Credentials-PROD.JSON",
             "App.JKS",
         ] {
