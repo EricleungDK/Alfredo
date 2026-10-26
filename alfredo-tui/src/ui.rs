@@ -79,10 +79,12 @@ fn dim() -> Style {
 /// The argument part of a `⚙` row (issue #274): a registered tool's summary (path or
 /// primary argument first, long text cut), else every value in map order. The caller
 /// still passes the row through `single_line_visible`.
-fn tool_row_arguments(name: &str, arguments: &serde_json::Value) -> String {
+/// `room` is the columns left after the `⚙ name ` prefix; paths are shortened to fit it.
+fn tool_row_arguments(name: &str, arguments: &serde_json::Value, room: usize) -> String {
     let normalized = crate::chat_tools::normalize_arguments(arguments);
     if normalized.is_object() {
-        if let Some(summary) = crate::chat_tools::summary::summarize(name, &normalized) {
+        if let Some(summary) = crate::chat_tools::summary::summarize_within(name, &normalized, room)
+        {
             return summary;
         }
     }
@@ -118,9 +120,13 @@ fn tool_step_lines(
     let mut lines = Vec::new();
     for (position, (call, result)) in step.calls.iter().zip(&step.results).enumerate() {
         let rule = rule_of(position).map_or(String::new(), |id| format!(" (rule #{id})"));
-        let arguments = tool_row_arguments(&call.name, &call.arguments);
-        let call_text =
-            dashboard::single_line_visible(&format!("⚙ {}{rule} {arguments}", call.name));
+        let prefix = format!("⚙ {}{rule} ", call.name);
+        let arguments = tool_row_arguments(
+            &call.name,
+            &call.arguments,
+            width.saturating_sub(prefix.width()),
+        );
+        let call_text = dashboard::single_line_visible(&format!("{prefix}{arguments}"));
         lines.push(Line::styled(truncate(call_text.trim_end(), width), dim()));
         let count = result.lines().count();
         if expanded {
@@ -1880,6 +1886,36 @@ fn approval_card_lines(
 mod tests {
     use super::*;
     use crate::model::{Session, Update};
+
+    #[test]
+    fn tool_rows_keep_the_file_name_visible_at_every_terminal_width() {
+        use unicode_width::UnicodeWidthStr;
+        let dir = "src/very/deep/nested/module/directory/structure/with";
+        for width in [40usize, 60, 100] {
+            for tool in ["read_file", "edit_file", "write_file", "list_files"] {
+                let rows: Vec<String> = ["alpha.rs", "beta.rs"]
+                    .iter()
+                    .map(|name| {
+                        let step = crate::model::ToolStep {
+                            calls: vec![crate::model::ToolCall {
+                                name: tool.into(),
+                                arguments: serde_json::json!({
+                                    "path": format!("{dir}/{name}"), "content": "x"
+                                }),
+                            }],
+                            results: vec!["ok".into()],
+                        };
+                        let lines = tool_step_lines(&step, width, false, |_| None);
+                        lines[0].spans.iter().map(|s| s.content.as_ref()).collect()
+                    })
+                    .collect();
+                assert!(rows[0].contains("alpha.rs"), "{width} {tool}: {}", rows[0]);
+                assert!(rows[1].contains("beta.rs"), "{width} {tool}: {}", rows[1]);
+                assert_ne!(rows[0], rows[1]);
+                assert!(rows[0].width() <= width, "{width}: {}", rows[0]);
+            }
+        }
+    }
 
     fn wide_card(preview_line: impl Fn(usize) -> String) -> crate::chat_tools::approval::Card {
         use crate::chat_tools::approval::{Card, CardKind};

@@ -52,7 +52,8 @@ pub const LIST_FILES: Tool = Tool {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Directory relative to the repository root (default: the root)"}
+                "path": {"type": "string", "description": "Directory relative to the repository root (default: the root)"},
+                "glob": {"type": "string"}
             }
         })
     },
@@ -69,7 +70,8 @@ pub const GREP: Tool = Tool {
             "properties": {
                 "pattern": {"type": "string", "description": "Literal text to find (not a regular expression)"},
                 "path": {"type": "string", "description": "File or directory to search, relative to the repository root (default: the root)"},
-                "ignore_case": {"type": "boolean", "description": "Match regardless of case (default false)"}
+                "ignore_case": {"type": "boolean", "description": "Match regardless of case (default false)"},
+                "glob": {"type": "string"}
             },
             "required": ["pattern"]
         })
@@ -305,16 +307,198 @@ fn discover(root: &Path, start: &Path, limit: usize) -> (Vec<PathBuf>, bool, Opt
     (files, false, None)
 }
 
-fn list_files(root: &Path, arguments: &Value) -> Result<String, String> {
-    let path = text_arg(arguments, "path")?.unwrap_or(".");
-    let full = resolve(root, path)?;
-    if full.is_file() {
-        return Ok(display(root, &full));
+/// Longest `glob` accepted, in characters.
+const MAX_GLOB_CHARS: usize = 256;
+/// Most `*` and `?` characters one `glob` may hold.
+const MAX_GLOB_WILDCARDS: usize = 16;
+
+/// One piece of a parsed glob.
+enum Piece {
+    Literal(char),
+    /// `?`: one character other than `/`.
+    One,
+    /// `*`: any run of characters other than `/`.
+    Star,
+    /// `**`: any run of characters, `/` included.
+    Deep,
+    /// `**/`: nothing, or any run of characters ending in `/`.
+    DeepDir,
+}
+
+/// A filter on the relative paths a listing or search returns (`*`, `?`, `**`).
+/// A glob with no `/` is tested against the file name, one with `/` against the whole
+/// path relative to the repository root. It only narrows what discovery returned.
+struct Glob {
+    text: String,
+    pieces: Vec<Piece>,
+    name_only: bool,
+}
+
+impl Glob {
+    /// The optional `glob` argument; an empty one means no filter.
+    fn from_arguments(arguments: &Value) -> Result<Option<Self>, String> {
+        let Some(glob) = text_arg(arguments, "glob")?.filter(|glob| !glob.is_empty()) else {
+            return Ok(None);
+        };
+        let glob = glob.trim_start_matches("./");
+        let chars: Vec<char> = glob.chars().collect();
+        if chars.len() > MAX_GLOB_CHARS {
+            return Err(format!(
+                "glob is {} characters; at most {MAX_GLOB_CHARS} are allowed",
+                chars.len()
+            ));
+        }
+        if chars.iter().filter(|c| matches!(c, '*' | '?')).count() > MAX_GLOB_WILDCARDS {
+            return Err(format!(
+                "glob has more than {MAX_GLOB_WILDCARDS} wildcards (* and ?); use a simpler glob"
+            ));
+        }
+        let mut pieces = Vec::new();
+        let mut at = 0;
+        while at < chars.len() {
+            match chars[at] {
+                '*' if chars.get(at + 1) == Some(&'*') => {
+                    let mut end = at;
+                    while chars.get(end) == Some(&'*') {
+                        end += 1;
+                    }
+                    if chars.get(end) == Some(&'/') {
+                        pieces.push(Piece::DeepDir);
+                        end += 1;
+                    } else {
+                        pieces.push(Piece::Deep);
+                    }
+                    at = end;
+                    continue;
+                }
+                '*' => pieces.push(Piece::Star),
+                '?' => pieces.push(Piece::One),
+                other => pieces.push(Piece::Literal(other)),
+            }
+            at += 1;
+        }
+        Ok(Some(Self {
+            text: glob.to_string(),
+            pieces,
+            name_only: !glob.contains('/'),
+        }))
     }
-    let (files, cut, note) = discover(root, &full, MAX_ENTRIES);
-    let mut out = note.map(|note| format!("[{note}]\n")).unwrap_or_default();
+
+    /// Whether the relative path `path` (`/`-separated) matches. A row-by-row table, so
+    /// the work is at most pieces x characters whatever the glob holds.
+    fn matches(&self, path: &str) -> bool {
+        let path = if self.name_only {
+            path.rsplit('/').next().unwrap_or(path)
+        } else {
+            path
+        };
+        let text: Vec<char> = path.chars().collect();
+        // `row[i]`: the pieces so far match the first `i` characters.
+        let mut row = vec![false; text.len() + 1];
+        row[0] = true;
+        for piece in &self.pieces {
+            let mut next = vec![false; text.len() + 1];
+            // `DeepDir` also matches after any earlier position, up to a `/`.
+            let mut seen = false;
+            for i in 0..=text.len() {
+                let before = i.checked_sub(1).map(|j| text[j]);
+                next[i] = match piece {
+                    Piece::Literal(c) => before == Some(*c) && row[i - 1],
+                    Piece::One => before.is_some_and(|c| c != '/') && row[i - 1],
+                    Piece::Star => row[i] || (before.is_some_and(|c| c != '/') && next[i - 1]),
+                    Piece::Deep => row[i] || (i > 0 && next[i - 1]),
+                    Piece::DeepDir => row[i] || (before == Some('/') && seen),
+                };
+                seen |= row[i];
+            }
+            row = next;
+        }
+        row[text.len()]
+    }
+}
+
+/// A `[note: …]` line naming arguments the tool does not take, or an empty string.
+fn unknown_note(arguments: &Value, known: &[&str]) -> String {
+    let unknown: Vec<&str> = arguments
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.keys())
+        .map(String::as_str)
+        .filter(|name| !known.contains(name))
+        .collect();
+    if unknown.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<String> = unknown
+        .iter()
+        .map(|name| name.chars().take(40).collect())
+        .collect();
+    format!(
+        "[note: unknown argument{} {} ignored; accepted: {}]\n",
+        if shown.len() == 1 { "" } else { "s" },
+        shown.join(", "),
+        known.join(", ")
+    )
+}
+
+/// `path`, resolved; a name with a glob character that is not a real path is refused
+/// with a pointer to the `glob` argument.
+fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
+    // Only a path that stays inside is probed, so an outside path is refused by
+    // `resolve` exactly as before and its existence is never revealed.
+    let inside = Path::new(path.trim()).components().all(|part| {
+        matches!(
+            part,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    });
+    if inside && path.contains(['*', '?']) && !root.join(path.trim()).exists() {
+        return Err(format!(
+            "path {path:?} is a literal path, not a pattern; pass the directory as path and the pattern as the glob argument (for example glob={path:?})"
+        ));
+    }
+    resolve(root, path)
+}
+
+fn list_files(root: &Path, arguments: &Value) -> Result<String, String> {
+    let glob = Glob::from_arguments(arguments)?;
+    let path = text_arg(arguments, "path")?.unwrap_or(".");
+    let full = resolve_path(root, path)?;
+    let mut out = unknown_note(arguments, &["path", "glob"]);
+    if full.is_file() {
+        let shown = display(root, &full);
+        if glob.as_ref().is_some_and(|glob| !glob.matches(&shown)) {
+            out.push_str(&format!(
+                "no files match glob {:?}",
+                glob.as_ref().map_or("", |g| g.text.as_str())
+            ));
+            return Ok(out);
+        }
+        out.push_str(&shown);
+        return Ok(out);
+    }
+    // A glob filters after discovery, so look further than the listing cap.
+    let limit = if glob.is_some() {
+        MAX_VISITS
+    } else {
+        MAX_ENTRIES
+    };
+    let (mut files, mut cut, note) = discover(root, &full, limit);
+    if let Some(glob) = &glob {
+        files.retain(|file| glob.matches(&display(root, file)));
+        if files.len() > MAX_ENTRIES {
+            files.truncate(MAX_ENTRIES);
+            cut = true;
+        }
+    }
+    if let Some(note) = note {
+        out.push_str(&format!("[{note}]\n"));
+    }
     if files.is_empty() {
-        out.push_str("no files");
+        match &glob {
+            Some(glob) => out.push_str(&format!("no files match glob {:?}", glob.text)),
+            None => out.push_str("no files"),
+        }
         return Ok(out);
     }
     out.extend(files.iter().map(|file| display(root, file) + "\n"));
@@ -325,6 +509,11 @@ fn list_files(root: &Path, arguments: &Value) -> Result<String, String> {
         ));
     }
     Ok(out)
+}
+
+/// Whether `pattern` holds regular-expression syntax a literal search will not honour.
+fn looks_like_regex(pattern: &str) -> bool {
+    pattern.contains(['\\', '|', '[', '(', '+', '?']) || pattern.contains(".*")
 }
 
 fn grep(root: &Path, arguments: &Value) -> Result<String, String> {
@@ -355,14 +544,21 @@ fn grep_within(
     } else {
         pattern.to_string()
     };
+    let glob = Glob::from_arguments(arguments)?;
     let path = text_arg(arguments, "path")?.unwrap_or(".");
-    let full = resolve(root, path)?;
-    let (files, mut cut, note) = if full.is_file() {
+    let full = resolve_path(root, path)?;
+    let (mut files, mut cut, note) = if full.is_file() {
         (vec![full], false, None)
     } else {
         discover(root, &full, MAX_VISITS)
     };
-    let mut out = note.map(|note| format!("[{note}]\n")).unwrap_or_default();
+    if let Some(glob) = &glob {
+        files.retain(|file| glob.matches(&display(root, file)));
+    }
+    let mut out = unknown_note(arguments, &["pattern", "path", "ignore_case", "glob"]);
+    if let Some(note) = note {
+        out.push_str(&format!("[{note}]\n"));
+    }
     let mut matches = 0;
     'files: for file in &files {
         if round.as_ref().is_some_and(|b| b.cancel.is_set()) {
@@ -403,6 +599,9 @@ fn grep_within(
     }
     if matches == 0 && !cut && !stopped {
         out.push_str("no matches");
+        if looks_like_regex(pattern) {
+            out.push_str(" (grep matches literal text, not regular expressions; search for one literal piece of text, or run several greps; filter files with glob, e.g. glob=\"src/*.rs\")");
+        }
         return Ok(out);
     }
     if cut {
@@ -489,6 +688,229 @@ mod tests {
         .unwrap();
         assert!(!out.contains("[stopped"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A workspace with the given `(relative path, content)` files, removed on drop.
+    fn files(entries: &[(&str, &str)]) -> (PathBuf, Cleanup) {
+        let dir = std::env::temp_dir().join(format!(
+            "alfredo-glob-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        for (path, body) in entries {
+            let full = dir.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+        (dir.clone(), Cleanup(dir))
+    }
+
+    fn sample() -> (PathBuf, Cleanup) {
+        files(&[
+            ("README.md", "fn readme\n"),
+            ("src/a.rs", "fn main() {}\nfn helper_one() {}\n"),
+            ("src/b.py", "def b(): pass\n"),
+            ("src/deep/c.rs", "fn deep() {}\n"),
+        ])
+    }
+
+    fn listed(root: &Path, glob: &str) -> Vec<String> {
+        let out = list_files(root, &json!({"glob": glob})).unwrap();
+        out.lines()
+            .filter(|line| !line.starts_with('[') && !line.starts_with("no files"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn grep_with_regex_metacharacters_and_no_match_says_it_is_literal() {
+        let (dir, _cleanup) = sample();
+        for pattern in [r"fn \w+\(", "fn|def", "a[bc]", "(x)", "fn.*zz", "q+", "zz?"] {
+            let out = grep(&dir, &json!({"pattern": pattern})).unwrap();
+            assert!(
+                out.starts_with("no matches (grep matches literal text, not regular expressions;"),
+                "{pattern}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn grep_hint_only_appears_for_a_regexish_pattern_with_no_match() {
+        let (dir, _cleanup) = sample();
+        let plain = grep(&dir, &json!({"pattern": "absent-text"})).unwrap();
+        assert_eq!(plain, "no matches");
+        // A match is reported as before, with no hint.
+        let hit = grep(&dir, &json!({"pattern": "fn main("})).unwrap();
+        assert_eq!(hit, "src/a.rs:1:fn main() {}\n");
+    }
+
+    #[test]
+    fn grep_glob_filters_the_files_searched() {
+        let (dir, _cleanup) = sample();
+        let rs = grep(&dir, &json!({"pattern": "fn", "glob": "*.rs"})).unwrap();
+        assert!(
+            rs.contains("src/a.rs:1:") && rs.contains("src/deep/c.rs:1:"),
+            "{rs}"
+        );
+        assert!(!rs.contains("README") && !rs.contains("b.py"), "{rs}");
+        let shallow = grep(&dir, &json!({"pattern": "fn", "glob": "src/*.rs"})).unwrap();
+        assert!(
+            shallow.contains("src/a.rs") && !shallow.contains("deep"),
+            "{shallow}"
+        );
+        let none = grep(&dir, &json!({"pattern": "fn", "glob": "*.zig"})).unwrap();
+        assert_eq!(none, "no matches");
+    }
+
+    #[test]
+    fn list_files_glob_supports_star_question_and_double_star() {
+        let (dir, _cleanup) = sample();
+        assert_eq!(listed(&dir, "*.rs"), ["src/a.rs", "src/deep/c.rs"]);
+        assert_eq!(listed(&dir, "src/*.rs"), ["src/a.rs"]);
+        assert_eq!(listed(&dir, "src/?.py"), ["src/b.py"]);
+        assert_eq!(listed(&dir, "src/**/*.rs"), ["src/a.rs", "src/deep/c.rs"]);
+        assert_eq!(listed(&dir, "**/c.rs"), ["src/deep/c.rs"]);
+        assert_eq!(
+            listed(&dir, "src/**"),
+            ["src/a.rs", "src/b.py", "src/deep/c.rs"]
+        );
+        assert_eq!(listed(&dir, "README.md"), ["README.md"]);
+        // `*` and `?` never cross a directory separator.
+        assert!(listed(&dir, "src?a.rs").is_empty());
+        assert!(listed(&dir, "src/*c.rs").is_empty());
+    }
+
+    #[test]
+    fn list_files_glob_with_no_match_names_the_glob() {
+        let (dir, _cleanup) = sample();
+        let out = list_files(&dir, &json!({"glob": "*.zig"})).unwrap();
+        assert!(out.contains("no files") && out.contains("*.zig"), "{out}");
+    }
+
+    #[test]
+    fn a_glob_never_widens_past_the_exclusions() {
+        let (dir, _cleanup) = files(&[
+            (".env", "TOPSECRET=1\n"),
+            ("deploy.key", "TOPSECRET\n"),
+            ("node_modules/x/index.js", "TOPSECRET\n"),
+            ("ok.txt", "TOPSECRET\n"),
+        ]);
+        assert_eq!(listed(&dir, "**"), ["ok.txt"]);
+        assert_eq!(listed(&dir, ".env"), Vec::<String>::new());
+        let out = grep(&dir, &json!({"pattern": "TOPSECRET", "glob": "**"})).unwrap();
+        assert_eq!(out, "ok.txt:1:TOPSECRET\n");
+    }
+
+    #[test]
+    fn a_path_with_a_glob_character_gets_an_error_naming_glob() {
+        let (dir, _cleanup) = sample();
+        for result in [
+            list_files(&dir, &json!({"path": "src/*.rs"})),
+            grep(&dir, &json!({"pattern": "fn", "path": "src/*.rs"})),
+            grep(&dir, &json!({"pattern": "fn", "path": "src/?.rs"})),
+        ] {
+            let error = result.unwrap_err();
+            assert!(error.contains("glob"), "{error}");
+            assert!(error.contains("src/"), "{error}");
+        }
+    }
+
+    #[test]
+    fn an_outside_path_with_a_glob_character_is_refused_as_before() {
+        let (dir, _cleanup) = sample();
+        for path in ["../*.txt", "/etc/*", "src/../../*"] {
+            let error = list_files(&dir, &json!({"path": path})).unwrap_err();
+            assert_eq!(error, resolve(&dir, path).unwrap_err(), "{path}");
+            assert!(error.contains("stay inside"), "{path}: {error}");
+            assert_eq!(
+                grep(&dir, &json!({"pattern": "x", "path": path})).unwrap_err(),
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn a_leading_dot_slash_in_a_glob_is_ignored() {
+        let (dir, _cleanup) = sample();
+        assert_eq!(listed(&dir, "./src/*.rs"), ["src/a.rs"]);
+        assert_eq!(listed(&dir, "./*.rs"), ["src/a.rs", "src/deep/c.rs"]);
+    }
+
+    #[test]
+    fn an_unknown_argument_name_produces_a_note() {
+        let (dir, _cleanup) = sample();
+        let out = list_files(&dir, &json!({"pattern": "*.rs"})).unwrap();
+        assert!(
+            out.starts_with("[note: unknown argument pattern ignored"),
+            "{out}"
+        );
+        assert!(out.contains("glob"), "{out}");
+        assert!(out.contains("README.md"), "{out}");
+        let out = grep(
+            &dir,
+            &json!({"pattern": "fn main", "include": "*.rs", "x": 1}),
+        )
+        .unwrap();
+        assert!(
+            out.starts_with("[note: unknown arguments include, x ignored"),
+            "{out}"
+        );
+        assert!(out.contains("src/a.rs:1:fn main"), "{out}");
+        // Known arguments make no note.
+        let clean = list_files(&dir, &json!({"path": "src", "glob": "*.rs"})).unwrap();
+        assert!(!clean.contains("note"), "{clean}");
+    }
+
+    #[test]
+    fn the_glob_parameter_stays_a_bare_string_in_both_definitions() {
+        for tool in [LIST_FILES, GREP] {
+            let schema = (tool.parameters)();
+            assert_eq!(schema["properties"]["glob"], json!({"type": "string"}));
+            assert!(schema["required"]
+                .as_array()
+                .is_none_or(|required| !required.contains(&json!("glob"))));
+        }
+    }
+
+    #[test]
+    fn a_pathological_glob_finishes_fast() {
+        let name = format!("{}c", "a".repeat(200));
+        let (dir, _cleanup) = files(&[(name.as_str(), "x\n")]);
+        // 16 wildcards (the most allowed), a never-matching tail: exponential in a
+        // backtracking matcher.
+        let glob = format!("{}b", "a*".repeat(16));
+        let started = Instant::now();
+        let out = list_files(&dir, &json!({"glob": glob})).unwrap();
+        assert!(out.starts_with("no files"), "{out}");
+        let deep = format!("{}b", "**/a*".repeat(5));
+        list_files(&dir, &json!({"glob": deep})).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn an_over_long_or_over_wild_glob_is_refused() {
+        let (dir, _cleanup) = sample();
+        let wild = list_files(&dir, &json!({"glob": "a*".repeat(17)})).unwrap_err();
+        assert!(wild.contains("glob") && wild.contains("16"), "{wild}");
+        let long = grep(&dir, &json!({"pattern": "fn", "glob": "a".repeat(257)})).unwrap_err();
+        assert!(long.contains("glob") && long.contains("256"), "{long}");
+        // The limits themselves are allowed.
+        list_files(&dir, &json!({"glob": "a*".repeat(16)})).unwrap();
+        list_files(&dir, &json!({"glob": "a".repeat(256)})).unwrap();
+    }
+
+    #[test]
+    fn a_non_string_or_empty_glob_is_handled() {
+        let (dir, _cleanup) = sample();
+        assert!(list_files(&dir, &json!({"glob": 5}))
+            .unwrap_err()
+            .contains("glob"));
+        // An empty glob means no filter.
+        assert_eq!(listed(&dir, "").len(), 4);
     }
 
     /// Removes its directory on drop, so a failed assertion leaves nothing behind.
