@@ -166,6 +166,32 @@ fn git_write_tools_are_gated_and_push_has_its_own_tier() {
     assert!(!Tier::Read.allowlistable());
 }
 
+/// Issue #359: a gitfile to another repository must not redirect an approved commit into it.
+#[test]
+fn a_gitfile_to_another_repository_never_receives_a_commit() {
+    let other = Repo::new();
+    let other_head = other.head();
+    let ws = other.base.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(
+        ws.join(".git"),
+        format!("gitdir: {}\n", other.root.join(".git").display()),
+    )
+    .unwrap();
+    fs::write(ws.join("b.txt"), "b\n").unwrap();
+    let outcome = approval::card(
+        &ws,
+        &call(
+            "git_commit",
+            json!({"message": "redirected", "files": ["b.txt"]}),
+        ),
+    )
+    .and_then(|card| approval::apply(&ws, &card));
+    assert!(outcome.is_err(), "{outcome:?}");
+    assert_eq!(other.head(), other_head);
+    assert!(!other.root.join("b.txt").exists());
+}
+
 #[test]
 fn commit_staged_files_shows_files_and_message_then_commits() {
     let repo = Repo::new();

@@ -129,6 +129,15 @@ const NAMES: [&str; 4] = ["git_commit", "git_switch", "git_merge", "git_push"];
 pub(crate) fn fingerprint(
     root: &Path,
     name: &str,
+    arguments: &Value,
+) -> Option<Result<String, String>> {
+    git_read::call_scope(LOCAL_DEADLINE, || fingerprint_state(root, name, arguments))
+}
+
+/// [`fingerprint`] for one call's budget (issue #359).
+fn fingerprint_state(
+    root: &Path,
+    name: &str,
     _arguments: &Value,
 ) -> Option<Result<String, String>> {
     if !NAMES.contains(&name) {
@@ -173,7 +182,16 @@ pub(crate) fn preview(
     name: &str,
     arguments: &Value,
 ) -> Option<Result<(Change, CardKind), String>> {
-    let fingerprint = match fingerprint(root, name, arguments)? {
+    // One budget for the whole card: its fingerprint and its preview (issue #359).
+    git_read::call_scope(LOCAL_DEADLINE, || preview_card(root, name, arguments))
+}
+
+fn preview_card(
+    root: &Path,
+    name: &str,
+    arguments: &Value,
+) -> Option<Result<(Change, CardKind), String>> {
+    let fingerprint = match fingerprint_state(root, name, arguments)? {
         Ok(fingerprint) => fingerprint,
         Err(error) => return Some(Err(error)),
     };
@@ -300,9 +318,10 @@ fn refuse_repository_config(root: &Path) -> Result<(), String> {
 /// The repository config as a write reads it (`--show-scope`), read whole: local, worktree
 /// and the owner's global config, never a cut listing.
 fn config_listing(root: &Path) -> Result<String, String> {
-    let mut command = local_command(root)?;
+    let clock = git_read::call_clock();
+    let mut command = local_command(root, clock)?;
     command.args(["config", "--null", "--list", "--show-scope"]);
-    let (status, out, error) = git_read::run_bounded(command, FULL, LOCAL_DEADLINE)?;
+    let (status, out, error) = git_read::run_bounded(command, FULL, clock.left())?;
     match status {
         None => Err("repository config is too large to check; refused".into()),
         Some(status) if status.success() => Ok(String::from_utf8_lossy(&out).into_owned()),
@@ -319,21 +338,18 @@ fn config_listing(root: &Path) -> Result<String, String> {
 }
 
 /// `git -C root` for a local write: hardened, with the owner's HOME (global identity) and
-/// no other environment; discovery stops above the parent.
-fn local_command(root: &Path) -> Result<Command, String> {
+/// no other environment; discovery stops above the parent. Pinned to the verified git
+/// directory, so a write never lands in another repository (issue #359).
+fn local_command(root: &Path, clock: git_read::Clock) -> Result<Command, String> {
+    let verified = git_read::verified_git_dir_within(root, clock, git_read::Config::Owner)?;
     let ceiling = ceiling(root)?;
     let mut command = Command::new("/usr/bin/git");
-    git_read::hardened(&mut command).env_remove("GIT_CONFIG_GLOBAL");
-    for name in ["HOME", "XDG_CONFIG_HOME"] {
-        match std::env::var_os(name) {
-            Some(value) => command.env(name, value),
-            None => command.env_remove(name),
-        };
-    }
+    git_read::owner_config(git_read::hardened(&mut command));
     command
         .env("GIT_CEILING_DIRECTORIES", ceiling)
         .arg("-C")
         .arg(root);
+    git_read::pin_git_dir(&mut command, root, &verified);
     Ok(command)
 }
 
@@ -537,7 +553,12 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
     }
 }
 
+/// The `commit` tool: one budget for the whole call (issue #359).
 fn commit(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(LOCAL_DEADLINE, || commit_run(root, arguments))
+}
+
+fn commit_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_commit(root, arguments)?;
     let mut args = vec!["commit", "--quiet", "--no-verify", "-m", &plan.message];
     if !plan.pathspecs.is_empty() {
@@ -628,7 +649,12 @@ fn plan_switch(root: &Path, arguments: &Value) -> Result<SwitchPlan, String> {
     })
 }
 
+/// The `switch` tool: one budget for the whole call (issue #359).
 fn switch(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(LOCAL_DEADLINE, || switch_run(root, arguments))
+}
+
+fn switch_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_switch(root, arguments)?;
     if plan.create {
         // Validated above: a plain branch name that cannot start with `-`.
@@ -779,7 +805,12 @@ fn cut(text: &str, lines: usize) -> String {
     kept.join("\n")
 }
 
+/// The `merge` tool: one budget for the whole call (issue #359).
 fn merge(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(LOCAL_DEADLINE, || merge_run(root, arguments))
+}
+
+fn merge_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_merge(root, arguments)?;
     let before = git_read::git(root, &["rev-parse", "HEAD"])?;
     if let Err(error) = write(
@@ -1080,7 +1111,12 @@ fn plan_push(root: &Path, arguments: &Value) -> Result<PushPlan, String> {
     })
 }
 
+/// The `push` tool: one budget for the whole call (issue #359).
 fn push(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(PUSH_DEADLINE, || push_run(root, arguments))
+}
+
+fn push_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_push(root, arguments)?;
     let refspec = format!("refs/heads/{0}:refs/heads/{0}", plan.branch);
     write(
@@ -1160,9 +1196,14 @@ fn failure_message(args: &[&str], error: &str, remote: bool) -> String {
 
 /// Run a writing git command in `root`. `Err` is git's message.
 fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
-    let (mut command, deadline) = match env {
-        Env::Local => (local_command(root)?, LOCAL_DEADLINE),
+    let (mut command, clock) = match env {
+        Env::Local => {
+            let clock = git_read::call_clock();
+            (local_command(root, clock)?, clock)
+        }
         Env::Remote => {
+            let clock = git_read::call_clock();
+            let verified = git_read::verified_git_dir_within(root, clock, git_read::Config::Owner)?;
             let mut command = Command::new("/usr/bin/git");
             for name in REDIRECTING_ENV {
                 command.env_remove(name);
@@ -1174,16 +1215,18 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
                 .env("LC_ALL", "C")
                 .env("GIT_PAGER", "cat")
                 .arg("-C")
-                .arg(root)
+                .arg(root);
+            // Pinned like the local writes: a push cannot be redirected either (issue #359).
+            git_read::pin_git_dir(&mut command, root, &verified)
                 .arg("--no-pager")
                 .args(crate::worker::HARDENED_GIT_ARGS)
                 .args(["-c", "protocol.ext.allow=never"]);
-            (command, PUSH_DEADLINE)
+            (command, clock)
         }
     };
     command.args(args);
     detach_from_terminal(&mut command);
-    let (status, out, error) = git_read::run_bounded(command, MAX_OUTPUT * 2, deadline)?;
+    let (status, out, error) = git_read::run_bounded(command, MAX_OUTPUT * 2, clock.left())?;
     match status {
         // Cut output: git was stopped part-way, so the result is not known. Never success.
         None => Err(format!(
