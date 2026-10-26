@@ -1439,7 +1439,7 @@ fn accept_and_reject_name_the_status_and_the_next_command_for_every_unreviewable
         (TaskStatus::Proposed, "Task #1 is proposed; /approve 1"),
         (
             TaskStatus::Approved,
-            "Task #1 is approved but has not run; /run 1",
+            "Task #1 has not run; /run 1 first (it is approved)",
         ),
         (TaskStatus::Cancelled, "Task #1 is cancelled"),
         (TaskStatus::NeedsHumanReview, "Task #1 needs human review"),

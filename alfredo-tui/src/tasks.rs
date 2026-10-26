@@ -55,7 +55,9 @@ fn review_refusal(task: u64, status: &TaskStatus) -> String {
         TaskStatus::Proposed => {
             format!("Task #{task} is proposed; /approve {task}, then /run {task}")
         }
-        TaskStatus::Approved => format!("Task #{task} is approved but has not run; /run {task}"),
+        TaskStatus::Approved => {
+            format!("Task #{task} has not run; /run {task} first (it is approved)")
+        }
         TaskStatus::Cancelled => {
             format!("Task #{task} is cancelled; /tasks shows what can still be reviewed")
         }
@@ -1829,15 +1831,13 @@ impl TaskStore {
                         return Err(format!(
                             "Task #{task} is {}; /approve needs a proposed task",
                             status_label(&item.status)
-                        )
-                        .into())
+                        ))
                     }
                     _ => {
                         return Err(format!(
                             "Task #{task} is {}; /cancel-task needs a proposed or approved task",
                             status_label(&item.status)
-                        )
-                        .into())
+                        ))
                     }
                 }
                 Ok(*task)
@@ -2055,7 +2055,7 @@ impl TaskStore {
                     .find(|t| t.id == *task)
                     .ok_or_else(|| unknown_task(*task))?;
                 if item.status != TaskStatus::ReviewReady {
-                    return Err(review_refusal(*task, &item.status).into());
+                    return Err(review_refusal(*task, &item.status));
                 }
                 item.status = if *accept {
                     TaskStatus::Accepted
