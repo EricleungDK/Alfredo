@@ -40,9 +40,9 @@ pub(crate) fn path_valid(path: &str) -> bool {
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
 }
-/// Secret material and Git metadata (issues #312 and the original list). `lower` is a
-/// lowercased `/`-separated path; every rule is tested on each path component, so a
-/// directory such as `.aws/` or `.ssh/` excludes everything under it.
+/// Secret material and Git metadata (issues #312 and the original list). `path` is a
+/// `/`-separated path in any case; every rule is tested on each lowercased path component,
+/// so a directory such as `.aws/` or `.ssh/` excludes everything under it.
 ///
 /// - Directories: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`.
 /// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `secrets.yml`,
@@ -54,8 +54,10 @@ pub(crate) fn path_valid(path: &str) -> bool {
 ///   `.tfvars.json`.
 ///
 /// Bare `credentials` and `secrets.*` names other than the two above stay readable.
-pub(crate) fn secret(lower: &str) -> bool {
-    lower.split('/').any(|part| {
+pub(crate) fn secret(path: &str) -> bool {
+    path.split('/').any(|raw| {
+        let lower = raw.to_lowercase();
+        let part = lower.as_str();
         matches!(
             part,
             ".git"
@@ -468,7 +470,7 @@ mod tests {
     use super::{excluded, secret};
 
     /// Issue #312: credential files that must never be model inputs, in the forms a
-    /// repository commonly holds them. Every caller passes a lowercased path.
+    /// repository commonly holds them.
     #[test]
     fn secret_covers_common_credential_files_and_directories() {
         for path in [
@@ -512,16 +514,19 @@ mod tests {
     }
 
     #[test]
-    fn secret_matches_case_insensitively_on_lowercased_input() {
+    fn secret_matches_case_insensitively() {
         for path in [
             ".NPMRC",
             "Prod.ENV",
             "CONFIG/.AWS/Credentials",
             "Id_RSA",
             "A/.SSH/x",
+            "Secrets.YAML",
+            "Credentials-PROD.JSON",
+            "App.JKS",
         ] {
-            let lower = path.to_lowercase();
-            assert!(secret(&lower), "{path} must be a secret");
+            assert!(secret(path), "{path} must be a secret");
+            assert!(secret(&path.to_lowercase()), "{path} must be a secret");
         }
     }
 

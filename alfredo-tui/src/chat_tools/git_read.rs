@@ -188,12 +188,14 @@ fn diff_output(root: &Path, arguments: &Value) -> Result<String, String> {
         "--find-renames",
         "--find-copies",
         "--find-copies-harder",
+        // No rename limit: past it git stops inexact copy detection and only warns.
+        "-l0",
     ];
     detect.extend(&selector);
     detect.push("--");
     // Every changed name in this selector (whole tree, any mode) that is a secret is
     // left out by name, so the patch never carries its content.
-    let listing = git_limited(root, &detect, DIFF_NAMES)?;
+    let listing = git_complete_listing(root, &detect, DIFF_NAMES)?;
     if listing.len() >= DIFF_NAMES {
         return Err(
             "too many changed files to check for secret files; narrow with path or a smaller range"
@@ -259,7 +261,7 @@ fn secret_names(listing: &str) -> Result<Vec<String>, String> {
         };
         if names
             .iter()
-            .any(|name| crate::planning_context::secret(&name.to_lowercase()))
+            .any(|name| crate::planning_context::secret(name))
         {
             found.extend(names.into_iter().map(String::from));
         }
@@ -391,6 +393,41 @@ pub(crate) fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<St
             args[0]
         )),
     }
+}
+
+/// [`git_limited`] for a listing that decides a secret check. Git must also print nothing
+/// on stderr: a copy search past its rename limit warns (`only found copies from modified
+/// paths due to too many files`) and skips the copies it did not compare, yet exits 0, so
+/// the listing would be incomplete. Such a listing is refused.
+pub(crate) fn git_complete_listing(
+    root: &Path,
+    args: &[&str],
+    limit: usize,
+) -> Result<String, String> {
+    let clock = call_clock();
+    let (status, out, error) =
+        run_bounded(git_command_within(root, args, clock)?, limit, clock.left())?;
+    let Some(status) = status else {
+        return Err(format!(
+            "git {} output is larger than {limit} bytes and cannot be checked; refused",
+            args[0]
+        ));
+    };
+    if !status.success() {
+        let first = error.lines().find(|line| !line.trim().is_empty());
+        return Err(match first {
+            Some(line) => line.trim().trim_start_matches("fatal: ").to_string(),
+            None => format!("git {} failed", args[0]),
+        });
+    }
+    if let Some(line) = error.lines().find(|line| !line.trim().is_empty()) {
+        return Err(format!(
+            "git {} printed a warning, so its listing is incomplete ({}); refused",
+            args[0],
+            line.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Run git in `root`, stdout read up to `limit` bytes. The flag is whether the output was
@@ -1003,6 +1040,51 @@ mod tests {
             .unwrap();
         file.write_all(config.as_bytes()).unwrap();
         root
+    }
+
+    /// Issue #312: a copy search past git's rename limit warns on stderr and exits 0. The
+    /// complete-listing helper refuses that output, and the same search with `-l0` passes.
+    #[test]
+    fn a_copy_search_warning_refuses_the_listing_and_l0_avoids_it() {
+        let root = scratch_repo(
+            "copy-warning",
+            "[user]\n\tname = Owner\n\temail = owner@example.com\n",
+        );
+        let git_ok = |args: &[&str]| {
+            assert!(Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success())
+        };
+        fs::write(root.join("a.txt"), "alpha\n").unwrap();
+        git_ok(&["add", "a.txt"]);
+        git_ok(&["commit", "-q", "-m", "a"]);
+        for name in ["b.txt", "c.txt", "d.txt"] {
+            fs::write(root.join(name), format!("{name}\n")).unwrap();
+        }
+        git_ok(&["add", "b.txt", "c.txt", "d.txt"]);
+        let search = |limit: &str| {
+            let mut args = vec!["diff", "--cached"];
+            if !limit.is_empty() {
+                args.push(limit);
+            }
+            args.extend([
+                "--find-renames",
+                "--find-copies",
+                "--find-copies-harder",
+                "--name-status",
+                "-z",
+                "--",
+            ]);
+            git_complete_listing(&root, &args, 1 << 20)
+        };
+        let warned = search("-l1").unwrap_err();
+        assert!(warned.contains("printed a warning"), "{warned}");
+        assert!(search("-l0").is_ok());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

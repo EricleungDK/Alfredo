@@ -228,6 +228,19 @@ fn full(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(output)
 }
 
+/// [`full`] for a listing that decides a secret check: git's stderr warnings refuse it
+/// too (see [`git_read::git_complete_listing`]).
+fn full_complete(root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = git_read::git_complete_listing(root, args, FULL)?;
+    if output.len() >= FULL {
+        return Err(format!(
+            "git {} output is too large to check safely; refused",
+            verb(args)
+        ));
+    }
+    Ok(output)
+}
+
 /// The git subcommand of an argument list, for messages (`git` alone when empty).
 fn verb<'a>(args: &[&'a str]) -> &'a str {
     args.first().copied().unwrap_or("git")
@@ -546,7 +559,7 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
     // name listing above shows a copy as a plain add, so a secret staged under a new
     // name (`git mv .npmrc docs/notes.txt`, `cp .npmrc config.txt`) is found here: the
     // sources of every staged rename or copy in the whole index, in either mode.
-    let index = full(
+    let index = full_complete(
         root,
         &[
             "diff",
@@ -555,6 +568,7 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
             "--find-renames",
             "--find-copies",
             "--find-copies-harder",
+            "-l0",
             "--name-status",
             "-z",
             "--",
@@ -574,7 +588,7 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
     }
     match names
         .iter()
-        .find(|name| crate::planning_context::secret(&name.to_lowercase()))
+        .find(|name| crate::planning_context::secret(name))
     {
         Some(name) => Err(format!(
             "refused: {name} looks like a secret or credential file (see the secret-file list in docs/reference.md); commit it by hand if intended"

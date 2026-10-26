@@ -327,12 +327,21 @@ fn large_index_with_an_inexact_secret_copy_staged() -> Repo {
     let repo = Repo::plain();
     repo.write(".npmrc", "_authToken=SECRET-LARGE\n");
     for index in 0..1100 {
-        repo.write(&format!("pkg/m{index:04}.txt"), &format!("module {index}\n"));
+        repo.write(
+            &format!("pkg/m{index:04}.txt"),
+            &format!("module {index}\n"),
+        );
     }
     git(&repo.root, &["add", "-f", "--", "."]);
-    git(&repo.root, &["commit", "-q", "-m", "1100 modules and npmrc"]);
+    git(
+        &repo.root,
+        &["commit", "-q", "-m", "1100 modules and npmrc"],
+    );
     for index in 0..1100 {
-        repo.write(&format!("gen/g{index:04}.txt"), &format!("generated {index}\n"));
+        repo.write(
+            &format!("gen/g{index:04}.txt"),
+            &format!("generated {index}\n"),
+        );
     }
     fs::copy(repo.root.join(".npmrc"), repo.root.join("config.txt")).unwrap();
     let mut copy = fs::OpenOptions::new()
@@ -350,7 +359,10 @@ fn large_index_with_an_inexact_secret_copy_staged() -> Repo {
 fn large_index_inexact_secret_copy_is_hidden_by_git_diff() {
     let repo = large_index_with_an_inexact_secret_copy_staged();
     let scoped = repo.run("git_diff", json!({"staged": true, "path": "config.txt"}));
-    assert!(!scoped.contains("SECRET-LARGE"), "staged git_diff: {scoped}");
+    assert!(
+        !scoped.contains("SECRET-LARGE"),
+        "staged git_diff: {scoped}"
+    );
     assert_eq!(scoped, "(no differences)\n");
 }
 
