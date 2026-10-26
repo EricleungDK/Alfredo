@@ -7,14 +7,17 @@ diff; y edits the file in place, n leaves it untouched and the model gets a refu
 Issue #264: text typed into the prompt while the card waits never decides it.
 Issue #302: Esc in the middle of an approved run_command (sandboxed or HOST) and Ctrl+Q
 both kill the command, and so do SIGHUP and SIGTERM (issue #342); its later `touch marker`
-never happens and the approval log says cancelled. Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
+never happens and the approval log says cancelled. Issue #303: a 900-character run_command at 24x80 is deny-only: y is refused with a note and
+the command never runs, n denies. Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
 prompt holds the editable /plan command; nothing else is requested or started."""
 import http.server
 import json
+import fcntl
 import os
 from pathlib import Path
 import select
 import signal
+import struct
 import subprocess
 import tempfile
 import termios
@@ -24,6 +27,7 @@ import unittest
 
 from terminal_smoke import Pty
 
+LONG = 'echo ' + 'a ' * 440 + '; touch pwned'
 SLOW = 'echo $$ > pid; touch started; sleep 4; touch marker'
 README = '# Demo project\nREADME_BODY_MARKER: a tiny repository used by the smoke.\n'
 
@@ -87,6 +91,14 @@ class Fixture:
                             'command': SLOW, 'escalate': 'on host' in prompt}}}]}, 'done': False}]
                 elif 'slow command' in prompt:
                     chunks = [{'message': {'content': 'SLOW_DONE'}, 'done': False}]
+                elif 'long command' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'run_command', 'arguments': {'command': LONG}}}]},
+                        'done': False}]
+                elif 'long command' in prompt:
+                    denied = 'denied' in tool_results[-1]['content']
+                    chunks = [{'message': {'content': 'LONG_DENIED' if denied else 'LONG_RAN'},
+                               'done': False}]
                 elif 'loop forever' in prompt:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'list_files', 'arguments': {}}}]}, 'done': False}]
@@ -374,6 +386,29 @@ class ChatTools(unittest.TestCase):
         self.terminal.write(b'n')
         self.terminal.wait_for('MODEL_SAW_DENIAL')
         self.assertEqual(self.readme(), README)
+
+    def test_a_900_character_command_at_24x80_is_deny_only(self):
+        # Issue #303: the command cannot be shown whole, so y and a never arm (the old
+        # card scrolled its header off and refused y forever); n still denies.
+        fcntl.ioctl(self.terminal.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
+        self.terminal.process.send_signal(signal.SIGWINCH)
+        self.assertGreater(len(LONG), 880)
+        self.terminal.write(b'long command\r')
+        self.terminal.wait_for('Approve run_command')
+        self.terminal.wait_for('enlarge the terminal or press n')
+        time.sleep(0.8)
+        self.terminal.write(b'y')
+        self.terminal.wait_for('enlarge the terminal or press n')
+        time.sleep(0.8)
+        self.terminal.write(b'a')
+        time.sleep(0.8)
+        self.assertIn('Approve run_command', self.terminal.screen())
+        root = Path(os.path.realpath(self.repo.name))
+        self.assertFalse(root.joinpath('pwned').exists(), 'y must not run a hidden command')
+        self.terminal.write(b'n')
+        self.terminal.wait_for('LONG_DENIED')
+        self.assertFalse(root.joinpath('pwned').exists())
+        self.assertEqual(self.approval_outcomes(), ['denied'])
 
     def test_a_proposal_prefills_the_prompt_and_starts_nothing(self):
         self.terminal.write(b'refactor everything\r')
