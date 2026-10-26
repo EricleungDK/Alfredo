@@ -66,10 +66,10 @@ CHAT_EDIT_TOOLS = ('edit_file', 'write_file')
 METRIC_NAMES = {
     'M1': ('pass@1', 'fraction'), 'M2': ('pass^3', 'fraction'),
     'M3': ('repair recovery rate', 'fraction of repairs accepted'),
-    'M4': ('turns per task', 'model requests per trial (median)'),
-    'M5': ('tool/command calls per task', 'worker runs + check runs per trial (median)'),
-    'M6': ('tokens per task', 'prompt+completion tokens per trial (median)'),
-    'M7': ('tool-call error rate', 'errors per 100 calls'),
+    'M4': ('turns per task', 'model requests per trial (median, /go tasks; chat in secondary.chat)'),
+    'M5': ('tool/command calls per task', 'worker runs + check runs per trial (median, /go tasks)'),
+    'M6': ('tokens per task', 'prompt+completion tokens per trial (median, /go tasks)'),
+    'M7': ('tool-call error rate', 'errors per 100 calls (/go tasks)'),
     'M8': ('harness overhead per turn', 'ms p50'),
     'M9': ('keystroke echo', 'ms p50/p95'), 'M10': ('frame render cost', 'ms p50/p95'),
     'M11': ('cold start to first frame', 'ms (median)'),
@@ -523,7 +523,7 @@ def peak_rss_kb(pid):
 
 def blank_trial(task, index):
     return {
-        'task': task['id'], 'kind': task['kind'], 'trial': index, 'pass': False, 'outcome': 'harness_error',
+        'task': task['id'], 'kind': task['kind'], 'mode': task.get('mode', 'go'), 'trial': index, 'pass': False, 'outcome': 'harness_error',
         'graded_ref': None, 'grade_output': '', 'turns': None, 'tool_calls': None,
         'tokens': {'prompt': None, 'eval': None, 'planner': None, 'peak_ctx': None},
         'errors': {'malformed': None, 'refused': None, 'sandbox': None}, 'repairs': None, 'repairs_accepted': None,
@@ -1063,6 +1063,15 @@ def code_health_metric(metric, result):
 def aggregate(trials, tasks, config, probes_result=None, code_health_result=None):
     """Per-task summary, M1..M16 and warnings from the trial list."""
     positives = [t for t in trials if t['kind'] == 'positive']
+    # M4-M7 and M16 headline go-mode (/go) tasks only, so adding a chat task never moves the scoreboard (issue #284);
+    # chat positives report under `secondary.chat`. A record without `mode` (a result file from before the field)
+    # takes its task's mode from the task list, else counts as go. M1/M2 stay over every positive task.
+    task_modes = {task['id']: task.get('mode') or 'go' for task in tasks}
+    def mode_of(t):
+        return t.get('mode') or task_modes.get(t['task'], 'go')
+
+    go_positives = [t for t in positives if mode_of(t) != 'chat']
+    chat_positives = [t for t in positives if mode_of(t) == 'chat']
     summary, warnings = {}, []
     for task in tasks:
         mine = [t for t in trials if t['task'] == task['id']]
@@ -1112,14 +1121,18 @@ def aggregate(trials, tasks, config, probes_result=None, code_health_result=None
             result['secondary'] = {k: rounded(v) for k, v in secondary.items()}
         return result
 
-    def over(field, reducer, getter=None):
+    def over(field, reducer, getter=None, pool=None):
+        pool = go_positives if pool is None else pool
         get = getter or (lambda t: t[field])
-        values = [get(t) for t in positives]
+        values = [get(t) for t in pool]
         have = [v for v in values if v is not None]
         if have:
             return reducer(have), None
-        reasons = [t['unavailable'].get(field) for t in positives if t['unavailable'].get(field)]
+        reasons = [t['unavailable'].get(field) for t in pool if t['unavailable'].get(field)]
         return None, (reasons[0] if reasons else f'no positive trial produced {field}')
+
+    def chat_block(value):
+        return {'chat': {'value': value, 'trials': len(chat_positives)}} if chat_positives else {}
 
     def per_task_median(getter):
         # Global medians hide one task regressing (T2/T3 vanish behind T1/T5/T6), so also report each task's own.
@@ -1176,24 +1189,33 @@ def aggregate(trials, tasks, config, probes_result=None, code_health_result=None
         'repairs_attempted': attempted if known else None,
         'per_task': repair_ratio})
     value, reason = over('turns', statistics.median)
-    metrics['M4'] = metric('M4', value, reason, secondary={'per_task': per_task_median(lambda t: t['turns'])})
+    chat_value, _ = over('turns', statistics.median, pool=chat_positives)
+    metrics['M4'] = metric('M4', value, reason, secondary={'per_task': per_task_median(lambda t: t['turns']),
+                                                           **chat_block(chat_value)})
     value, reason = over('tool_calls', statistics.median)
-    metrics['M5'] = metric('M5', value, reason, secondary={'per_task': per_task_median(lambda t: t['tool_calls'])})
+    chat_value, _ = over('tool_calls', statistics.median, pool=chat_positives)
+    metrics['M5'] = metric('M5', value, reason, secondary={'per_task': per_task_median(lambda t: t['tool_calls']),
+                                                           **chat_block(chat_value)})
 
     def total_tokens(t):
         return None if t['tokens']['prompt'] is None else t['tokens']['prompt'] + t['tokens']['eval']
 
     value, reason = over('tokens', statistics.median, total_tokens)
-    peaks = [t['tokens']['peak_ctx'] for t in positives if t['tokens']['peak_ctx'] is not None]
+    chat_value, _ = over('tokens', statistics.median, total_tokens, chat_positives)
+    peaks = [t['tokens']['peak_ctx'] for t in go_positives if t['tokens']['peak_ctx'] is not None]
     metrics['M6'] = metric('M6', value, reason, secondary={'peak_ctx_max': max(peaks) if peaks else None,
-                                      'per_task': per_task_median(total_tokens)},
+                                      'per_task': per_task_median(total_tokens), **chat_block(chat_value)},
                            note='fixture token counts are synthetic (ceil(chars / 4)), deterministic, not model counts'
                            if config['backend'] == 'fixture' else None)
-    scored = [t for t in positives if t['errors']['malformed'] is not None and t['tool_calls'] is not None]
-    calls = sum(t['tool_calls'] for t in scored)
-    errors = sum(sum(t['errors'].values()) for t in scored)
-    metrics['M7'] = metric('M7', 100 * errors / calls if calls else None, 'no tool calls were made')
-    enter = [t['enter_to_request_ms'] for t in positives if t['enter_to_request_ms'] is not None]
+    def error_rate(pool):
+        scored = [t for t in pool if t['errors']['malformed'] is not None and t['tool_calls'] is not None]
+        calls = sum(t['tool_calls'] for t in scored)
+        errors = sum(sum(t['errors'].values()) for t in scored)
+        return 100 * errors / calls if calls else None
+
+    metrics['M7'] = metric('M7', error_rate(go_positives), 'no tool calls were made',
+                           secondary=chat_block(error_rate(chat_positives)))
+    enter = [t['enter_to_request_ms'] for t in go_positives if t['enter_to_request_ms'] is not None]
     go_enter = {'enter_to_request_p50_ms': statistics.median(enter) if enter else None}
     metrics.update(probe_metrics(metric, probes_result, go_enter, debug_note))
     value, reason = over('cold_start_ms', statistics.median)
@@ -1203,9 +1225,11 @@ def aggregate(trials, tasks, config, probes_result=None, code_health_result=None
     metrics['M12'] = metric('M12', abnormal, note='counts eval trials only (panic, crash or abnormal exit); '
                             'the smoke suites are not included')
     value, reason = over('rss_kb', statistics.median)
+    chat_value, _ = over('rss_kb', statistics.median, pool=chat_positives)
     metrics['M16'] = metric(
         'M16', value, reason, digits=0,
-        secondary={'binary_kb': binary_kb, 'release_binary_kb': binary_kb if profile == 'release' else None},
+        secondary={'binary_kb': binary_kb, 'release_binary_kb': binary_kb if profile == 'release' else None,
+                   **chat_block(chat_value)},
         note='main process VmHWM only (process-tree peak is not sampled); binary_kb is the size of the binary '
              'under test (config.binary), release_binary_kb the same only for a release build'
              + (f'; {debug_note}' if debug_note else ''))
