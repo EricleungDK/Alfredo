@@ -1201,6 +1201,31 @@ fn large_listings_are_refused_rather_than_cut() {
     );
 }
 
+/// Coverage kept from the old large-listing test (issue #269 made a long listing a
+/// refusal): a change late in a huge `status` still invalidates an approved git card.
+/// Passes on main and on the branch.
+#[test]
+fn a_change_late_in_a_huge_status_still_invalidates_the_approval() {
+    let repo = Repo::new();
+    let long = "x".repeat(60);
+    for index in 0..1500 {
+        fs::write(repo.root.join(format!("{long}{index:05}.txt")), "u\n").unwrap();
+    }
+    fs::write(repo.root.join("one.txt"), "one\n").unwrap();
+    let card = repo
+        .card(
+            "git_commit",
+            json!({"message": "one", "files": ["one.txt"]}),
+        )
+        .unwrap();
+    // Past the first 32 KiB of status.
+    fs::write(repo.root.join("zzzz-late.txt"), "late\n").unwrap();
+    let head = repo.head();
+    let error = approval::apply(&repo.root, &card).unwrap_err();
+    assert!(error.contains("changed"), "{error}");
+    assert_eq!(repo.head(), head);
+}
+
 #[test]
 fn a_failed_commit_of_named_files_leaves_the_index_as_it_was() {
     let repo = Repo::new();
