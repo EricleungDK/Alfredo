@@ -1270,6 +1270,269 @@ fn approve_without_policy_is_refused_with_the_permit_next_step() {
     assert_eq!(fs::read(fixture.file()).unwrap(), before);
 }
 
+/// Task 1 (from a one-step plan) in `status`, with two acceptance criteria when `criteria` is set.
+fn task_in_status(fixture: &Fixture, status: TaskStatus, criteria: bool) -> (TaskStore, u64) {
+    let store = fixture.store("mission");
+    let plan = alfredo_tui::planner::Plan {
+        prompt: "goal".into(),
+        planner: "fixture".into(),
+        tasks: vec![alfredo_tui::planner::Step {
+            title: "Make calc".into(),
+            acceptance: if criteria {
+                vec!["one".into(), "two".into()]
+            } else {
+                vec![]
+            },
+            model: "fixture".into(),
+            dependencies: vec![],
+            policy: policy(),
+        }],
+        context: None,
+        scope: None,
+        architecture: None,
+        usage: None,
+    };
+    store
+        .transact(Request {
+            correlation: "plan".into(),
+            expected_revision: 0,
+            action: Action::Plan { plan },
+        })
+        .unwrap();
+    // Reach `status` through receipts the replay validator accepts; Finish and
+    // Review receipts are written directly, as `finished` does.
+    let mut actions = Vec::new();
+    if status != TaskStatus::Proposed {
+        actions.push(Action::Approve { task: 1 });
+    }
+    if status == TaskStatus::Cancelled {
+        actions.push(Action::Cancel { task: 1 });
+    }
+    let ran = !matches!(
+        status,
+        TaskStatus::Proposed | TaskStatus::Approved | TaskStatus::Cancelled
+    );
+    if ran {
+        actions.push(Action::Start {
+            task: 1,
+            baseline: "a".repeat(40),
+            inputs: vec![],
+        });
+    }
+    let mut snapshot = store.snapshot().unwrap();
+    for action in actions {
+        let (next, _) = store
+            .transact(Request {
+                correlation: format!("step-{}", snapshot.revision),
+                expected_revision: snapshot.revision,
+                action,
+            })
+            .unwrap();
+        snapshot = next;
+    }
+    if !matches!(status, TaskStatus::Running) && ran {
+        let run = snapshot.tasks[0].run.clone().unwrap().id;
+        // Review reads the run's saved evidence; its recorded status does not matter here.
+        let evidence = serde_json::to_vec(&serde_json::json!({
+            "run": run,
+            "baseline": "a".repeat(40),
+            "status": "failed",
+            "detail": "check passed",
+            "patch": "",
+        }))
+        .unwrap();
+        let digest = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&evidence))
+        };
+        let directory = store.run_directory(&run).unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("evidence.json"), &evidence).unwrap();
+        let finish = match status {
+            TaskStatus::Accepted | TaskStatus::Rejected | TaskStatus::NeedsHumanReview => {
+                TaskStatus::ReviewReady
+            }
+            _ => status.clone(),
+        };
+        let mut finals = vec![Action::Finish {
+            task: 1,
+            run,
+            status: finish,
+            evidence_sha256: digest.clone(),
+            detail: "check passed".into(),
+        }];
+        if matches!(status, TaskStatus::Accepted | TaskStatus::Rejected) {
+            finals.push(Action::Review {
+                task: 1,
+                accept: status == TaskStatus::Accepted,
+            });
+        }
+        if status == TaskStatus::NeedsHumanReview {
+            use alfredo_tui::assessment::{Criterion, Decision, Outcome};
+            finals.push(Action::Decide {
+                task: 1,
+                decision: Decision {
+                    failure: None,
+                    risk: None,
+                    outcome: Outcome::NeedsHumanReview,
+                    reason: "needs a person".into(),
+                    criteria: (1..=if criteria { 2 } else { 0 })
+                        .map(|criterion| Criterion {
+                            criterion,
+                            met: true,
+                            note: "ok".into(),
+                        })
+                        .collect(),
+                    limitations: vec![],
+                },
+            });
+        }
+        for action in finals {
+            let revision = snapshot.revision;
+            snapshot.receipts.push(alfredo_tui::tasks::Receipt {
+                revision: revision + 1,
+                task: 1,
+                request: Request {
+                    correlation: format!("final-{revision}"),
+                    expected_revision: revision,
+                    action,
+                },
+            });
+            snapshot.revision = revision + 1;
+        }
+        snapshot.tasks[0].status = status;
+        let bound = snapshot.tasks[0].run.as_mut().unwrap();
+        bound.evidence_sha256 = Some(digest);
+        bound.detail = "check passed".into();
+        fs::write(
+            fixture.file(),
+            serde_json::to_vec_pretty(&snapshot).unwrap(),
+        )
+        .unwrap();
+    }
+    let revision = store.snapshot().unwrap().revision;
+    (store, revision)
+}
+
+fn refusal(fixture: &Fixture, store: &TaskStore, revision: u64, action: Action) -> String {
+    let file = fixture.file();
+    let before = fs::read(&file).unwrap();
+    let error = store
+        .transact(Request {
+            correlation: "refuse".into(),
+            expected_revision: revision,
+            action,
+        })
+        .unwrap_err()
+        .to_string();
+    assert_eq!(fs::read(&file).unwrap(), before);
+    error
+}
+
+#[test]
+fn accept_and_reject_name_the_status_and_the_next_command_for_every_unreviewable_status() {
+    let cases = [
+        (TaskStatus::Accepted, "Task #1 is already accepted"),
+        (TaskStatus::Rejected, "Task #1 is already rejected"),
+        (TaskStatus::Failed, "Task #1 failed; /repair 1 <hint>"),
+        (TaskStatus::Running, "Task #1 is running; wait"),
+        (TaskStatus::Proposed, "Task #1 is proposed; /approve 1"),
+        (
+            TaskStatus::Approved,
+            "Task #1 is approved but has not run; /run 1",
+        ),
+        (TaskStatus::Cancelled, "Task #1 is cancelled"),
+        (TaskStatus::NeedsHumanReview, "Task #1 needs human review"),
+    ];
+    for (status, expected) in cases {
+        for criteria in [false, true] {
+            for accept in [true, false] {
+                let fixture = Fixture::new();
+                let (store, revision) = task_in_status(&fixture, status.clone(), criteria);
+                let error = refusal(
+                    &fixture,
+                    &store,
+                    revision,
+                    Action::Review { task: 1, accept },
+                );
+                assert!(error.contains(expected), "{status:?} {accept}: {error}");
+                assert!(!error.contains("Use /review"), "{status:?}: {error}");
+                assert!(!error.contains("check evidence"), "{status:?}: {error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn review_template_hint_is_only_for_a_review_ready_task() {
+    let fixture = Fixture::new();
+    let (store, revision) = task_in_status(&fixture, TaskStatus::ReviewReady, true);
+    let error = refusal(
+        &fixture,
+        &store,
+        revision,
+        Action::Review {
+            task: 1,
+            accept: true,
+        },
+    );
+    assert!(error.starts_with("Use /review 1 {"), "{error}");
+}
+
+#[test]
+fn approve_and_cancel_refusals_name_the_status_and_allowed_transitions_are_unchanged() {
+    let all = [
+        TaskStatus::Proposed,
+        TaskStatus::Approved,
+        TaskStatus::Cancelled,
+        TaskStatus::Running,
+        TaskStatus::ReviewReady,
+        TaskStatus::NeedsHumanReview,
+        TaskStatus::Accepted,
+        TaskStatus::Failed,
+        TaskStatus::Rejected,
+    ];
+    for status in all {
+        let word = alfredo_tui::tasks::status_label(&status);
+        let fixture = Fixture::new();
+        let (store, revision) = task_in_status(&fixture, status.clone(), false);
+        let approve = store.transact(Request {
+            correlation: "approve".into(),
+            expected_revision: revision,
+            action: Action::Approve { task: 1 },
+        });
+        assert_eq!(
+            approve.is_ok(),
+            status == TaskStatus::Proposed,
+            "{status:?}"
+        );
+        if let Err(error) = approve {
+            assert!(
+                error.to_string().contains(&format!("Task #1 is {word};")),
+                "{error}"
+            );
+        }
+        let fixture = Fixture::new();
+        let (store, revision) = task_in_status(&fixture, status.clone(), false);
+        let cancel = store.transact(Request {
+            correlation: "cancel".into(),
+            expected_revision: revision,
+            action: Action::Cancel { task: 1 },
+        });
+        assert_eq!(
+            cancel.is_ok(),
+            matches!(status, TaskStatus::Proposed | TaskStatus::Approved),
+            "{status:?}"
+        );
+        if let Err(error) = cancel {
+            assert!(
+                error.to_string().contains(&format!("Task #1 is {word};")),
+                "{error}"
+            );
+        }
+    }
+}
+
 #[test]
 fn approve_after_permit_is_accepted_and_the_run_guard_passes() {
     let fixture = Fixture::new();

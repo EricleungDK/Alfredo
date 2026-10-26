@@ -29,6 +29,43 @@ pub fn unknown_task(task: u64) -> String {
     format!("Unknown task {task}; the task panel lists ids")
 }
 
+/// Lowercase status word shown in refusals.
+pub fn status_label(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Proposed => "proposed",
+        TaskStatus::Approved => "approved",
+        TaskStatus::Cancelled => "cancelled",
+        TaskStatus::Running => "running",
+        TaskStatus::ReviewReady => "review-ready",
+        TaskStatus::NeedsHumanReview => "needs-human-review",
+        TaskStatus::Accepted => "accepted",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Rejected => "rejected",
+    }
+}
+
+/// Refusal for `/accept`/`/reject`/`/review` on a task that is not review-ready.
+fn review_refusal(task: u64, status: &TaskStatus) -> String {
+    match status {
+        TaskStatus::Accepted | TaskStatus::Rejected => {
+            format!("Task #{task} is already {}", status_label(status))
+        }
+        TaskStatus::Failed => format!("Task #{task} failed; /repair {task} <hint>"),
+        TaskStatus::Running => format!("Task #{task} is running; wait for it to finish or /stop"),
+        TaskStatus::Proposed => {
+            format!("Task #{task} is proposed; /approve {task}, then /run {task}")
+        }
+        TaskStatus::Approved => format!("Task #{task} is approved but has not run; /run {task}"),
+        TaskStatus::Cancelled => {
+            format!("Task #{task} is cancelled; /tasks shows what can still be reviewed")
+        }
+        TaskStatus::NeedsHumanReview => {
+            format!("Task #{task} needs human review; /tasks shows its state")
+        }
+        TaskStatus::ReviewReady => format!("Task #{task} is review-ready"),
+    }
+}
+
 pub fn not_run(task: u64) -> String {
     format!("Task #{task} has not run; /run {task} first")
 }
@@ -1180,7 +1217,13 @@ impl TaskStore {
             }
         }
         if let Action::Review { task, accept: true } = &request.action {
-            if !snapshot.acceptance_for_task(*task).is_empty() {
+            // The template only helps a task that can be reviewed; any other status
+            // falls through to the status-naming refusal in `apply`.
+            let review_ready = snapshot
+                .tasks
+                .iter()
+                .any(|t| t.id == *task && t.status == TaskStatus::ReviewReady);
+            if review_ready && !snapshot.acceptance_for_task(*task).is_empty() {
                 let count = snapshot.acceptance_for_task(*task).len();
                 return Err(format!("Use {}", review_template(*task, count)).into());
             }
@@ -1323,6 +1366,15 @@ impl TaskStore {
                     .iter()
                     .find(|t| t.id == *task)
                     .ok_or_else(|| unknown_task(*task))?;
+                if matches!(
+                    request.action,
+                    Action::Review { .. } | Action::Assess { .. }
+                ) && item.status != TaskStatus::ReviewReady
+                {
+                    // Name the status before the evidence lookup can fail on a task
+                    // that never produced evidence (proposed, approved, running).
+                    return Err(review_refusal(*task, &item.status).into());
+                }
                 let run = item.run.as_ref().ok_or_else(|| not_run(*task))?;
                 self.read_evidence(
                     &run.id,
@@ -1773,7 +1825,20 @@ impl TaskStore {
                     {
                         item.status = TaskStatus::Cancelled
                     }
-                    _ => return Err("Task transition is not allowed from its current state".into()),
+                    Action::Approve { .. } => {
+                        return Err(format!(
+                            "Task #{task} is {}; /approve needs a proposed task",
+                            status_label(&item.status)
+                        )
+                        .into())
+                    }
+                    _ => {
+                        return Err(format!(
+                            "Task #{task} is {}; /cancel-task needs a proposed or approved task",
+                            status_label(&item.status)
+                        )
+                        .into())
+                    }
                 }
                 Ok(*task)
             }
@@ -1990,7 +2055,7 @@ impl TaskStore {
                     .find(|t| t.id == *task)
                     .ok_or_else(|| unknown_task(*task))?;
                 if item.status != TaskStatus::ReviewReady {
-                    return Err("Task has no successful check evidence to review".into());
+                    return Err(review_refusal(*task, &item.status).into());
                 }
                 item.status = if *accept {
                     TaskStatus::Accepted
