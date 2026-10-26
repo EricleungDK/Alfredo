@@ -7,3 +7,6 @@
 - `run_command` binds a linked worktree's shared Git directory into the sandbox only when
   the workspace's repository verifies that way, so another repository's config (which can
   hold remote tokens), objects and hooks are no longer readable from the sandbox.
+- A FIFO where a workspace repository reads `objects/info/alternates` or a linked worktree's
+  `gitdir` no longer hangs a git tool: the file must be a regular file, or the call is
+  refused at once. Links under `logs/` are refused like links under `refs/` and `info/`.
