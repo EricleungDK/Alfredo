@@ -559,6 +559,121 @@ fn saved_reading_anchor_survives_unseen_growth_restart_and_geometry_change() {
     assert_eq!(render(&restored, 70, 28), before);
 }
 
+fn history_session() -> App {
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("History");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(
+        1,
+        Update::Token((0..60).map(|n| format!("HISTORY_{n:03}\n")).collect()),
+    );
+    app.sessions[0].apply(1, Update::Done);
+    app.sessions[0].insert("Current turn");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(2, Update::Token("Tail\n".into()));
+    app
+}
+
+fn screen_text(app: &App) -> String {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| alfredo_tui::ui::draw(frame, app))
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect()
+}
+
+fn first_history(text: &str) -> Option<String> {
+    text.find("HISTORY_")
+        .map(|index| text[index..index + 11].to_owned())
+}
+
+#[test]
+fn home_and_end_jump_the_transcript_when_the_prompt_is_empty() {
+    for ctrl in [false, true] {
+        let mut app = history_session();
+        let bottom = screen_text(&app);
+        assert!(bottom.contains("Tail") && !bottom.contains("HISTORY_000"));
+        app.sessions[0].home_key(ctrl);
+        let top = screen_text(&app);
+        assert!(top.contains("HISTORY_000"), "ctrl={ctrl}: {top}");
+        assert!(!top.contains("Tail"), "ctrl={ctrl}: {top}");
+        // A jump from the top lands at the latest row again and follows new output.
+        app.sessions[0].end_key(ctrl);
+        assert!(screen_text(&app).contains("Tail"), "ctrl={ctrl}");
+        app.sessions[0].apply(2, Update::Token("Fresh output\n".into()));
+        assert!(screen_text(&app).contains("Fresh output"), "ctrl={ctrl}");
+        // Reading up and ending also resumes following.
+        app.sessions[0].scroll_rows(-20);
+        screen_text(&app);
+        app.sessions[0].end_key(ctrl);
+        app.sessions[0].apply(2, Update::Token("Newest\n".into()));
+        assert!(screen_text(&app).contains("Newest"), "ctrl={ctrl}");
+    }
+}
+
+#[test]
+fn home_and_end_keep_moving_the_prompt_cursor_when_it_has_text_but_ctrl_still_scrolls() {
+    let mut app = history_session();
+    app.sessions[0].insert("hello world");
+    app.sessions[0].home_key(false);
+    assert_eq!(app.sessions[0].cursor(), 0);
+    assert!(screen_text(&app).contains("Tail"));
+    assert!(!screen_text(&app).contains("HISTORY_000"));
+    app.sessions[0].end_key(false);
+    assert_eq!(app.sessions[0].cursor(), "hello world".len());
+    assert!(screen_text(&app).contains("Tail"));
+    app.sessions[0].home_key(true);
+    assert!(screen_text(&app).contains("HISTORY_000"));
+    assert_eq!(app.sessions[0].draft, "hello world");
+    assert_eq!(app.sessions[0].cursor(), "hello world".len());
+    app.sessions[0].end_key(true);
+    assert!(screen_text(&app).contains("Tail"));
+    assert_eq!(app.sessions[0].cursor(), "hello world".len());
+    // End on a drafted prompt after an earlier PgUp leaves the reading point alone.
+    app.sessions[0].scroll_rows(-20);
+    let reading = first_history(&screen_text(&app));
+    assert!(reading.is_some());
+    app.sessions[0].home_key(false);
+    app.sessions[0].end_key(false);
+    assert_eq!(first_history(&screen_text(&app)), reading);
+}
+
+#[test]
+fn a_reading_point_left_by_home_or_end_saves_and_restores_cleanly() {
+    for jump_top in [true, false] {
+        let fixture = Fixture::new();
+        let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+        let mut app = history_session();
+        screen_text(&app);
+        if jump_top {
+            app.sessions[0].home_key(false);
+        } else {
+            app.sessions[0].scroll_rows(-20);
+            screen_text(&app);
+            app.sessions[0].end_key(false);
+        }
+        let before = first_history(&screen_text(&app));
+        if jump_top {
+            assert_eq!(before.as_deref(), Some("HISTORY_000"));
+        }
+        store.save(&Snapshot::capture(&app, "default")).unwrap();
+        drop(store);
+        let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+        let restored = store.load().unwrap().unwrap().restore();
+        assert_eq!(
+            first_history(&screen_text(&restored)),
+            before,
+            "jump_top={jump_top}"
+        );
+    }
+}
+
 #[test]
 fn saving_drops_a_reading_anchor_the_data_cannot_account_for_but_load_still_refuses_one() {
     let fixture = Fixture::new();

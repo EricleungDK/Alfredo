@@ -400,7 +400,7 @@ pub fn footer(context: Footer, turn: Turn, width: usize) -> String {
                 2,
             ),
             ("^N new", 2),
-            ("PgUp/Dn scroll", 3),
+            ("PgUp/Dn/Home/End scroll", 3),
             ("F1 help", 0),
             ("^Q quit", 0),
         ],
