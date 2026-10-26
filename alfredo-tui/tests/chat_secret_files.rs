@@ -41,6 +41,8 @@ const SECRET_FILES: &[&str] = &[
     "terraform.tfvars",
     "secrets.yml",
     "config/secrets.yaml",
+    "secrets.yaml.yml",
+    "deploy/secrets.y-prod.yml",
     "Prod.ENV",
     "CONFIG/.AWS/Credentials",
     "Id_RSA",
@@ -382,4 +384,104 @@ fn large_index_inexact_secret_copy_is_refused_by_git_commit() {
         )
         .unwrap_err();
     assert!(named.contains(".npmrc"), "{named}");
+}
+
+impl Repo {
+    /// Approve and apply a git_commit card, as the owner's y press does.
+    fn commit_apply(&self, arguments: serde_json::Value) -> Result<String, String> {
+        let card = self.card("git_commit", arguments)?;
+        approval::apply(&self.root, &card)
+    }
+
+    /// Whether `path` exists in HEAD.
+    fn head_has(&self, path: &str) -> bool {
+        Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["cat-file", "-e", &format!("HEAD:{path}")])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    /// Paths staged in the index against HEAD (empty when nothing is staged).
+    fn staged(&self) -> String {
+        git(&self.root, &["diff", "--cached", "--name-only"])
+    }
+}
+
+/// Review round 1 of #312: a git_commit that names a plain path holding a copy of a
+/// secret is refused at apply, after its `git add`, and the staging is undone.
+#[test]
+fn apply_refuses_an_untracked_exact_copy_and_restores_the_index() {
+    let repo = Repo::plain();
+    repo.write(".npmrc", "_authToken=SECRET-APPLY-EXACT\n");
+    git(&repo.root, &["add", "-f", ".npmrc"]);
+    git(&repo.root, &["commit", "-q", "-m", "npmrc"]);
+    fs::copy(repo.root.join(".npmrc"), repo.root.join("config.txt")).unwrap();
+    let error = repo
+        .commit_apply(json!({"message": "copy", "files": ["config.txt"]}))
+        .unwrap_err();
+    assert!(error.contains(".npmrc"), "{error}");
+    assert!(!repo.head_has("config.txt"), "HEAD holds the secret copy");
+    assert_eq!(repo.staged(), "", "index not restored");
+}
+
+/// Review round 1 of #312: the same at apply for an edited (inexact) copy.
+#[test]
+fn apply_refuses_an_untracked_inexact_copy_and_restores_the_index() {
+    let repo = Repo::plain();
+    repo.write(".npmrc", "_authToken=SECRET-APPLY-INEXACT\n");
+    git(&repo.root, &["add", "-f", ".npmrc"]);
+    git(&repo.root, &["commit", "-q", "-m", "npmrc"]);
+    fs::copy(repo.root.join(".npmrc"), repo.root.join("config.txt")).unwrap();
+    let mut copy = fs::OpenOptions::new()
+        .append(true)
+        .open(repo.root.join("config.txt"))
+        .unwrap();
+    std::io::Write::write_all(&mut copy, b"timeout=30\n").unwrap();
+    let error = repo
+        .commit_apply(json!({"message": "copy", "files": ["config.txt"]}))
+        .unwrap_err();
+    assert!(error.contains(".npmrc"), "{error}");
+    assert!(!repo.head_has("config.txt"), "HEAD holds the edited copy");
+    assert_eq!(repo.staged(), "", "index not restored");
+}
+
+/// Review round 1 of #312: an unstaged `mv .npmrc docs/notes.txt`, committed by naming
+/// the directory, is refused at apply and does not reach HEAD.
+#[test]
+fn apply_refuses_an_unstaged_rename_into_a_directory_and_restores_the_index() {
+    let repo = Repo::plain();
+    repo.write(".npmrc", "_authToken=SECRET-APPLY-RENAME\n");
+    git(&repo.root, &["add", "-f", ".npmrc"]);
+    git(&repo.root, &["commit", "-q", "-m", "npmrc"]);
+    fs::create_dir_all(repo.root.join("docs")).unwrap();
+    fs::rename(repo.root.join(".npmrc"), repo.root.join("docs/notes.txt")).unwrap();
+    let error = repo
+        .commit_apply(json!({"message": "move", "files": ["docs"]}))
+        .unwrap_err();
+    assert!(error.contains(".npmrc"), "{error}");
+    assert!(
+        !repo.head_has("docs/notes.txt"),
+        "HEAD holds the moved secret"
+    );
+    assert_eq!(repo.staged(), "", "index not restored");
+}
+
+/// Review round 1 of #312: with `core.autocrlf=true`, git warns on stderr that LF will
+/// be replaced by CRLF. That is not a copy or rename warning, so the unstaged diff is
+/// still shown (no false refusal).
+#[test]
+fn git_diff_with_a_line_ending_warning_still_returns_the_diff() {
+    let repo = Repo::plain();
+    git(&repo.root, &["config", "core.autocrlf", "true"]);
+    repo.write("notes.txt", "one\ntwo\n");
+    git(&repo.root, &["add", "notes.txt"]);
+    git(&repo.root, &["commit", "-q", "-m", "notes"]);
+    repo.write("notes.txt", "one\ntwo\nthree\n");
+    let output = repo.run("git_diff", json!({}));
+    assert!(!output.contains("refused"), "{output}");
+    assert!(output.contains("+three"), "{output}");
 }
