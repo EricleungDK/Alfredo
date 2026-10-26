@@ -316,3 +316,58 @@ fn copy_of_an_unchanged_secret_is_hidden_and_refused() {
         .unwrap_err();
     assert!(named.contains(".npmrc"), "{named}");
 }
+
+/// Review of #312: a repository whose index holds more than 1000 files, with 1100 new
+/// files staged beside an inexact copy of an unchanged `.npmrc` (`cp`, then an edit).
+/// Git only searches for inexact copies up to its rename limit: past it, it prints
+/// `only found copies from modified paths due to too many files` on stderr and still
+/// exits 0, so the copy shows as a plain add unless the check passes `-l0` and refuses
+/// any such warning.
+fn large_index_with_an_inexact_secret_copy_staged() -> Repo {
+    let repo = Repo::plain();
+    repo.write(".npmrc", "_authToken=SECRET-LARGE\n");
+    for index in 0..1100 {
+        repo.write(&format!("pkg/m{index:04}.txt"), &format!("module {index}\n"));
+    }
+    git(&repo.root, &["add", "-f", "--", "."]);
+    git(&repo.root, &["commit", "-q", "-m", "1100 modules and npmrc"]);
+    for index in 0..1100 {
+        repo.write(&format!("gen/g{index:04}.txt"), &format!("generated {index}\n"));
+    }
+    fs::copy(repo.root.join(".npmrc"), repo.root.join("config.txt")).unwrap();
+    let mut copy = fs::OpenOptions::new()
+        .append(true)
+        .open(repo.root.join("config.txt"))
+        .unwrap();
+    std::io::Write::write_all(&mut copy, b"timeout=30\n").unwrap();
+    git(&repo.root, &["add", "--", "gen", "config.txt"]);
+    repo
+}
+
+/// Review of #312: git_diff with --staged hides an inexact copy of a secret even when
+/// the index is large and git's copy search is cut short by its rename limit.
+#[test]
+fn large_index_inexact_secret_copy_is_hidden_by_git_diff() {
+    let repo = large_index_with_an_inexact_secret_copy_staged();
+    let scoped = repo.run("git_diff", json!({"staged": true, "path": "config.txt"}));
+    assert!(!scoped.contains("SECRET-LARGE"), "staged git_diff: {scoped}");
+    assert_eq!(scoped, "(no differences)\n");
+}
+
+/// Review of #312: git_commit refuses an inexact copy of a secret staged beside a large
+/// index, both committing the whole index and naming the copy's path.
+#[test]
+fn large_index_inexact_secret_copy_is_refused_by_git_commit() {
+    let repo = large_index_with_an_inexact_secret_copy_staged();
+    let whole = repo
+        .card("git_commit", json!({"message": "copy"}))
+        .unwrap_err();
+    assert!(whole.contains(".npmrc"), "{whole}");
+    let named = repo
+        .card(
+            "git_commit",
+            json!({"message": "copy", "files": ["config.txt"]}),
+        )
+        .unwrap_err();
+    assert!(named.contains(".npmrc"), "{named}");
+}
