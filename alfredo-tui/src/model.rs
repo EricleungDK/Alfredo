@@ -1882,7 +1882,7 @@ impl Session {
     /// (the saved offset then reads from the bottom) instead of refusing the snapshot.
     pub(crate) fn drop_unbounded_reading(&mut self, schema: u32) {
         if !self.valid_reading(schema) {
-            self.reading.set(Default::default());
+            self.reading.set(crate::reading::Viewport::default());
         }
     }
     pub(crate) fn valid_reading(&self, schema: u32) -> bool {

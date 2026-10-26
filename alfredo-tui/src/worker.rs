@@ -753,22 +753,30 @@ fn git_failure(root: &Path, args: &[&str], mut out: Vec<u8>, mut err: Vec<u8>) -
     format!("Git failed: {text}")
 }
 
-fn spawn_git(root: &Path, args: &[&str]) -> Result<tokio::process::Child> {
+fn spawn_git(
+    root: &Path,
+    args: &[&str],
+) -> Result<(
+    tokio::process::Child,
+    tokio::process::ChildStdout,
+    tokio::process::ChildStderr,
+)> {
     let mut command = host_git_command(root, args);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    command
+    let mut child = command
         .spawn()
-        .map_err(|e| format!("Cannot start Git: {e}"))
+        .map_err(|e| format!("Cannot start Git: {e}"))?;
+    let stdout = child.stdout.take().ok_or("Git stdout was not piped")?;
+    let stderr = child.stderr.take().ok_or("Git stderr was not piped")?;
+    Ok((child, stdout, stderr))
 }
 
 pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
-    let mut child = spawn_git(root, args)?;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+    let (mut child, stdout, stderr) = spawn_git(root, args)?;
     within_git_deadline(async {
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -778,7 +786,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
             read_bounded(stderr, &mut err)
         );
         let status = match result {
-            Ok((status, _, _)) => status,
+            Ok((status, (), ())) => status,
             Err(error) => {
                 // Over the limit (or a read error): Git would block on a full
                 // pipe, so stop it now rather than wait out the deadline.
@@ -807,9 +815,7 @@ pub(crate) async fn git_records(
     args: &[&str],
     mut on_record: impl FnMut(&[u8]) -> Result<bool>,
 ) -> Result<()> {
-    let mut child = spawn_git(root, args)?;
-    let mut stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+    let (mut child, mut stdout, stderr) = spawn_git(root, args)?;
     within_git_deadline(async {
         let mut err = Vec::new();
         let mut pending: Vec<u8> = Vec::new();
@@ -858,14 +864,12 @@ pub(crate) async fn git_records(
             let _ = child.wait().await;
             return Ok(());
         }
-        if !stderr_done {
-            if let Err(error) = stderr_read.await {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                return Err(error);
-            }
-        } else {
+        if stderr_done {
             drop(stderr_read);
+        } else if let Err(error) = stderr_read.await {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(error);
         }
         let status = child.wait().await.map_err(|e| e.to_string())?;
         if !status.success() {
