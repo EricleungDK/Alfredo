@@ -15,21 +15,33 @@ const MAX_TEXT: usize = 60;
 /// summary (the caller then falls back to listing the values). `arguments` must be the
 /// normalised object.
 pub fn summarize(name: &str, arguments: &Value) -> Option<String> {
+    summarize_within(name, arguments, MAX_TEXT)
+}
+
+/// Like [`summarize`], but a path is shortened so the whole argument part (path plus any
+/// `(from line N)` or `(N lines)` suffix) fits `width` display columns, capped at
+/// [`MAX_TEXT`]. The caller passes the row width minus the `⚙ name ` prefix (issue #392).
+pub fn summarize_within(name: &str, arguments: &Value, width: usize) -> Option<String> {
+    let limit = width.min(MAX_TEXT);
     let text = |key: &str| arguments.get(key).and_then(Value::as_str);
     let flag = |key: &str| arguments.get(key).and_then(Value::as_bool) == Some(true);
     let path = |key: &str| text(key).map_or_else(|| "?".to_string(), |value| cut(value, false));
-    let file_path = |key: &str| {
-        text(key).map_or_else(|| "?".to_string(), |value| shorten_path(value, MAX_TEXT))
+    let file_path = |key: &str, reserve: usize| {
+        text(key).map_or_else(
+            || "?".to_string(),
+            |value| shorten_path(value, limit.saturating_sub(reserve)),
+        )
     };
     let quoted = |key: &str| text(key).map_or_else(|| "?".to_string(), |value| cut(value, true));
     Some(match name {
         "read_file" => match arguments.get("start_line").and_then(Value::as_u64) {
-            Some(line) if line > 1 => format!("{} (from line {line})", file_path("path")),
-            _ => file_path("path"),
+            Some(line) if line > 1 => {
+                let suffix = format!(" (from line {line})");
+                format!("{}{suffix}", file_path("path", suffix.len()))
+            }
+            _ => file_path("path", 0),
         },
-        "list_files" => {
-            text("path").map_or_else(|| ".".into(), |value| shorten_path(value, MAX_TEXT))
-        }
+        "list_files" => text("path").map_or_else(|| ".".into(), |value| shorten_path(value, limit)),
         "grep" => {
             let place = text("path").map_or_else(|| ".".into(), |value| cut(value, false));
             let case = if flag("ignore_case") {
@@ -64,9 +76,10 @@ pub fn summarize(name: &str, arguments: &Value) -> Option<String> {
         "write_file" => {
             let lines = text("content").map_or(0, |content| content.lines().count());
             let unit = if lines == 1 { "line" } else { "lines" };
-            format!("{} ({lines} {unit})", file_path("path"))
+            let suffix = format!(" ({lines} {unit})");
+            format!("{}{suffix}", file_path("path", suffix.len()))
         }
-        "edit_file" => file_path("path"),
+        "edit_file" => file_path("path", 0),
         "git_commit" => {
             let scope = match arguments.get("files").and_then(Value::as_array) {
                 Some(files) if !files.is_empty() => {
@@ -466,6 +479,30 @@ mod tests {
                 "{shown}"
             );
             assert!(shown.contains('…'), "{shown}");
+        }
+    }
+
+    #[test]
+    fn summarize_within_fits_path_and_suffix_into_the_width() {
+        use unicode_width::UnicodeWidthStr;
+        let path = format!("{}/main.rs", "dir/".repeat(30));
+        for width in [28, 40, 60, 100] {
+            let write = summarize_within(
+                "write_file",
+                &json!({"path": path, "content": "a\nb\n"}),
+                width,
+            )
+            .unwrap();
+            let read = summarize_within(
+                "read_file",
+                &json!({"path": path, "start_line": 120}),
+                width,
+            )
+            .unwrap();
+            for shown in [write, read] {
+                assert!(shown.width() <= width.min(MAX_TEXT), "{width}: {shown}");
+                assert!(shown.contains("main.rs ("), "{width}: {shown}");
+            }
         }
     }
 
