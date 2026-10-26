@@ -542,12 +542,42 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
             }
         }
     }
+    // Status shows a rename only when both names are in the pathspec, and the staged
+    // name listing above shows a copy as a plain add, so a secret staged under a new
+    // name (`git mv .npmrc docs/notes.txt`, `cp .npmrc config.txt`) is found here: the
+    // sources of every staged rename or copy in the whole index, in either mode.
+    let index = full(
+        root,
+        &[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--find-renames",
+            "--find-copies",
+            "--find-copies-harder",
+            "--name-status",
+            "-z",
+            "--",
+        ],
+    )?;
+    // Read lossily: a replacement character may hide the bytes that made a name secret.
+    if index.contains('\u{FFFD}') {
+        return Err("a staged file name is not UTF-8; the commit is refused".into());
+    }
+    let mut fields = index.split('\0').filter(|f| !f.is_empty());
+    while let Some(status) = fields.next() {
+        let first = fields.next();
+        if status.starts_with(['R', 'C']) {
+            names.extend(first.map(String::from));
+            fields.next();
+        }
+    }
     match names
         .iter()
         .find(|name| crate::planning_context::secret(&name.to_lowercase()))
     {
         Some(name) => Err(format!(
-            "refused: {name} looks like a secret (.env*, *.pem, *.key, *.p12, *.pfx or .git); commit it by hand if intended"
+            "refused: {name} looks like a secret or credential file (see the secret-file list in docs/reference.md); commit it by hand if intended"
         )),
         None => Ok(()),
     }
