@@ -174,6 +174,40 @@ fn a_restart_restores_queued_text_as_the_draft_and_never_replays_it() {
 }
 
 #[test]
+fn a_saved_copy_keeps_queued_text_even_beside_a_nearly_full_draft() {
+    let mut session = running();
+    for text in ["one", "two", "three"] {
+        session.insert(text);
+        session.queue_draft().unwrap();
+    }
+    session.insert(&"x".repeat(MAX_DRAFT - 10));
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let json = serde_json::to_string(&Snapshot::capture(&app, "default")).unwrap();
+    let restored = serde_json::from_str::<Snapshot>(&json).unwrap().restore();
+    let draft = &restored.sessions[0].draft;
+    assert!(draft.starts_with("one\ntwo\nthree\nx"), "{}", &draft[..30]);
+    assert!(draft.len() <= MAX_DRAFT);
+}
+
+#[test]
+fn an_unselected_session_drains_its_own_queue_without_touching_others() {
+    let mut app = App::new("m".into());
+    app.sessions[0] = running();
+    app.sessions[0].insert("next");
+    app.sessions[0].queue_draft().unwrap();
+    app.add_session();
+    app.sessions[1].insert("other chat prompt");
+    assert_eq!(app.selected, 1);
+    app.sessions[0].apply(1, Update::Done);
+    let request = app.sessions[0].begin_queued().unwrap().unwrap();
+    assert_eq!(request.last().unwrap().content, "next");
+    assert_eq!(app.sessions[1].draft, "other chat prompt");
+    assert_eq!(app.sessions[1].status, Status::Ready);
+    assert!(app.sessions[1].begin_queued().is_none());
+}
+
+#[test]
 fn switching_sessions_keeps_drafts_and_inference_independent() {
     let mut app = App::new("model".into());
     app.sessions[0] = started();

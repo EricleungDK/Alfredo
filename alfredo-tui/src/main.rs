@@ -2145,7 +2145,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(request) = request {
                 match request {
                     Ok(messages) => {
-                        let index = queued_for.unwrap_or(work.app.selected);
+                        // Only a drained request (no key this pass) belongs to another session.
+                        let index = queued_for.filter(|_| resumed).unwrap_or(work.app.selected);
                         if let Some(job) = jobs[index].take() {
                             job.abort();
                         }

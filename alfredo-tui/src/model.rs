@@ -524,7 +524,7 @@ impl Session {
         }
         snapshot.aside = None;
         // A restart never replays queued text: it comes back as the draft (issue #338).
-        snapshot.restore_queue();
+        snapshot.restore_queue_saved();
         snapshot.queued = false;
         snapshot.queue_observation = None;
         snapshot.capacity_wait = None;
@@ -948,6 +948,22 @@ impl Session {
             self.restore_queue();
         }
         Some(result)
+    }
+
+    /// [`Self::restore_queue`] for a saved copy, which has no history to fall back on:
+    /// queued text always lands in the draft, and only the tail of an over-long typed
+    /// draft is cut to fit [`MAX_DRAFT`].
+    fn restore_queue_saved(&mut self) {
+        let joined = self.queue.join("\n");
+        let room = MAX_DRAFT.saturating_sub(joined.len() + 1);
+        if !self.queue.is_empty() && self.draft.len() > room {
+            let mut cut = room;
+            while !self.draft.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            self.draft.truncate(cut);
+        }
+        self.restore_queue();
     }
 
     /// Return queued messages to the front of the prompt, one per line, never sent.
