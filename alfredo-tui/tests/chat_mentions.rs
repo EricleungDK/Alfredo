@@ -247,6 +247,42 @@ async fn quoted_mentions_are_refused_with_a_notice_and_never_attached() {
 }
 
 #[tokio::test]
+async fn the_spaced_hint_never_replaces_the_real_reason_of_an_existing_target() {
+    let dir = repo();
+    fs::write(dir.path().join(".env backup"), "x\n").unwrap();
+    fs::write(dir.path().join("config.json"), "z".repeat(300 * 1024)).unwrap();
+    fs::write(dir.path().join("config.json bak"), "x\n").unwrap();
+    fs::write(dir.path().join("link.txt backup"), "x\n").unwrap();
+    let out = attach(dir.path(), "@.env @config.json @link.txt").await;
+    assert!(out.block.is_empty(), "{out:?}");
+    assert_eq!(out.notices.len(), 3, "{:?}", out.notices);
+    assert!(out.notices[0].contains("excluded"), "{:?}", out.notices);
+    assert!(out.notices[1].contains("over 256 KiB"), "{:?}", out.notices);
+    assert!(out.notices[2].contains("symlink"), "{:?}", out.notices);
+    assert!(out.notices.iter().all(|n| !n.contains("spaces")));
+}
+
+#[tokio::test]
+async fn nothing_inside_quotes_is_attached() {
+    let dir = repo();
+    for prompt in [
+        "see @\"@calc.py\"",
+        "see @\"foo @calc.py\" now",
+        "see @'x @calc.py'",
+        "see @\"unclosed @calc.py",
+    ] {
+        let out = attach(dir.path(), prompt).await;
+        assert!(out.block.is_empty(), "{prompt}: {out:?}");
+        assert_eq!(out.notices.len(), 1, "{prompt}: {:?}", out.notices);
+        assert!(out.notices[0].contains("quoted paths"), "{:?}", out.notices);
+    }
+    // A mention after the closing quote is still its own mention.
+    let out = attach(dir.path(), "see @\"a b\" and @calc.py").await;
+    assert_eq!(out.files, ["calc.py"]);
+    assert_eq!(out.notices.len(), 1);
+}
+
+#[tokio::test]
 async fn refusal_notices_show_invisible_characters_instead_of_drawing_them() {
     let dir = repo();
     let out = attach(dir.path(), "@evil\u{202e}gnp.txt").await;

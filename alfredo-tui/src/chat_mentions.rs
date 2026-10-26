@@ -49,7 +49,12 @@ fn separator(c: char) -> bool {
 pub fn parse(prompt: &str) -> Vec<Candidate> {
     let mut found: Vec<Candidate> = Vec::new();
     let mut previous: Option<char> = None;
+    // End of the quoted text last seen: nothing inside it is a mention.
+    let mut skip_to = 0;
     for (at, c) in prompt.char_indices() {
+        if at < skip_to {
+            continue;
+        }
         let boundary = previous.is_none_or(separator);
         previous = Some(c);
         if c != '@' || !boundary {
@@ -57,7 +62,8 @@ pub fn parse(prompt: &str) -> Vec<Candidate> {
         }
         let rest = &prompt[at + 1..];
         if rest.starts_with(['"', '\'', '`']) {
-            let shown = quoted_text(rest);
+            let (shown, used) = quoted_text(rest);
+            skip_to = at + 1 + used;
             if !found.iter().any(|existing| existing.path == shown) {
                 found.push(Candidate {
                     path: shown,
@@ -86,7 +92,9 @@ pub fn parse(prompt: &str) -> Vec<Candidate> {
 
 /// What a quoted mention looked like, for the notice: the opening quote and the text up
 /// to its closing quote (or the end of the line), at most 60 characters. Never read.
-fn quoted_text(rest: &str) -> String {
+/// Also returns how many bytes of `rest` the quoted text spans (to the closing quote, or
+/// the end of the line when it is not closed).
+fn quoted_text(rest: &str) -> (String, usize) {
     let quote = rest.chars().next().unwrap_or('"');
     let body = &rest[quote.len_utf8()..];
     let line = body.lines().next().unwrap_or("");
@@ -98,14 +106,13 @@ fn quoted_text(rest: &str) -> String {
     if inner.chars().count() > 60 {
         shown.push('…');
     }
-    format!(
-        "{quote}{shown}{}",
-        if closed {
-            quote.to_string()
-        } else {
-            String::new()
-        }
-    )
+    let used = quote.len_utf8() + inner.len() + if closed { quote.len_utf8() } else { 0 };
+    let closing = if closed {
+        quote.to_string()
+    } else {
+        String::new()
+    };
+    (format!("{quote}{shown}{closing}"), used)
 }
 
 #[derive(Debug, Default)]
@@ -284,6 +291,13 @@ fn cut_at_space(root: &Path, path: &str) -> bool {
         }
     }
     let Some(name) = name else { return false };
+    // Only when the mentioned name itself is absent: an existing target keeps its own
+    // refusal reason (secret, symlink, too large...).
+    let missing = std::fs::symlink_metadata(dir.join(name))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+    if !missing {
+        return false;
+    }
     let prefix = format!("{name} ");
     std::fs::read_dir(&dir).is_ok_and(|entries| {
         entries
