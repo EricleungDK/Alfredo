@@ -340,6 +340,7 @@ impl Glob {
         let Some(glob) = text_arg(arguments, "glob")?.filter(|glob| !glob.is_empty()) else {
             return Ok(None);
         };
+        let glob = glob.trim_start_matches("./");
         let chars: Vec<char> = glob.chars().collect();
         if chars.len() > MAX_GLOB_CHARS {
             return Err(format!(
@@ -443,7 +444,15 @@ fn unknown_note(arguments: &Value, known: &[&str]) -> String {
 /// `path`, resolved; a name with a glob character that is not a real path is refused
 /// with a pointer to the `glob` argument.
 fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
-    if path.contains(['*', '?']) && !root.join(path.trim()).exists() {
+    // Only a path that stays inside is probed, so an outside path is refused by
+    // `resolve` exactly as before and its existence is never revealed.
+    let inside = Path::new(path.trim()).components().all(|part| {
+        matches!(
+            part,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    });
+    if inside && path.contains(['*', '?']) && !root.join(path.trim()).exists() {
         return Err(format!(
             "path {path:?} is a literal path, not a pattern; pass the directory as path and the pattern as the glob argument (for example glob={path:?})"
         ));
@@ -804,6 +813,27 @@ mod tests {
             assert!(error.contains("glob"), "{error}");
             assert!(error.contains("src/"), "{error}");
         }
+    }
+
+    #[test]
+    fn an_outside_path_with_a_glob_character_is_refused_as_before() {
+        let (dir, _cleanup) = sample();
+        for path in ["../*.txt", "/etc/*", "src/../../*"] {
+            let error = list_files(&dir, &json!({"path": path})).unwrap_err();
+            assert_eq!(error, resolve(&dir, path).unwrap_err(), "{path}");
+            assert!(error.contains("stay inside"), "{path}: {error}");
+            assert_eq!(
+                grep(&dir, &json!({"pattern": "x", "path": path})).unwrap_err(),
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn a_leading_dot_slash_in_a_glob_is_ignored() {
+        let (dir, _cleanup) = sample();
+        assert_eq!(listed(&dir, "./src/*.rs"), ["src/a.rs"]);
+        assert_eq!(listed(&dir, "./*.rs"), ["src/a.rs", "src/deep/c.rs"]);
     }
 
     #[test]
