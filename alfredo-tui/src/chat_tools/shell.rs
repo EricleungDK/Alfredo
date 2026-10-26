@@ -5,7 +5,7 @@
 //! (network on) behind a visibly different card. Both run in their own process
 //! group: a timeout kills the whole tree; output is capped. A sandbox that cannot
 //! start is reported with a suggestion to escalate; nothing is retried on the host.
-use super::{display, needed_terminal, resolve, text_arg, Tier, Tool};
+use super::{display, git_read, needed_terminal, resolve, text_arg, Tier, Tool};
 use crate::execution::{
     self, ControlSignal, ExecutionAuthority, ExecutionCallbacks, ExecutionLimits, ExecutionRequest,
     ExecutionSandbox, ProcessOutcomeStatus, RustExecutionProvider,
@@ -515,18 +515,13 @@ fn toolchain_binds(home: Option<&Path>) -> Toolchain {
     toolchain
 }
 
-/// The shared Git directory of a linked worktree (holds its per-worktree gitdir too).
+/// The shared Git directory of a linked worktree (holds its per-worktree gitdir too), only
+/// when the workspace's repository verifies as one of its own (issue #359). Nothing when it
+/// does not: the sandbox then has no extra bind and git inside it cannot reach another
+/// repository.
 fn git_common_dir(root: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(root)
-        .output()
-        .ok()?;
-    let text = String::from_utf8(output.stdout).ok()?;
-    let path = Path::new(text.trim()).canonicalize().ok()?;
-    (output.status.success() && path.is_dir())
-        .then(|| path.to_str().map(str::to_string))
-        .flatten()
+    let verified = git_read::verified_git_dir(root, git_read::Config::Hardened).ok()?;
+    verified.common_dir.to_str().map(str::to_string)
 }
 
 /// Run on the host (owner-approved escalation): the owner's environment, network on.
