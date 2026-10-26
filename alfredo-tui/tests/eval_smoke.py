@@ -46,6 +46,10 @@ class EvalSmoke(unittest.TestCase):
                 self.assertTrue(task['as_expected'], name)
                 self.assertEqual(0 if task['kind'] == 'negative_control' else 1, task['passes'], name)
             self.assertEqual(1.0, document['metrics']['M1']['value'])
+            chat_tasks = [t for t in document['trials'] if t['mode'] == 'chat']
+            self.assertEqual(['T7-chat-tool-edit'], sorted({t['task'] for t in chat_tasks}))
+            for key in ('M4', 'M5', 'M6', 'M7'):
+                self.assertEqual(len(chat_tasks), document['metrics'][key]['secondary']['chat']['trials'], key)
             for trial in document['trials']:
                 self.assertEqual(0, trial['exit_code'], trial['task'])
                 self.assertFalse(trial['panic'], trial['task'])
