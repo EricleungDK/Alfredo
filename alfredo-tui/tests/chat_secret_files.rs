@@ -485,3 +485,22 @@ fn git_diff_with_a_line_ending_warning_still_returns_the_diff() {
     assert!(!output.contains("refused"), "{output}");
     assert!(output.contains("+three"), "{output}");
 }
+
+/// Review round 2 of #312: a refused apply restores the index as it was, including an
+/// intent-to-add entry (`git add -N`) that the apply did not touch.
+#[test]
+fn apply_refusal_keeps_an_intent_to_add_entry() {
+    let repo = Repo::plain();
+    repo.write(".npmrc", "_authToken=SECRET-ITA\n");
+    git(&repo.root, &["add", "-f", ".npmrc"]);
+    git(&repo.root, &["commit", "-q", "-m", "npmrc"]);
+    repo.write("notes.txt", "pending\n");
+    git(&repo.root, &["add", "-N", "notes.txt"]);
+    fs::copy(repo.root.join(".npmrc"), repo.root.join("config.txt")).unwrap();
+    let error = repo
+        .commit_apply(json!({"message": "copy", "files": ["config.txt"]}))
+        .unwrap_err();
+    assert!(error.contains(".npmrc"), "{error}");
+    let intent = git(&repo.root, &["diff", "--name-only", "--diff-filter=A"]);
+    assert_eq!(intent, "notes.txt\n", "intent-to-add entry lost");
+}
