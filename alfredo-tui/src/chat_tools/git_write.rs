@@ -20,7 +20,7 @@ use super::{
     approval::CardKind,
     edit::Change,
     git_read::{self, ref_arg},
-    text_arg, Tier, Tool, MAX_OUTPUT,
+    needed_terminal, text_arg, Tier, Tool, MAX_OUTPUT,
 };
 use serde_json::{json, Value};
 use std::{path::Path, process::Command, time::Duration};
@@ -1131,14 +1131,6 @@ fn detach_from_terminal(command: &mut Command) {
     }
     #[cfg(not(unix))]
     let _ = command;
-}
-
-/// Whether git's stderr shows ssh wanted a prompt it could not have.
-fn needed_terminal(error: &str) -> bool {
-    let error = error.to_lowercase();
-    ["/dev/tty", "no tty", "host key verification failed"]
-        .iter()
-        .any(|needle| error.contains(needle))
 }
 
 /// Run a writing git command in `root`. `Err` is git's message.
