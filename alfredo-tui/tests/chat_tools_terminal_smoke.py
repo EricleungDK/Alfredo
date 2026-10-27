@@ -254,6 +254,20 @@ class ChatTools(unittest.TestCase):
         self.terminal.write(b'/allow\r')
         self.terminal.wait_for('#1 edit_file')
 
+    def test_undo_restores_the_last_turns_edit_and_a_second_undo_has_nothing(self):
+        # Issue #325: the owner-typed /undo restores the approved edit from its pre-image.
+        self.terminal.write(b'redraft README\r')
+        self.terminal.wait_for('Approve edit_file')
+        time.sleep(0.7)
+        self.terminal.write(b'y')
+        self.terminal.wait_for('MODEL_SAW_EDIT')
+        self.assertIn('REDRAFTED_MARKER: a small', self.readme())
+        self.terminal.write(b'/undo\r')
+        self.terminal.wait_for('1 restored, 0 refused')
+        self.assertEqual(self.readme(), README)
+        self.terminal.write(b'/undo\r')
+        self.terminal.wait_for('Nothing to undo: no chat edit from the last turn is recorded')
+
     def start_slow_command(self, prompt):
         root = Path(os.path.realpath(self.repo.name))
         self.terminal.write(prompt.encode() + b'\r')

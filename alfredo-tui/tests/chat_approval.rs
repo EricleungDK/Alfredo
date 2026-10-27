@@ -1555,3 +1555,485 @@ fn shrinking_below_the_minimum_size_disarms_a_card_that_was_whole() {
         "header rule"
     );
 }
+
+// ---- /undo (issue #325): restore the last turn's approved edits from pre-images ----
+
+use chat_tools::undo;
+
+fn tool_calls(calls: &[(&str, serde_json::Value)]) -> Reply {
+    let calls: Vec<_> = calls
+        .iter()
+        .map(|(name, arguments)| json!({"function": {"name": name, "arguments": arguments}}))
+        .collect();
+    Reply::Stream(
+        vec![
+            format!(
+                "{}\n",
+                json!({"message":{"role":"assistant","content":"","tool_calls":calls},"done":false})
+            )
+            .into_bytes(),
+            format!("{}\n", json!({"message":{"content":""},"done":true})).into_bytes(),
+        ],
+        Duration::ZERO,
+    )
+}
+
+/// One approved turn whose outcomes (and undo pre-images) go to `state`.
+async fn approved_turn(root: &Path, state: &Path, first: Reply) {
+    let (gate, _) = gate_with(Some(Decision::Approve), Some(Log::new(state)), || {});
+    turn(root, first, Some(gate)).await;
+}
+
+fn undo_now(root: &Path, state: &Path) -> String {
+    undo::run(root, state, Some(&Log::new(state)))
+        .expect("undo runs")
+        .join("\n")
+}
+
+fn edit_readme(new: &str) -> Reply {
+    tool_call(
+        "edit_file",
+        json!({"path": "README.md", "old_text": "Old intro line.", "new_text": new}),
+    )
+}
+
+#[tokio::test]
+async fn undo_restores_the_last_turns_edit_and_logs_it() {
+    let root = workspace("undo-restore");
+    let state = log_dir("undo-restore");
+    approved_turn(&root, &state, edit_readme("New intro line.")).await;
+    assert_ne!(fs::read_to_string(root.join("README.md")).unwrap(), README);
+    let report = undo_now(&root, &state);
+    assert!(report.contains("README.md"), "{report}");
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), README);
+    let records = Log::new(&state).records();
+    let last = records.last().unwrap();
+    assert_eq!(last.tool, "undo");
+    assert_eq!(last.outcome, Outcome::Applied);
+    assert!(last.target.contains("README.md"), "{last:?}");
+}
+
+#[tokio::test]
+async fn undo_refuses_a_file_changed_since_and_names_it_but_restores_the_rest() {
+    let root = workspace("undo-refuse");
+    let state = log_dir("undo-refuse");
+    fs::write(root.join("a.txt"), "a one\n").unwrap();
+    approved_turn(
+        &root,
+        &state,
+        tool_calls(&[
+            (
+                "edit_file",
+                json!({"path": "README.md", "old_text": "Old intro line.", "new_text": "X"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "a.txt", "old_text": "one", "new_text": "two"}),
+            ),
+        ]),
+    )
+    .await;
+    let owner = "# Demo\nX\nKeep this line.\nOwner added this.\n";
+    fs::write(root.join("README.md"), owner).unwrap();
+    let report = undo_now(&root, &state);
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), owner);
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "a one\n");
+    let refused = report
+        .lines()
+        .find(|l| l.contains("README.md"))
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(refused.contains("changed"), "{report}");
+    assert!(report.contains("a.txt"), "{report}");
+    let records = Log::new(&state).records();
+    assert!(records.iter().any(|r| r.tool == "undo"
+        && r.target.contains("README.md")
+        && matches!(r.outcome, Outcome::Failed(_))));
+    assert!(records
+        .iter()
+        .any(|r| r.tool == "undo" && r.target.contains("a.txt") && r.outcome == Outcome::Applied));
+}
+
+#[tokio::test]
+async fn undo_deletes_a_created_file_only_when_unchanged() {
+    let root = workspace("undo-create");
+    let state = log_dir("undo-create");
+    let create = |path: &str| tool_call("write_file", json!({"path": path, "content": "fresh\n"}));
+    approved_turn(&root, &state, create("sub/dir/new.txt")).await;
+    assert!(root.join("sub/dir/new.txt").exists());
+    let report = undo_now(&root, &state);
+    assert!(!root.join("sub/dir/new.txt").exists(), "{report}");
+    assert!(report.contains("new.txt"), "{report}");
+
+    approved_turn(&root, &state, create("again.txt")).await;
+    fs::write(root.join("again.txt"), "fresh\nowner edit\n").unwrap();
+    let report = undo_now(&root, &state);
+    assert_eq!(
+        fs::read_to_string(root.join("again.txt")).unwrap(),
+        "fresh\nowner edit\n"
+    );
+    assert!(
+        report.contains("again.txt") && report.contains("changed"),
+        "{report}"
+    );
+}
+
+#[tokio::test]
+async fn a_second_undo_has_nothing_to_undo_and_never_reapplies_stale_data() {
+    let root = workspace("undo-twice");
+    let state = log_dir("undo-twice");
+    approved_turn(&root, &state, edit_readme("New intro line.")).await;
+    undo_now(&root, &state);
+    let later = "# Demo\nMy own rewrite.\n";
+    fs::write(root.join("README.md"), later).unwrap();
+    let report = undo_now(&root, &state);
+    assert!(
+        report.to_lowercase().contains("nothing to undo"),
+        "{report}"
+    );
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), later);
+}
+
+#[tokio::test]
+async fn undo_covers_only_the_last_turn() {
+    let root = workspace("undo-last");
+    let state = log_dir("undo-last");
+    fs::write(root.join("b.txt"), "b old\n").unwrap();
+    approved_turn(&root, &state, edit_readme("First turn.")).await;
+    approved_turn(
+        &root,
+        &state,
+        tool_call(
+            "edit_file",
+            json!({"path": "b.txt", "old_text": "old", "new_text": "new"}),
+        ),
+    )
+    .await;
+    undo_now(&root, &state);
+    assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "b old\n");
+    assert!(fs::read_to_string(root.join("README.md"))
+        .unwrap()
+        .contains("First turn."));
+    assert!(undo_now(&root, &state)
+        .to_lowercase()
+        .contains("nothing to undo"));
+}
+
+#[tokio::test]
+async fn a_later_turn_without_edits_leaves_nothing_to_undo() {
+    let root = workspace("undo-quiet");
+    let state = log_dir("undo-quiet");
+    approved_turn(&root, &state, edit_readme("New intro line.")).await;
+    approved_turn(&root, &state, done("just talking")).await;
+    assert!(undo_now(&root, &state)
+        .to_lowercase()
+        .contains("nothing to undo"));
+    assert!(fs::read_to_string(root.join("README.md"))
+        .unwrap()
+        .contains("New intro line."));
+}
+
+#[tokio::test]
+async fn two_edits_to_one_file_in_a_turn_undo_to_the_original() {
+    let root = workspace("undo-two");
+    let state = log_dir("undo-two");
+    approved_turn(
+        &root,
+        &state,
+        tool_calls(&[
+            (
+                "edit_file",
+                json!({"path": "README.md", "old_text": "Old intro line.", "new_text": "Mid."}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "README.md", "old_text": "Mid.", "new_text": "Final."}),
+            ),
+        ]),
+    )
+    .await;
+    undo_now(&root, &state);
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), README);
+}
+
+#[tokio::test]
+async fn denied_refused_and_failed_calls_leave_nothing_to_undo() {
+    let root = workspace("undo-none");
+    let state = log_dir("undo-none");
+    let (deny, _) = gate_with(Some(Decision::Deny), Some(Log::new(&state)), || {});
+    turn(&root, edit_readme("No."), Some(deny)).await;
+    approved_turn(
+        &root,
+        &state,
+        tool_calls(&[
+            ("write_file", json!({"path": ".env", "content": "KEY=1\n"})),
+            (
+                "write_file",
+                json!({"path": ".git/config", "content": "x\n"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "README.md", "old_text": "absent text", "new_text": "y"}),
+            ),
+        ]),
+    )
+    .await;
+    assert!(undo_now(&root, &state)
+        .to_lowercase()
+        .contains("nothing to undo"));
+    assert!(!root.join(".env").exists());
+}
+
+#[tokio::test]
+async fn undo_refuses_a_target_or_parent_that_became_a_symlink() {
+    let root = workspace("undo-link");
+    let state = log_dir("undo-link");
+    let outside = workspace("undo-link-outside");
+    fs::write(outside.join("secret.txt"), "outside\n").unwrap();
+    fs::create_dir_all(root.join("dir")).unwrap();
+    fs::write(root.join("dir/f.txt"), "f one\n").unwrap();
+    approved_turn(
+        &root,
+        &state,
+        tool_calls(&[
+            (
+                "edit_file",
+                json!({"path": "README.md", "old_text": "Old intro line.", "new_text": "X"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "dir/f.txt", "old_text": "one", "new_text": "two"}),
+            ),
+        ]),
+    )
+    .await;
+    fs::remove_file(root.join("README.md")).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("README.md")).unwrap();
+    fs::rename(root.join("dir"), root.join("dir-moved")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("dir")).unwrap();
+    fs::write(outside.join("f.txt"), "f two\n").unwrap();
+    let report = undo_now(&root, &state);
+    assert!(report.contains("symlink"), "{report}");
+    assert_eq!(
+        fs::read_to_string(outside.join("secret.txt")).unwrap(),
+        "outside\n"
+    );
+    assert_eq!(
+        fs::read_to_string(outside.join("f.txt")).unwrap(),
+        "f two\n"
+    );
+    assert!(fs::symlink_metadata(root.join("README.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[tokio::test]
+async fn undo_keeps_the_read_only_refusal() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = workspace("undo-ro");
+    let state = log_dir("undo-ro");
+    approved_turn(&root, &state, edit_readme("New intro line.")).await;
+    let edited = fs::read_to_string(root.join("README.md")).unwrap();
+    fs::set_permissions(root.join("README.md"), fs::Permissions::from_mode(0o444)).unwrap();
+    let report = undo_now(&root, &state);
+    assert!(report.contains("read-only"), "{report}");
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), edited);
+}
+
+#[tokio::test]
+async fn pre_images_live_in_the_state_directory_never_in_the_workspace() {
+    let root = workspace("undo-where");
+    let state = log_dir("undo-where");
+    let before: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    approved_turn(&root, &state, edit_readme("New intro line.")).await;
+    let after: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(before, after, "no file is added to the workspace");
+    assert!(state.join("chat-undo").is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(state.join("chat-undo"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "private directory");
+    }
+}
+
+#[tokio::test]
+async fn a_file_over_the_pre_image_cap_is_not_recorded_and_undo_says_so() {
+    let root = workspace("undo-cap");
+    let state = log_dir("undo-cap");
+    let big = format!("{}marker\n", "x\n".repeat(300_000));
+    fs::write(root.join("big.txt"), &big).unwrap();
+    approved_turn(
+        &root,
+        &state,
+        tool_calls(&[
+            (
+                "edit_file",
+                json!({"path": "big.txt", "old_text": "marker", "new_text": "changed"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "README.md", "old_text": "Old intro line.", "new_text": "X"}),
+            ),
+        ]),
+    )
+    .await;
+    let report = undo_now(&root, &state);
+    let line = report
+        .lines()
+        .find(|l| l.contains("big.txt"))
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(
+        line.contains("not available") && line.contains("cap"),
+        "{report}"
+    );
+    assert!(fs::read_to_string(root.join("big.txt"))
+        .unwrap()
+        .contains("changed"));
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), README);
+    let kept: u64 = fs::read_dir(state.join("chat-undo"))
+        .map(|d| d.map(|e| e.unwrap().metadata().unwrap().len()).sum())
+        .unwrap_or(0);
+    assert!(
+        kept < 100_000,
+        "nothing near the big file was copied: {kept}"
+    );
+}
+
+#[test]
+fn undo_is_a_slash_command_only_never_a_model_tool() {
+    assert!(TOOLS.iter().all(|tool| !tool.name.contains("undo")));
+    let defined = json!(chat_tools::definitions()).to_string();
+    assert!(!defined.contains("undo"), "{defined}");
+    let root = workspace("undo-tool");
+    let error = approval::card(&root, &call("undo", json!({}))).unwrap_err();
+    assert!(error.contains("no approval preview"), "{error}");
+    assert!(alfredo_tui::commands::COMMANDS
+        .iter()
+        .any(|(name, _)| *name == "/undo"));
+}
+
+fn tamper_journal(state: &Path, change: impl FnOnce(&mut serde_json::Value)) {
+    let path = state.join("chat-undo/journal.json");
+    let mut journal: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    change(&mut journal);
+    fs::write(path, serde_json::to_vec(&journal).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn a_tampered_journal_cannot_aim_undo_at_git_secrets_or_outside_paths() {
+    let root = workspace("undo-tamper");
+    let state = log_dir("undo-tamper");
+    let outside = workspace("undo-tamper-outside");
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/config"), "[core]\n").unwrap();
+    fs::write(root.join(".env"), "KEY=1\n").unwrap();
+    fs::write(outside.join("o.txt"), "outside\n").unwrap();
+    let escape = root
+        .parent()
+        .unwrap()
+        .join(format!("escape-{}.txt", std::process::id()));
+    fs::write(&escape, "esc\n").unwrap();
+    for (tag, path) in [
+        ("git", ".git/config".to_string()),
+        ("secret", ".env".to_string()),
+        (
+            "dotdot",
+            format!("../{}", escape.file_name().unwrap().to_string_lossy()),
+        ),
+        (
+            "absolute",
+            outside.join("o.txt").to_string_lossy().into_owned(),
+        ),
+    ] {
+        fs::write(root.join("README.md"), README).unwrap();
+        approved_turn(&root, &state, edit_readme("New intro line.")).await;
+        // An entry that would match the file's content exactly: only the path policy stops it.
+        let content = fs::read(root.join(&path)).unwrap_or_default();
+        let digest = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&content))
+        };
+        tamper_journal(&state, |j| {
+            j["entries"][0]["path"] = json!(path);
+            j["entries"][0]["created"] = json!(true);
+            j["entries"][0]["after"] = json!(digest);
+        });
+        let report = undo_now(&root, &state);
+        assert!(report.contains("refused"), "{tag}: {report}");
+        assert_eq!(
+            fs::read_to_string(root.join(".git/config")).unwrap(),
+            "[core]\n",
+            "{tag}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".env")).unwrap(),
+            "KEY=1\n",
+            "{tag}"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("o.txt")).unwrap(),
+            "outside\n",
+            "{tag}"
+        );
+        assert!(escape.exists(), "{tag}");
+    }
+    let _ = fs::remove_file(&escape);
+}
+
+#[tokio::test]
+async fn a_corrupted_pre_image_or_another_workspace_is_refused() {
+    let root = workspace("undo-corrupt");
+    let state = log_dir("undo-corrupt");
+    approved_turn(&root, &state, edit_readme("New intro line.")).await;
+    let edited = fs::read_to_string(root.join("README.md")).unwrap();
+    let blob = fs::read_dir(state.join("chat-undo"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|e| e == "pre"))
+        .unwrap();
+    fs::write(&blob, "garbage\n").unwrap();
+    let report = undo_now(&root, &state);
+    assert!(report.contains("pre-image"), "{report}");
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), edited);
+    let other = workspace("undo-other");
+    assert!(undo::run(&other, &state, None).is_err());
+}
+
+#[tokio::test]
+async fn an_edit_approved_by_an_always_allow_rule_is_undoable() {
+    let root = workspace("undo-rule");
+    let state = log_dir("undo-rule");
+    let rules = chat_tools::allow::Rules::new(&state);
+    let (first, _) = gate_with(Some(Decision::AlwaysAllow), Some(Log::new(&state)), || {});
+    turn(
+        &root,
+        edit_readme("Via key."),
+        Some(first.with_rules(rules.clone())),
+    )
+    .await;
+    undo_now(&root, &state);
+    // The rule now answers; the gate would deny if it were asked.
+    let (second, asked) = gate_with(Some(Decision::Deny), Some(Log::new(&state)), || {});
+    turn(
+        &root,
+        edit_readme("Via rule."),
+        Some(second.with_rules(rules)),
+    )
+    .await;
+    assert!(asked.lock().unwrap().is_empty());
+    assert!(fs::read_to_string(root.join("README.md"))
+        .unwrap()
+        .contains("Via rule."));
+    undo_now(&root, &state);
+    assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), README);
+}

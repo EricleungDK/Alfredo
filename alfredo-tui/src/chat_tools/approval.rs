@@ -130,6 +130,11 @@ impl Log {
         &self.path
     }
 
+    /// The State Directory the log (and the undo journal, issue #325) lives in.
+    pub fn directory(&self) -> &Path {
+        self.path.parent().unwrap_or_else(|| Path::new("."))
+    }
+
     /// Append one outcome; past `2 * MAX_LOG` records the oldest are dropped. Best
     /// effort: a failed write never blocks chat or tasks.
     pub fn append(&self, card: &Card, outcome: &Outcome) {
@@ -252,6 +257,8 @@ pub struct Gate {
     pub log: Option<Log>,
     /// Always-allow rules checked before asking; `None` always asks.
     pub rules: Option<super::allow::Rules>,
+    /// Identity of the turn this gate serves, stamped by `run_turn` (issue #325).
+    pub(crate) turn: String,
 }
 
 impl Gate {
@@ -260,6 +267,7 @@ impl Gate {
             sender,
             log,
             rules: None,
+            turn: String::new(),
         }
     }
 

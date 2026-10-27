@@ -113,7 +113,14 @@ fn every_listed_command_typed_bare_is_known() {
         // The terminal loop answers these exact words itself, before any parser.
         if matches!(
             *command,
-            "/workspace" | "/models" | "/model" | "/clear" | "/compact" | "/allow" | "/scope-clear"
+            "/workspace"
+                | "/models"
+                | "/model"
+                | "/clear"
+                | "/compact"
+                | "/allow"
+                | "/undo"
+                | "/scope-clear"
         ) {
             continue;
         }
