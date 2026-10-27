@@ -3746,4 +3746,106 @@ mod host_git_tests {
         );
         assert_ne!(super::UNCHECKED_TIMED_OUT, super::UNCHECKED_FAILED);
     }
+
+    /// Review round 2 (#467): a partial clone whose missing blob would make git lazy-fetch
+    /// through the repository's uploadpack program, which appends `RAN` to the returned
+    /// marker. Returns (workspace, marker).
+    fn partial_clone_repo(name: &str) -> (PathBuf, PathBuf) {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("alfredo-host-layer-{name}-{pid}"));
+        let marker = std::env::temp_dir().join(format!("alfredo-host-layer-{name}-{pid}.ran"));
+        let script = std::env::temp_dir().join(format!("alfredo-host-layer-{name}-{pid}.sh"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_file(&marker);
+        fs::create_dir_all(&root).unwrap();
+        fixture_git(&root, &["init", "-q"]);
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        fixture_git(&root, &["add", "a.txt"]);
+        fixture_git(&root, &["commit", "-qm", "i"]);
+        let blob = fixture_output(&root, &["rev-parse", "HEAD:a.txt"]);
+        let blob = blob.trim();
+        fs::remove_file(root.join(".git/objects").join(&blob[..2]).join(&blob[2..])).unwrap();
+        fs::write(root.join("a.txt"), "two\n").unwrap();
+        fs::write(
+            &script,
+            format!("#!/bin/sh\necho RAN >> '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let url = root.display().to_string();
+        let uploadpack = script.display().to_string();
+        fixture_git(&root, &["config", "core.repositoryformatversion", "1"]);
+        fixture_git(&root, &["config", "extensions.partialclone", "origin"]);
+        fixture_git(&root, &["config", "remote.origin.url", &url]);
+        fixture_git(&root, &["config", "remote.origin.promisor", "true"]);
+        fixture_git(&root, &["config", "remote.origin.uploadpack", &uploadpack]);
+        (root, marker)
+    }
+
+    /// Review round 2 (#467), layer isolation for `host_git_command` (the async worker
+    /// builder), bypassing the config gate: a repository `protocol.file.allow=always` leaves
+    /// only GIT_NO_LAZY_FETCH to stop the fetch. Deleting that env line makes this fail.
+    #[test]
+    fn host_command_env_alone_stops_a_lazy_fetch_past_a_protocol_override() {
+        let (root, marker) = partial_clone_repo("command-env");
+        fixture_git(&root, &["config", "protocol.file.allow", "always"]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _ = runtime.block_on(async {
+            super::host_git_command(&root, &["diff", "--stat", "--patch", "--", "."])
+                .output()
+                .await
+        });
+        assert!(!marker.exists(), "host git ran the uploadpack program");
+    }
+
+    /// Review round 2 (#467), layer isolation for `host_git_command`: GIT_NO_LAZY_FETCH is
+    /// removed, so only `protocol.allow=never` can stop the fetch. Deleting that protocol
+    /// line makes this fail.
+    #[test]
+    fn host_command_protocol_policy_alone_stops_a_lazy_fetch() {
+        let (root, marker) = partial_clone_repo("command-protocol");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _ = runtime.block_on(async {
+            let mut command =
+                super::host_git_command(&root, &["diff", "--stat", "--patch", "--", "."]);
+            command.env_remove("GIT_NO_LAZY_FETCH");
+            command.output().await
+        });
+        assert!(!marker.exists(), "host git ran the uploadpack program");
+    }
+
+    /// Review round 2 (#467), layer isolation for the synchronous builder behind
+    /// `git_blocking` (the uncommitted-changes check): a repository protocol override, and
+    /// only GIT_NO_LAZY_FETCH. Deleting that env line makes this fail.
+    #[test]
+    fn blocking_command_env_alone_stops_a_lazy_fetch_past_a_protocol_override() {
+        let (root, marker) = partial_clone_repo("blocking-env");
+        fixture_git(&root, &["config", "protocol.file.allow", "always"]);
+        let command = super::blocking_command(&root, &["diff", "--stat", "--patch", "--", "."]);
+        let _ = crate::chat_tools::git_read::run_bounded(
+            command,
+            1 << 20,
+            crate::chat_tools::git_read::DEADLINE,
+        );
+        assert!(!marker.exists(), "blocking git ran the uploadpack program");
+    }
+
+    /// Review round 2 (#467), layer isolation for the synchronous builder: GIT_NO_LAZY_FETCH
+    /// removed, so only `protocol.allow=never` can stop the fetch. Deleting that protocol
+    /// line makes this fail.
+    #[test]
+    fn blocking_command_protocol_policy_alone_stops_a_lazy_fetch() {
+        let (root, marker) = partial_clone_repo("blocking-protocol");
+        let mut command = super::blocking_command(&root, &["diff", "--stat", "--patch", "--", "."]);
+        command.env_remove("GIT_NO_LAZY_FETCH");
+        let _ = crate::chat_tools::git_read::run_bounded(
+            command,
+            1 << 20,
+            crate::chat_tools::git_read::DEADLINE,
+        );
+        assert!(!marker.exists(), "blocking git ran the uploadpack program");
+    }
 }

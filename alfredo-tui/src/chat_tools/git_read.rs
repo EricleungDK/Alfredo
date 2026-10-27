@@ -1616,4 +1616,56 @@ mod tests {
         let verdict = refuse_filters(&version);
         assert!(verdict.is_ok(), "protocol.version refused: {verdict:?}");
     }
+
+    /// Review round 2 (#467): `git config KEY VALUE` in `root`.
+    fn set_config(root: &Path, key: &str, value: &str) {
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", key, value])
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    /// Review round 2 (#467), layer isolation: the config gate is bypassed by calling the
+    /// builder directly. A repository `protocol.file.allow=always` overrides the command-line
+    /// protocol policy, so only GIT_NO_LAZY_FETCH from `hardened()` can stop the fetch.
+    /// Deleting that env line makes this fail.
+    #[test]
+    fn hardened_env_alone_stops_a_lazy_fetch_past_a_protocol_override() {
+        let (root, marker) = partial_clone_fixture("layer-env");
+        set_config(&root, "protocol.file.allow", "always");
+        let command = git_command_within(
+            &root,
+            &["diff", "--stat", "--patch", "--", "."],
+            Clock::start(DEADLINE),
+        )
+        .unwrap();
+        let _ = run_bounded(command, 1 << 20, DEADLINE);
+        assert!(
+            !marker.exists(),
+            "hardened git ran the uploadpack program past its environment"
+        );
+    }
+
+    /// Review round 2 (#467), layer isolation: GIT_NO_LAZY_FETCH is removed from the
+    /// `hardened()` command, so only `protocol.allow=never` from it can stop the fetch
+    /// (the fixture sets no protocol override). Deleting that protocol line makes this fail.
+    #[test]
+    fn hardened_protocol_policy_alone_stops_a_lazy_fetch() {
+        let (root, marker) = partial_clone_fixture("layer-protocol");
+        let mut command = git_command_within(
+            &root,
+            &["diff", "--stat", "--patch", "--", "."],
+            Clock::start(DEADLINE),
+        )
+        .unwrap();
+        command.env_remove("GIT_NO_LAZY_FETCH");
+        let _ = run_bounded(command, 1 << 20, DEADLINE);
+        assert!(
+            !marker.exists(),
+            "hardened git ran the uploadpack program past its protocol policy"
+        );
+    }
 }
