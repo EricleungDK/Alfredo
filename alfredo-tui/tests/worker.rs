@@ -840,6 +840,60 @@ async fn gitlink_in_the_baseline_refuses_the_run_before_the_check_starts() {
     assert!(fixture.store.snapshot().unwrap().tasks[0].run.is_none());
 }
 
+/// Issue #470: `/go` calls `uncommitted_changes` at every start. A nested gitfile whose
+/// target holds a FIFO named HEAD makes `git status` block forever; the call must return
+/// within its deadline and report the workspace as not checked, never clean.
+#[test]
+fn uncommitted_changes_returns_promptly_with_a_nested_gitfile_to_a_fifo() {
+    use std::{fs, process::Command, sync::mpsc, time::Duration};
+    let root = std::env::temp_dir().join(format!("nested-fifo-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["-c", "user.name=T", "-c", "user.email=t@e"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success())
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "m"]);
+    fs::create_dir_all(root.join("fifodir")).unwrap();
+    fs::create_dir_all(root.join("sub")).unwrap();
+    let fifo = root.join("fifodir/HEAD");
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(root.join("sub/.git"), "gitdir: ../fifodir\n").unwrap();
+    let (tx, rx) = mpsc::channel();
+    let path = root.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(alfredo_tui::worker::uncommitted_changes(&path));
+    });
+    let received = rx.recv_timeout(Duration::from_secs(20));
+    if received.is_err() {
+        // Unblock the stuck git (its FIFO open now has a writer) so no child is left behind.
+        let unblock = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = fs::OpenOptions::new().write(true).open(unblock);
+        });
+    }
+    let changes = received.expect(
+        "uncommitted_changes (called by /go) did not return within 20 s: host git blocked on the FIFO",
+    );
+    let _ = fs::remove_dir_all(&root);
+    let (count, _) = changes.expect("the workspace is a readable repository with a commit");
+    assert_ne!(
+        count, 0,
+        "a timed-out status check must not report the workspace as clean"
+    );
+}
+
 #[test]
 fn file_policy_rejects_metadata_traversal_duplicates_and_binary_edits() {
     for file in [
@@ -7773,58 +7827,4 @@ fn accept_on_a_proposed_task_with_criteria_names_its_status_not_the_review_templ
         "{message}"
     );
     assert!(!message.contains("Use /review"), "{message}");
-}
-
-/// Issue #470: `/go` calls `uncommitted_changes` at every start. A nested gitfile whose
-/// target holds a FIFO named HEAD makes `git status` block forever; the call must return
-/// within its deadline and report the workspace as not checked, never clean.
-#[test]
-fn uncommitted_changes_returns_promptly_with_a_nested_gitfile_to_a_fifo() {
-    use std::{fs, process::Command, sync::mpsc, time::Duration};
-    let root = std::env::temp_dir().join(format!("nested-fifo-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-    let git = |args: &[&str]| {
-        assert!(Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(["-c", "user.name=T", "-c", "user.email=t@e"])
-            .args(args)
-            .status()
-            .unwrap()
-            .success())
-    };
-    git(&["init", "-q"]);
-    git(&["commit", "-q", "--allow-empty", "-m", "m"]);
-    fs::create_dir_all(root.join("fifodir")).unwrap();
-    fs::create_dir_all(root.join("sub")).unwrap();
-    let fifo = root.join("fifodir/HEAD");
-    assert!(Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .unwrap()
-        .success());
-    fs::write(root.join("sub/.git"), "gitdir: ../fifodir\n").unwrap();
-    let (tx, rx) = mpsc::channel();
-    let path = root.clone();
-    std::thread::spawn(move || {
-        let _ = tx.send(alfredo_tui::worker::uncommitted_changes(&path));
-    });
-    let received = rx.recv_timeout(Duration::from_secs(20));
-    if received.is_err() {
-        // Unblock the stuck git (its FIFO open now has a writer) so no child is left behind.
-        let unblock = fifo.clone();
-        std::thread::spawn(move || {
-            let _ = fs::OpenOptions::new().write(true).open(unblock);
-        });
-    }
-    let changes = received.expect(
-        "uncommitted_changes (called by /go) did not return within 20 s: host git blocked on the FIFO",
-    );
-    let _ = fs::remove_dir_all(&root);
-    let (count, _) = changes.expect("the workspace is a readable repository with a commit");
-    assert_ne!(
-        count, 0,
-        "a timed-out status check must not report the workspace as clean"
-    );
 }
