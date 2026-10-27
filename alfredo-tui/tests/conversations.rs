@@ -2968,6 +2968,29 @@ fn a_draft_with_an_unknown_origin_round_trips_after_eviction() {
 }
 
 #[test]
+fn a_protected_origin_is_released_when_the_draft_is_gone() {
+    use alfredo_tui::console_command::CommandState;
+    let (snapshot, id) = draft_origin_snapshot(|_| CommandState::Unknown {
+        reason: "unconfirmed".into(),
+    });
+    let origin = snapshot.plan_draft.clone().unwrap().origin;
+    let mut app = App::new("fixture".into());
+    app.sessions = snapshot.sessions;
+    app.sessions[0].protect_plan_origin(origin.as_ref());
+    app.sessions[0].protect_plan_origin(None);
+    fill_settled_to_budget(&mut app, "released");
+    for number in 0..40 {
+        app.sessions[0]
+            .submit_command(
+                "/task New".into(),
+                command_intent(&format!("released-new-{number}")),
+            )
+            .unwrap();
+    }
+    assert!(!app.sessions[0].commands().iter().any(|c| c.id == id));
+}
+
+#[test]
 fn clearing_a_conversation_never_leaves_a_plan_draft_without_its_origin() {
     use alfredo_tui::{console_command::CommandState, planner_command::Outcome::Generated};
     let fixture = Fixture::new();
