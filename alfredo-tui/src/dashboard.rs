@@ -620,7 +620,10 @@ mod visible_tests {
     fn a_lone_cr_and_default_ignorables_show_on_the_card() {
         assert_eq!(safe_visible("x  # n\rimport os"), "x  # n<U+000D>import os");
         assert_eq!(safe_visible("a\r\nb"), "a<U+000D>\nb");
-        assert_eq!(safe_visible("sh\u{034F}./a\u{FE0F}b"), "sh<U+034F>./a<U+FE0F>b");
+        assert_eq!(
+            safe_visible("sh\u{034F}./a\u{FE0F}b"),
+            "sh<U+034F>./a<U+FE0F>b"
+        );
         assert!(!hidden('\u{034F}') && card_hidden('\u{034F}'));
         assert_eq!(safe_visible("👨\u{200D}👩 ❤"), "👨<U+200D>👩 ❤");
     }

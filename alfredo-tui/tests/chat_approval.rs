@@ -2083,7 +2083,9 @@ fn approval_card_escapes_every_default_ignorable_code_point() {
     let mut leaked = vec![];
     for (low, high) in DEFAULT_IGNORABLE {
         for cp in low..=high {
-            let Some(ch) = char::from_u32(cp) else { continue };
+            let Some(ch) = char::from_u32(cp) else {
+                continue;
+            };
             let shown = alfredo_tui::dashboard::safe_visible(&format!("sh ./install{ch}.sh"));
             if shown.contains(ch) {
                 leaked.push(format!("U+{cp:04X}"));
@@ -2094,5 +2096,8 @@ fn approval_card_escapes_every_default_ignorable_code_point() {
             }
         }
     }
-    assert!(leaked.is_empty(), "drawn raw on the approval card: {leaked:?}");
+    assert!(
+        leaked.is_empty(),
+        "drawn raw on the approval card: {leaked:?}"
+    );
 }
