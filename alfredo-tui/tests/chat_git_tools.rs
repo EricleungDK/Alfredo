@@ -815,6 +815,16 @@ fn a_missing_dot_git_or_head_is_refused_before_git_runs() {
         "{output}"
     );
 
+    // A `.git` git rejects for its HEAD leaves the same fallback.
+    let repo = Repo::new();
+    fs::write(repo.root.join(".git/HEAD"), "garbage\n").unwrap();
+    bare_layout_with_fifo_head(&repo.root);
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains("HEAD that is not an ordinary file"),
+        "{output}"
+    );
+
     let plain = repo.base.join("plain");
     fs::create_dir_all(&plain).unwrap();
     let output = dispatch_promptly(&plain, "git_status");
@@ -828,10 +838,18 @@ fn a_missing_dot_git_or_head_is_refused_before_git_runs() {
 /// CR/LF dropped. `gitdir:  real` (two spaces) is git's ` real`, not `real`.
 #[test]
 fn a_gitfile_that_git_reads_differently_is_refused_before_git_runs() {
-    for (text, name) in [
-        ("gitdir:  real\n", " real"),
-        ("gitdir:real\n", "real"),
-        ("gitdir: real \n", "real "),
+    // git reads ` real` and `real ` as they are: the FIFO `HEAD` there is what is refused.
+    for (text, name, refusal) in [
+        (
+            "gitdir:  real\n",
+            " real",
+            "has a HEAD that is not an ordinary file",
+        ),
+        (
+            "gitdir: real \n",
+            "real ",
+            "has a HEAD that is not an ordinary file",
+        ),
     ] {
         let repo = Repo::new();
         let root = repo.base.join("ws");
@@ -842,10 +860,25 @@ fn a_gitfile_that_git_reads_differently_is_refused_before_git_runs() {
         fs::write(root.join(".git"), text).unwrap();
         let output = dispatch_promptly(&root, "git_status");
         assert!(
-            output.starts_with("error:") && output.contains(POINTS_OUTSIDE),
+            output.starts_with("error:") && output.contains(refusal),
             "{text:?}: {output}"
         );
     }
+}
+
+/// Issue #461 (2): `gitdir:real` (no space) is no gitfile to git, so it is refused.
+#[test]
+fn a_gitfile_without_the_exact_prefix_is_refused() {
+    let repo = Repo::new();
+    let root = repo.base.join("ws");
+    fs::create_dir_all(&root).unwrap();
+    fs::rename(repo.root.join(".git"), root.join("real")).unwrap();
+    fs::write(root.join(".git"), "gitdir:real\n").unwrap();
+    let output = dispatch_promptly(&root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains(POINTS_OUTSIDE),
+        "{output}"
+    );
 }
 
 /// Issue #461 (3): an alternates line git reads differently (quoted, or padded with
