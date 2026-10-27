@@ -416,6 +416,29 @@ impl Store {
         }
         Ok(())
     }
+    /// Leave the Wayfinder flow without erasing its receipts: records the revision being
+    /// left in a marker beside the journal. A later scope write moves the revision on, so
+    /// the flow is active again only through an explicit scope action (issue #334).
+    pub fn clear_flow(&self) -> Result<Snapshot> {
+        let _guard = self.lock()?;
+        let state = self.read()?;
+        if state.revision == 0 {
+            return Err("No Wayfinder flow to clear".into());
+        }
+        let marker = self.root.join("flow-cleared");
+        let temporary = self.root.join("flow-cleared.tmp");
+        fs::write(&temporary, state.revision.to_string())
+            .and_then(|()| fs::rename(&temporary, &marker))
+            .map_err(|e| e.to_string())?;
+        Ok(state)
+    }
+    /// True when `/scope-clear` was applied at exactly this revision.
+    pub fn flow_cleared(&self, revision: u64) -> bool {
+        fs::read_to_string(self.root.join("flow-cleared"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            == Some(revision)
+    }
     pub fn transact(&self, request: Request) -> Result<Snapshot> {
         validate_request(&request)?;
         let _guard = self.lock()?;

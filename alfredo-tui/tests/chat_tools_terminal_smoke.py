@@ -96,6 +96,8 @@ class Fixture:
                         'done': False}]
                 elif 'read big' in prompt:
                     chunks = [{'message': {'content': 'BIG_DONE'}, 'done': False}]
+                elif 'just do it' in prompt:
+                    chunks = [{'message': {'content': 'WAYFINDER_CHAT_REPLY'}, 'done': False}]
                 elif 'slow one' in prompt:
                     time.sleep(2)
                     chunks = [{'message': {'content': 'SLOW_REPLY_MARKER'}, 'done': False}]
@@ -374,6 +376,44 @@ class ChatTools(unittest.TestCase):
         self.terminal.write(b'n')
         self.terminal.wait_for('MODEL_SAW_DENIAL')
         self.assertEqual(self.readme(), README)
+
+    def tool_names(self, request):
+        return [tool['function']['name'] for tool in request.get('tools') or []]
+
+    def test_an_ordinary_migration_prompt_reaches_the_model_with_tools(self):
+        # Issue #334: the bare word "migration" is ordinary chat, not Wayfinder.
+        self.terminal.write(b'Run the migration script in migrations/ and fix any errors\r')
+        self.terminal.wait_for('SUMMARY_FROM_TOOL')
+        chats = self.fixture.chats()
+        self.assertGreaterEqual(len(chats), 1)
+        self.assertIn('read_file', self.tool_names(chats[0]))
+        self.assertIn('run_command', self.tool_names(chats[0]))
+        self.assertNotIn('Wayfinder', self.terminal.screen())
+
+    def test_wayfinder_chat_says_tools_are_off_and_scope_clear_gives_them_back(self):
+        # Issue #334: a project-start prompt enters Wayfinder (no request); the mission
+        # chat is tool-free and says so; /scope-clear restores the tools.
+        self.terminal.write(b'plan a migration of the whole system\r')
+        self.terminal.wait_for('Scope is not agreed yet')
+        self.terminal.wait_for('tools off')
+        self.assertIn('/scope-clear', self.terminal.screen())
+        self.assertEqual(len(self.fixture.chats()), 0)
+        self.terminal.write(b'please just do it\r')
+        self.terminal.wait_for('WAYFINDER_CHAT_REPLY')
+        chats = self.fixture.chats()
+        self.assertEqual(len(chats), 1)
+        self.assertEqual(self.tool_names(chats[0]), [], 'a Wayfinder chat sends no tools')
+        self.terminal.wait_for('tools off')
+        # A refused @path must not hide the tools-off footer (and vice versa).
+        self.terminal.write(b'@missing.txt please just do it\r')
+        self.terminal.wait_for('not attached · Wayfinder chat: tools off')
+        self.terminal.write(b'/scope-clear\r')
+        self.terminal.wait_for('chat tools are back')
+        self.terminal.write(b'summarise README\r')
+        self.terminal.wait_for('SUMMARY_FROM_TOOL')
+        chats = self.fixture.chats()
+        self.assertIn('read_file', self.tool_names(chats[-1]))
+        self.assertIn('propose_plan', self.tool_names(chats[-1]))
 
     def test_a_proposal_prefills_the_prompt_and_starts_nothing(self):
         self.terminal.write(b'refactor everything\r')
