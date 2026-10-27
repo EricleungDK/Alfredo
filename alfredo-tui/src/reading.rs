@@ -75,6 +75,12 @@ impl Viewport {
         }
     }
 
+    /// Move the block anchor to another block, or drop it when `map` returns `None`.
+    pub fn remap_block(&mut self, map: impl Fn(BlockKey) -> Option<BlockKey>) {
+        self.block_anchor = self
+            .block_anchor
+            .and_then(|anchor| map(anchor.key).map(|key| BlockAnchor { key, ..anchor }));
+    }
     pub fn block_key(&self) -> Option<BlockKey> {
         self.block_anchor.map(|anchor| anchor.key)
     }

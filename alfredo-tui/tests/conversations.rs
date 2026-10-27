@@ -1666,28 +1666,376 @@ fn full_command_history_evicts_the_oldest_settled_commands_and_keeps_live_ones()
 #[test]
 fn evicting_the_command_a_reader_is_anchored_to_still_saves_the_conversation() {
     use alfredo_tui::reading::{Block, BlockKey};
+    // Typed input resets reading; autopilot, automatic, Wayfinder and selection
+    // admissions do not, so the anchored command can be evicted under a reader.
+    // Autopilot's admission is the non-revealing path a long headless run takes.
     let fixture = Fixture::new();
     let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
     let mut app = App::new("fixture".into());
     fill_settled_to_budget(&mut app, "anchored");
     let oldest = app.sessions[0].commands()[0].clone();
-    app.sessions[0].scroll.set(2);
+    app.sessions[0].scroll.set(10);
     app.sessions[0].reading_position_blocks(
-        &[1; 5],
+        &[1; 34],
         5,
         &[Block {
             key: BlockKey::Command(oldest.sequence),
             start: 0,
-            len: 5,
+            len: 34,
         }],
     );
+    let anchored = serde_json::to_value(&app.sessions[0]).unwrap()["reading"].clone();
+    assert!(anchored["block_anchor"].is_object(), "{anchored}");
     app.sessions[0]
-        .submit_command("/task New".into(), command_intent("anchored-new"))
+        .submit_autopilot_command("/task New".into(), command_intent("anchored-new"))
         .unwrap();
     assert!(app.sessions[0].commands().iter().all(|c| c.id != oldest.id));
+    let after = serde_json::to_value(&app.sessions[0]).unwrap();
+    assert!(
+        after["reading"]["block_anchor"].is_null(),
+        "the evicted command's anchor is dropped, not left dangling: {}",
+        after["reading"]
+    );
+    assert_eq!(after["scroll"], 10, "the reader is not moved");
     let saved = Snapshot::capture(&app, "default");
     store.save(&saved).unwrap();
+    let restored = store.load().unwrap().unwrap().restore();
+    assert_eq!(
+        restored.sessions[0].commands().len(),
+        app.sessions[0].commands().len()
+    );
+}
+
+/// An app whose first session holds `count` refused commands, saved and restored with
+/// every sequence moved so the last one is `last` (the order is unchanged).
+fn history_ending_at_sequence(count: usize, last: u64, tag: &str) -> App {
+    use alfredo_tui::console_command::CommandState;
+    let mut app = App::new("fixture".into());
+    for number in 0..count {
+        let id = app.sessions[0]
+            .submit_command(
+                "/task Settled".into(),
+                command_intent(&format!("{tag}-{number}")),
+            )
+            .unwrap();
+        app.sessions[0].set_command_state(
+            &id,
+            CommandState::Refused {
+                reason: "settled".into(),
+            },
+        );
+    }
+    let mut value = serde_json::to_value(Snapshot::capture(&app, "default")).unwrap();
+    let delta = last - app.sessions[0].commands().last().unwrap().sequence;
+    for command in value["sessions"][0]["commands"].as_array_mut().unwrap() {
+        let sequence = command["sequence"].as_u64().unwrap();
+        command["sequence"] = (sequence + delta).into();
+    }
+    serde_json::from_value::<Snapshot>(value).unwrap().restore()
+}
+
+#[test]
+fn the_lifetime_command_sequence_renumbers_instead_of_wedging_the_conversation() {
+    use alfredo_tui::reading::{Block, BlockKey};
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = history_ending_at_sequence(3, 8191, "lifetime");
+    let ids: Vec<String> = app.sessions[0]
+        .commands()
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    let anchored = app.sessions[0].commands()[1].clone();
+    app.sessions[0].scroll.set(10);
+    app.sessions[0].reading_position_blocks(
+        &[1; 34],
+        5,
+        &[Block {
+            key: BlockKey::Command(anchored.sequence),
+            start: 0,
+            len: 34,
+        }],
+    );
+    for number in 0..5 {
+        app.sessions[0]
+            .submit_autopilot_command(
+                "/task Next".into(),
+                command_intent(&format!("past-limit-{number}")),
+            )
+            .unwrap_or_else(|error| panic!("admission {number} past sequence 8192: {error}"));
+    }
+    let commands = app.sessions[0].commands();
+    assert_eq!(commands.len(), 8);
+    assert!(commands
+        .windows(2)
+        .all(|pair| pair[0].sequence < pair[1].sequence));
+    assert!(commands.iter().all(|c| (1..=8192).contains(&c.sequence)));
+    let kept: Vec<_> = commands.iter().take(3).map(|c| c.id.clone()).collect();
+    assert_eq!(kept, ids, "existing intent ids are never reused or changed");
+    let value = serde_json::to_value(&app.sessions[0]).unwrap();
+    let key = &value["reading"]["block_anchor"]["key"];
+    assert_eq!(key["kind"], "command", "{value}");
+    assert_eq!(
+        key["id"].as_u64(),
+        Some(commands[1].sequence),
+        "the reader's anchor follows its command to the new number"
+    );
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
     assert!(store.load().unwrap().is_some());
+}
+
+#[test]
+fn the_lifetime_sequence_also_renumbers_for_a_task_receipt() {
+    use alfredo_tui::model::TaskReceiptRef;
+    let mut app = history_ending_at_sequence(2, 8192, "receipt");
+    let receipt = TaskReceiptRef {
+        sequence: 0,
+        after_messages: 0,
+        revision: 1,
+        task: 1,
+        correlation: "receipt-past-limit".into(),
+    };
+    assert!(app.sessions[0].observe_task_receipt(receipt));
+    let sequence = app.sessions[0].task_receipts()[0].sequence;
+    assert!(app.sessions[0]
+        .commands()
+        .iter()
+        .all(|command| command.sequence < sequence));
+    assert!((1..=8192).contains(&sequence));
+    assert_saved_history_loads(&app);
+}
+
+/// An app whose first session holds one task receipt per entry of `receipts` and one
+/// refused command per entry of `commands`, saved and restored carrying exactly those
+/// sequence numbers (a receipt at 0 is a legacy one).
+fn app_with_sequences(receipts: &[u64], commands: &[u64], tag: &str) -> App {
+    use alfredo_tui::{console_command::CommandState, model::TaskReceiptRef};
+    let mut app = App::new("fixture".into());
+    for (number, _) in receipts.iter().enumerate() {
+        assert!(app.sessions[0].observe_task_receipt(TaskReceiptRef {
+            sequence: 0,
+            after_messages: 0,
+            revision: number as u64 + 1,
+            task: 1,
+            correlation: format!("{tag}-receipt-{number}"),
+        }));
+    }
+    for number in 0..commands.len() {
+        let id = app.sessions[0]
+            .submit_command(
+                "/task Settled".into(),
+                command_intent(&format!("{tag}-{number}")),
+            )
+            .unwrap();
+        app.sessions[0].set_command_state(
+            &id,
+            CommandState::Refused {
+                reason: "settled".into(),
+            },
+        );
+    }
+    let mut value = serde_json::to_value(Snapshot::capture(&app, "default")).unwrap();
+    for (entry, sequence) in value["sessions"][0]["task_receipts"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(receipts)
+    {
+        entry["sequence"] = (*sequence).into();
+    }
+    for (entry, sequence) in value["sessions"][0]["commands"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(commands)
+    {
+        entry["sequence"] = (*sequence).into();
+    }
+    serde_json::from_value::<Snapshot>(value).unwrap().restore()
+}
+
+fn sequences(app: &App) -> (Vec<u64>, Vec<u64>) {
+    (
+        app.sessions[0]
+            .task_receipts()
+            .iter()
+            .map(|r| r.sequence)
+            .collect(),
+        app.sessions[0]
+            .commands()
+            .iter()
+            .map(|c| c.sequence)
+            .collect(),
+    )
+}
+
+#[test]
+fn a_refused_admission_at_the_cap_changes_no_number_receipt_or_anchor() {
+    use alfredo_tui::reading::{Block, BlockKey};
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = app_with_sequences(&[8192], &[8190, 8191], "refused-cap");
+    app.sessions[0].scroll.set(10);
+    app.sessions[0].reading_position_blocks(
+        &[1; 34],
+        5,
+        &[Block {
+            key: BlockKey::Command(8190),
+            start: 0,
+            len: 34,
+        }],
+    );
+    let before = serde_json::to_value(&app.sessions[0]).unwrap();
+    assert!(before["reading"]["block_anchor"].is_object(), "{before}");
+    // The same intent again is refused for a reason that is not capacity.
+    assert!(app.sessions[0]
+        .submit_autopilot_command("/task Settled".into(), command_intent("refused-cap-0"))
+        .is_err());
+    assert_eq!(serde_json::to_value(&app.sessions[0]).unwrap(), before);
+    // A capacity refusal must not leave a renumbering behind either.
+    let mut live = App::new("fixture".into());
+    for number in 0..2000 {
+        let intent = command_intent(&format!("live-cap-{number}"));
+        if live.sessions[0]
+            .submit_command("/task Live".into(), intent)
+            .is_err()
+        {
+            break;
+        }
+    }
+    let mut value = serde_json::to_value(Snapshot::capture(&live, "default")).unwrap();
+    let count = value["sessions"][0]["commands"].as_array().unwrap().len() as u64;
+    for (number, entry) in value["sessions"][0]["commands"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        entry["sequence"] = (8192 - count + 1 + number as u64).into();
+    }
+    value["sessions"][0]["task_receipts"] = serde_json::json!([]);
+    let mut live = serde_json::from_value::<Snapshot>(value).unwrap().restore();
+    // A restart turns live commands into settled Unknown ones; make them live again.
+    let ids: Vec<String> = live.sessions[0]
+        .commands()
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    for id in &ids {
+        live.sessions[0].set_command_state(id, alfredo_tui::console_command::CommandState::Pending);
+    }
+    let held = serde_json::to_value(&live.sessions[0]).unwrap();
+    assert!(live.sessions[0]
+        .submit_command("/task Over".into(), command_intent("over-capacity"))
+        .is_err());
+    assert_eq!(serde_json::to_value(&live.sessions[0]).unwrap(), held);
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    assert!(store.load().unwrap().is_some());
+}
+
+#[test]
+fn renumbering_keeps_interleaved_receipts_in_order_and_legacy_zero_at_zero() {
+    let mut app = app_with_sequences(&[5, 20, 8190], &[10, 30, 8192], "interleaved");
+    app.sessions[0]
+        .submit_autopilot_command("/task Next".into(), command_intent("interleaved-next"))
+        .unwrap();
+    assert_eq!(sequences(&app), (vec![1, 3, 5], vec![2, 4, 6, 7]));
+    assert_saved_history_loads(&app);
+    let mut legacy = app_with_sequences(&[0, 3], &[4, 8192], "legacy");
+    legacy.sessions[0]
+        .submit_autopilot_command("/task Next".into(), command_intent("legacy-next"))
+        .unwrap();
+    assert_eq!(sequences(&legacy), (vec![0, 1], vec![2, 3, 4]));
+    assert_saved_history_loads(&legacy);
+}
+
+fn scope_intent(correlation: &str, prompt: &str) -> alfredo_tui::command_intent::Intent {
+    use alfredo_tui::understanding::{Action, Flow, Mode, Request};
+    alfredo_tui::command_intent::Intent::Scope {
+        request: Request {
+            correlation: correlation.into(),
+            expected_revision: 0,
+            action: Action::Enter {
+                flow: Flow {
+                    mode: Mode::Chart,
+                    prompt: prompt.into(),
+                },
+            },
+        },
+    }
+}
+
+/// Admit settled commands until the next admission would have to evict; the next one is
+/// not made. Returns how many were admitted.
+fn fill_settled_until_full(app: &mut App, tag: &str) -> usize {
+    use alfredo_tui::console_command::CommandState;
+    for number in 0..2000 {
+        let intent = || command_intent(&format!("{tag}-{number}"));
+        let before = app.sessions[0].commands().len();
+        let mut probe = app.sessions[0].clone();
+        probe
+            .submit_command("/task Settled".into(), intent())
+            .unwrap();
+        if probe.commands().len() <= before {
+            return number;
+        }
+        let id = app.sessions[0]
+            .submit_command("/task Settled".into(), intent())
+            .unwrap();
+        app.sessions[0].set_command_state(
+            &id,
+            CommandState::Refused {
+                reason: "settled".into(),
+            },
+        );
+    }
+    panic!("the command budget was never reached");
+}
+
+#[test]
+fn a_duplicate_correlation_is_refused_at_the_budget_as_under_it() {
+    use alfredo_tui::console_command::CommandState;
+    let refused = |app: &mut App, id: &str| {
+        app.sessions[0].set_command_state(
+            id,
+            CommandState::Refused {
+                reason: "settled".into(),
+            },
+        );
+    };
+    // Under the budget the second Scope intent for `dup` is refused.
+    let mut small = App::new("fixture".into());
+    let id = small.sessions[0]
+        .submit_command("/scope one".into(), scope_intent("dup", "one"))
+        .unwrap();
+    refused(&mut small, &id);
+    let under = small.sessions[0]
+        .submit_command("/scope two".into(), scope_intent("dup", "two"))
+        .unwrap_err();
+    // At the budget the original is the oldest settled command and would be evicted
+    // to make room; the duplicate must still be refused and nothing dropped for it.
+    let mut full = App::new("fixture".into());
+    let id = full.sessions[0]
+        .submit_command("/scope one".into(), scope_intent("dup", "one"))
+        .unwrap();
+    refused(&mut full, &id);
+    let admitted = fill_settled_until_full(&mut full, "dup-fill");
+    assert!(admitted > 100, "{admitted}");
+    assert!(full.sessions[0]
+        .commands()
+        .iter()
+        .any(|c| c.intent.scope_request().is_some()));
+    let before = full.sessions[0].commands().to_vec();
+    let at = full.sessions[0]
+        .submit_command("/scope two".into(), scope_intent("dup", "two"))
+        .unwrap_err();
+    assert_eq!(at, under);
+    assert_eq!(full.sessions[0].commands(), before, "nothing was evicted");
+    // A fresh correlation at the same budget still evicts and is admitted.
+    full.sessions[0]
+        .submit_command("/scope three".into(), scope_intent("fresh", "three"))
+        .unwrap();
+    assert!(full.sessions[0].commands().len() <= before.len());
 }
 
 #[test]
@@ -1961,6 +2309,40 @@ fn command_history_warns_at_eighty_percent_and_names_clear() {
         warning.contains("/clear") && warning.contains("80%"),
         "{warning}"
     );
+}
+
+#[test]
+fn the_history_warning_joins_the_go_acknowledgement_instead_of_replacing_it() {
+    let mut app = App::new("fixture".into());
+    app.notice = "Autopilot started".into();
+    app.append_history_warning(0);
+    assert_eq!(
+        app.notice, "Autopilot started",
+        "no warning while the history has room"
+    );
+    let mut number = 0;
+    while app.sessions[0].command_history_warning().is_none() {
+        app.sessions[0]
+            .submit_command(
+                "/task Live".into(),
+                command_intent(&format!("warn-{number}")),
+            )
+            .unwrap();
+        number += 1;
+    }
+    app.append_history_warning(0);
+    assert!(
+        app.notice.starts_with("Autopilot started"),
+        "{}",
+        app.notice
+    );
+    assert!(app.notice.contains("/clear"), "{}", app.notice);
+    let once = app.notice.clone();
+    app.append_history_warning(0);
+    assert_eq!(app.notice, once, "the warning is not repeated");
+    app.notice.clear();
+    app.append_history_warning(0);
+    assert!(app.notice.contains("/clear"), "{}", app.notice);
 }
 
 #[test]

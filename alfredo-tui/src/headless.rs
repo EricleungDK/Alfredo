@@ -315,6 +315,7 @@ pub fn run(options: Options) -> Result<i32, String> {
     let mut stopping: Option<Instant> = None;
     let mut reason = String::new();
     let mut history_warned = false;
+    let mut history_lengths: Vec<usize> = Vec::new();
     // A runtime failure after launch still ends with the JSON result.
     let mut fatal: Option<String> = None;
     loop {
@@ -344,15 +345,26 @@ pub fn run(options: Options) -> Result<i32, String> {
         for line in progress.lines(&status, &outcomes) {
             say(&line);
         }
+        // The warning needs the sessions' command lists measured, so look again only
+        // when one of them gained or lost a command.
         if !history_warned {
-            if let Some(warning) = work
+            let lengths: Vec<usize> = work
                 .app
                 .sessions
                 .iter()
-                .find_map(|s| s.command_history_warning())
-            {
-                say(&warning);
-                history_warned = true;
+                .map(|s| s.commands().len())
+                .collect();
+            if lengths != history_lengths {
+                if let Some(warning) = work
+                    .app
+                    .sessions
+                    .iter()
+                    .find_map(|s| s.command_history_warning())
+                {
+                    say(&warning);
+                    history_warned = true;
+                }
+                history_lengths = lengths;
             }
         }
         let drained = work.tasks.workers.is_empty() && !work.tasks.writing;

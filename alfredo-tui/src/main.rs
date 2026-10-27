@@ -1609,7 +1609,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     work.app.sessions[index].clear_draft();
                                     work.app.notice = notice;
                                     if text.split_whitespace().next() == Some("/go") {
-                                        warn_command_history(&mut work.app, index);
+                                        work.app.append_history_warning(index);
                                         // Autopilot work is watched on the dashboard.
                                         work.app.models_visible = false;
                                         work.tasks.set_visible(true);
@@ -2482,7 +2482,10 @@ fn submit_autopilot(
 /// Name `/clear` in the footer once a conversation's command history is 80% full.
 fn warn_command_history(app: &mut alfredo_tui::model::App, session: usize) {
     if let Some(warning) = app.sessions[session].command_history_warning() {
-        app.notice = warning;
+        // The /go acknowledgement already carries it: keep both.
+        if !app.notice.contains(&warning) {
+            app.notice = warning;
+        }
     }
 }
 

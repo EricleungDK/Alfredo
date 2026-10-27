@@ -239,6 +239,13 @@ command stays idempotent; an evicted command can no longer be retried or serve a
 automatic parent (`Saved originating command is unavailable`). If only unevictable
 commands remain, the command is refused with `Command history capacity reached`. A saved
 conversation that is over budget is still refused as tampered, never trimmed.
+A duplicate request correlation is refused the same way whether or not the history is
+full: validity is checked before anything is evicted. Commands and task receipts carry
+a lifetime number capped at 8192; when the next number would pass the cap they are
+renumbered from 1 in their existing order (a reader's place in the transcript moves
+with its command), so a long run of evictions never hits the cap. Command numbers
+therefore can change at that point: a `/retry-command` or "command #N" notice from before
+it may name a different command afterwards. A refused command never renumbers anything.
 
 ### Paused runs: `--resume --headless`
 
