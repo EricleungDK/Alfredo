@@ -314,6 +314,7 @@ pub fn run(options: Options) -> Result<i32, String> {
     let (mut last_refresh, mut last_save) = (Instant::now(), Instant::now());
     let mut stopping: Option<Instant> = None;
     let mut reason = String::new();
+    let mut history_warned = false;
     // A runtime failure after launch still ends with the JSON result.
     let mut fatal: Option<String> = None;
     loop {
@@ -342,6 +343,17 @@ pub fn run(options: Options) -> Result<i32, String> {
         let outcomes = work.autopilot.outcomes(&work.tasks);
         for line in progress.lines(&status, &outcomes) {
             say(&line);
+        }
+        if !history_warned {
+            if let Some(warning) = work
+                .app
+                .sessions
+                .iter()
+                .find_map(|s| s.command_history_warning())
+            {
+                say(&warning);
+                history_warned = true;
+            }
         }
         let drained = work.tasks.workers.is_empty() && !work.tasks.writing;
         let end = if let Some(since) = stopping {

@@ -227,6 +227,19 @@ stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
 refused (exit 2) because headless has no scope flow. Not covered yet: a
 goal from stdin and streaming output.
 
+Each conversation keeps at most 512 saved commands and 512 KiB of command history
+(the command JSON plus 1 KiB reserved per command). At 80% of either, the footer (and
+headless stderr) warns and names `/clear`. When a new command would exceed the budget,
+the oldest settled commands are evicted to make room: refused, interrupted (restored
+`Unknown`) and finished Control entries, and stopped or failed Planner entries. Live `Pending` and `Submitted`
+commands are never evicted, nor are selection and Wayfinder commands, generated planner
+outcomes, the latest `/dispatch on` while dispatch is on, or a Task or Control command an
+automatic `/run` or Architect draft still names. Intent ids are not reused, so a live
+command stays idempotent; an evicted command can no longer be retried or serve as an
+automatic parent (`Saved originating command is unavailable`). If only unevictable
+commands remain, the command is refused with `Command history capacity reached`. A saved
+conversation that is over budget is still refused as tampered, never trimmed.
+
 ### Paused runs: `--resume --headless`
 
 A run left paused (SIGINT/SIGTERM, `/stop`, an autopilot self-pause, or a restart of

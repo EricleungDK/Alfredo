@@ -1051,12 +1051,15 @@ fn fill_command_history(path: &Path) {
     use alfredo_tui::{
         command_intent::Intent,
         console_command::{CommandState, ConsoleCommand},
-        tasks::{Action, Request},
+        planner_command::{Operation, Outcome, Request},
     };
     const BUDGET: usize = 512 * 1024;
     const RESERVED: usize = 1024;
-    // A selection arrival costs about 1.8 KiB, an autopilot plan about 1.5 KiB.
-    const HEADROOM: usize = 2600;
+    // The startup selection command replaces the saved one of the same choice, so it
+    // needs little room. Autopilot's first plan costs about 1.5 KiB plus its 1 KiB
+    // reservation, so a headroom below that leaves it unrecordable. Nothing here may be
+    // evictable, or the plan would simply evict its way in.
+    const HEADROOM: usize = 1500;
     fn used(commands: &[Value]) -> usize {
         let normalized: Vec<Value> = commands
             .iter()
@@ -1070,20 +1073,31 @@ fn fill_command_history(path: &Path) {
     }
     let mut saved: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
     let commands = saved["sessions"][0]["commands"].as_array_mut().unwrap();
+    // The first run's own autopilot commands restore as evictable Unknown entries; a
+    // full history must hold only commands that cannot be evicted.
+    commands.retain(|command| {
+        serde_json::from_value::<ConsoleCommand>(command.clone())
+            .unwrap()
+            .intent
+            .selection_request()
+            .is_some()
+    });
     let mut sequence = commands
         .iter()
         .map(|command| command["sequence"].as_u64().unwrap())
         .max()
         .unwrap();
+    // Generated planner outcomes are never evicted, unlike Refused or restored Unknown
+    // commands, so these fillers really keep the history at its budget.
     let filler = |sequence: u64, padding: usize| {
-        let intent = Intent::Task {
+        let intent = Intent::Planner {
             request: Request {
                 correlation: format!("fill-{sequence}"),
-                expected_revision: 0,
-                action: Action::Propose {
-                    title: format!("Fill {sequence}"),
+                operation: Operation::Generate {
+                    prompt: format!("Fill {sequence}"),
                     model: "fixture".into(),
-                    dependencies: vec![],
+                    revision: 0,
+                    base_sha256: None,
                 },
             },
         };
@@ -1094,8 +1108,11 @@ fn fill_command_history(path: &Path) {
             attempt: 1,
             text: format!("Fill {sequence}{}", "x".repeat(padding)),
             intent,
-            state: CommandState::Refused {
-                reason: "filler".into(),
+            state: CommandState::Planner {
+                outcome: Outcome::Generated {
+                    draft_sha256: "a".repeat(64),
+                    tasks: 1,
+                },
             },
         };
         serde_json::to_value(command).unwrap()
@@ -1121,6 +1138,140 @@ fn fill_command_history(path: &Path) {
         "{left} bytes left"
     );
     fs::write(path, serde_json::to_string(&saved).unwrap()).unwrap();
+}
+
+/// Append `count` settled (Refused, so evictable) Task commands with `padding` bytes of
+/// text to a saved conversation, as an earlier long-lived session would have left them.
+fn add_settled_history(path: &Path, count: usize, padding: usize) {
+    use alfredo_tui::{
+        command_intent::Intent,
+        console_command::{CommandState, ConsoleCommand},
+        tasks::{Action, Request},
+    };
+    let mut saved: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let commands = saved["sessions"][0]["commands"].as_array_mut().unwrap();
+    let first = commands
+        .iter()
+        .map(|command| command["sequence"].as_u64().unwrap())
+        .max()
+        .unwrap();
+    for number in 0..count {
+        let sequence = first + 1 + number as u64;
+        let intent = Intent::Task {
+            request: Request {
+                correlation: format!("old-{number}"),
+                expected_revision: 0,
+                action: Action::Approve { task: 1 },
+            },
+        };
+        let command = ConsoleCommand {
+            id: ConsoleCommand::identity(&intent),
+            sequence,
+            after_messages: 0,
+            attempt: 1,
+            text: format!("/approve 1 {}", "x".repeat(padding)),
+            intent,
+            state: CommandState::Refused {
+                reason: "settled".into(),
+            },
+        };
+        commands.push(serde_json::to_value(command).unwrap());
+    }
+    fs::write(path, serde_json::to_string(&saved).unwrap()).unwrap();
+}
+
+/// Issue #377: every `--go` records about 20 commands in the same conversation, so
+/// the 512 KiB history used to fill up on run 25 and pause the run. Settled commands
+/// from earlier runs (restored as Unknown) are evicted instead, every run finishes.
+#[test]
+fn consecutive_headless_go_runs_in_one_conversation_all_finish() {
+    const RUNS: usize = 27;
+    let root = repository("many-go");
+    let check = |code: &str| json!(["/usr/bin/python3", "-B", "-c", code]);
+    let plan = json!({"tasks": [
+        {"title": "Make answer return 42", "acceptance": ["answer() returns 42"],
+         "model": "fixture", "dependencies": [],
+         "policy": {"files": ["calc.py"],
+                    "check": check("from calc import answer; assert answer() == 42")}},
+        {"title": "Add app reporting the answer", "acceptance": ["main() reports answer=42"],
+         "model": "fixture", "dependencies": [1],
+         "policy": {"files": ["app.py"],
+                    "check": check("from app import main; assert main() == 'answer=42'")}},
+    ]})
+    .to_string();
+    let calc = json!({"files": [{"path": "calc.py", "content": "def answer():\n    return 42\n"}]})
+        .to_string();
+    let app = json!({"files": [{"path": "app.py", "content":
+        "from calc import answer\n\n\ndef main():\n    return f'answer={answer()}'\n"}]})
+    .to_string();
+    fs::write(
+        root.join("workspace/calc.py"),
+        "def answer():\n    return 0\n",
+    )
+    .unwrap();
+    for args in [&["add", "-A"][..], &["commit", "-qm", "calc"]] {
+        let status = Command::new("git")
+            .args(["-c", "gc.auto=0", "-c", "maintenance.auto=false"])
+            .args(["-c", "commit.gpgSign=false", "-C"])
+            .arg(root.join("workspace"))
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let fixture = ollama_fixture::serve(ollama_fixture::reserve(), move |request, _| {
+        if request.path != "POST /api/chat" {
+            return ollama_fixture::running(&["fixture"]);
+        }
+        let planner = request.body["messages"][0]["content"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("Act as Frontier Architect"));
+        let prompt = request.body["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap_or_default();
+        done(if planner {
+            &plan
+        } else if prompt.starts_with("Implement this task: Add app") {
+            &app
+        } else {
+            &calc
+        })
+    });
+    let mut warned = false;
+    for number in 1..=RUNS {
+        if number == 2 {
+            // Half the budget is already settled history, so the runs overflow it.
+            for name in conversation_files(&root) {
+                add_settled_history(&mission_directory(&root).join(name), 56, 3000);
+            }
+        }
+        let output = run(
+            &root,
+            &fixture,
+            &["--go", "Make answer return 42", "--headless"],
+        );
+        let value = result(&output);
+        assert_eq!(
+            value["state"],
+            "done",
+            "run {number}: {value} {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "run {number}: {}",
+            stderr(&output)
+        );
+        warned |= stderr(&output).contains("/clear");
+    }
+    assert!(
+        warned,
+        "the 80% warning names /clear on stderr before the history is full"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

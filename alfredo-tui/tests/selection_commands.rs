@@ -283,20 +283,36 @@ fn target_command_capacity_refuses_handoff_and_retains_source_owner() {
     let mut target = App::new("destination-model".into());
     target.sessions[0].insert("Destination draft at full command capacity");
     let mut full = false;
+    // Generated planner outcomes stay in the history across a restart: Pending
+    // commands would restore as Unknown, and those are evicted to make room.
     for number in 0..=512 {
-        let command = Intent::Task {
-            request: alfredo_tui::tasks::Request {
+        let command = Intent::Planner {
+            request: alfredo_tui::planner_command::Request {
                 correlation: format!("retained-{number}"),
-                expected_revision: 0,
-                action: alfredo_tui::tasks::Action::Approve { task: 1 },
+                operation: alfredo_tui::planner_command::Operation::Generate {
+                    prompt: "Retained plan".into(),
+                    model: "fixture".into(),
+                    revision: 0,
+                    base_sha256: None,
+                },
             },
         };
-        if target.sessions[0]
-            .submit_command("/approve 1".into(), command)
-            .is_err()
-        {
-            full = true;
-            break;
+        match target.sessions[0].submit_command("/plan retained".into(), command) {
+            Ok(id) => {
+                target.sessions[0].set_command_state(
+                    &id,
+                    alfredo_tui::console_command::CommandState::Planner {
+                        outcome: alfredo_tui::planner_command::Outcome::Generated {
+                            draft_sha256: "a".repeat(64),
+                            tasks: 1,
+                        },
+                    },
+                );
+            }
+            Err(_) => {
+                full = true;
+                break;
+            }
         }
     }
     assert!(

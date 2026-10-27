@@ -12,6 +12,19 @@ pub const NO_TEXT: &str = "Model returned no text; Ctrl+R retries or send again"
 /// Failure text when a reply or tool step would pass [`MAX_TEXT`]; names the ways out.
 pub const OUTPUT_LIMIT: &str = "Conversation output limit reached; run /compact or /clear, or press Ctrl+N for a new conversation";
 pub const MAX_DRAFT: usize = 16 * 1024;
+const COMMAND_BUDGET_COUNT: usize = 512;
+const COMMAND_BUDGET_BYTES: usize = 512 * 1024;
+/// Normalized command JSON plus 1 KiB reserved per command for terminal metadata.
+fn command_budget_use(commands: &[crate::console_command::ConsoleCommand]) -> usize {
+    let mut budgeted = commands.to_vec();
+    for command in &mut budgeted {
+        command.state = crate::console_command::CommandState::Pending;
+        command.attempt = 1;
+    }
+    serde_json::to_vec(&budgeted)
+        .map_or(usize::MAX, |bytes| bytes.len())
+        .saturating_add(commands.len() * 1024)
+}
 /// Messages that can wait behind a running turn, and their total size (issue #338).
 pub const MAX_QUEUED: usize = 3;
 const MAX_QUEUED_BYTES: usize = MAX_DRAFT / 2;
@@ -1610,7 +1623,13 @@ impl Session {
             return Err("Invalid command intent".into());
         }
         self.commands.push(command);
+        // Only a full budget evicts, and only settled commands; a refusal restores all.
+        let before = (!self.commands_within_budget()).then(|| self.commands.clone());
+        if before.is_some() {
+            self.evict_settled_commands();
+        }
         if !self.valid_commands(17) {
+            self.commands = before.unwrap_or_else(|| self.commands.clone());
             self.commands.pop();
             return Err("Command history capacity reached; start another conversation".into());
         }
@@ -1739,7 +1758,6 @@ impl Session {
                             crate::console_command::CommandState::Selection { .. }
                         )
                 }))
-            || self.commands.len() > 512
             || self
                 .commands
                 .iter()
@@ -1851,14 +1869,103 @@ impl Session {
         }) {
             return false;
         }
-        // Reserve terminal metadata once against an immutable normalized base.
-        let mut budgeted = self.commands.clone();
-        for command in &mut budgeted {
-            command.state = crate::console_command::CommandState::Pending;
-            command.attempt = 1;
+        self.commands_within_budget()
+    }
+    /// The command-history budget alone: 512 commands and 512 KiB, counting terminal
+    /// metadata once against an immutable normalized base.
+    pub(crate) fn commands_within_budget(&self) -> bool {
+        command_budget_use(&self.commands) <= COMMAND_BUDGET_BYTES
+            && self.commands.len() <= COMMAND_BUDGET_COUNT
+    }
+    /// Set when the history is 80% full: the next commands will drop the oldest settled ones.
+    pub fn command_history_warning(&self) -> Option<String> {
+        (self.commands.len() * 5 >= COMMAND_BUDGET_COUNT * 4
+            || command_budget_use(&self.commands) * 5 >= COMMAND_BUDGET_BYTES * 4)
+            .then(|| "Command history is 80% full; the oldest settled commands are dropped at the limit. /clear starts a fresh history".into())
+    }
+    /// Drop the fewest oldest settled commands that bring the history within budget.
+    /// Live (Pending, Submitted), selection, wayfinder, generated-plan and still-needed
+    /// parent commands stay, so a restored Unknown or Refused entry is the usual victim.
+    fn evict_settled_commands(&mut self) {
+        let candidates: Vec<usize> = (0..self.commands.len())
+            .filter(|&index| self.evictable(index))
+            .collect();
+        let kept = |count: usize| -> Vec<_> {
+            let dropped = &candidates[..count];
+            let mut index = 0;
+            self.commands
+                .iter()
+                .filter(|_| {
+                    index += 1;
+                    !dropped.contains(&(index - 1))
+                })
+                .cloned()
+                .collect()
+        };
+        let fits = |count: usize| {
+            let commands = kept(count);
+            command_budget_use(&commands) <= COMMAND_BUDGET_BYTES
+                && commands.len() <= COMMAND_BUDGET_COUNT
+        };
+        if !fits(candidates.len()) {
+            return;
         }
-        let bytes = serde_json::to_vec(&budgeted).map_or(usize::MAX, |bytes| bytes.len());
-        bytes.saturating_add(self.commands.len() * 1024) <= 512 * 1024
+        let (mut low, mut high) = (0, candidates.len());
+        while low < high {
+            let middle = (low + high) / 2;
+            if fits(middle) {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        self.commands = kept(low);
+    }
+    fn evictable(&self, index: usize) -> bool {
+        use crate::{
+            command_intent::Intent, console_command::CommandState, control_command::Outcome,
+            planner_command::Outcome as Planned,
+        };
+        let command = &self.commands[index];
+        let latest_dispatch = self.commands.iter().rposition(|other| {
+            matches!(
+                other.state,
+                CommandState::Control {
+                    outcome: Outcome::DispatchChanged { .. }
+                }
+            )
+        });
+        let enabling = latest_dispatch == Some(index)
+            && matches!(
+                command.state,
+                CommandState::Control {
+                    outcome: Outcome::DispatchChanged { enabled: true }
+                }
+            );
+        let named_by_child =
+            self.commands
+                .iter()
+                .any(|child| match (&child.intent, &command.intent) {
+                    (Intent::ArchitectDraft { request }, Intent::Task { request: source }) => {
+                        &request.source == source
+                    }
+                    (Intent::DispatchRun { request }, Intent::Control { request: source }) => {
+                        &request.source == source
+                    }
+                    _ => false,
+                });
+        !(matches!(
+            command.state,
+            CommandState::Pending
+                | CommandState::Submitted
+                | CommandState::Selection { .. }
+                | CommandState::Planner {
+                    outcome: Planned::Generated { .. }
+                }
+        ) || command.intent.selection_request().is_some()
+            || matches!(command.intent, Intent::Wayfinder { .. })
+            || enabling
+            || named_by_child)
     }
     pub fn task_receipts(&self) -> &[TaskReceiptRef] {
         &self.task_receipts

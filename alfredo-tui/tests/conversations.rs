@@ -1577,6 +1577,392 @@ fn full_command_history_reserves_room_for_long_uncertainty_and_retry_metadata() 
     assert!(fixture.tasks.snapshot().unwrap().tasks.is_empty());
 }
 
+/// The history must survive the same validation a restart applies.
+fn assert_saved_history_loads(app: &App) {
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    store.save(&Snapshot::capture(app, "default")).unwrap();
+    assert!(store.load().unwrap().is_some());
+}
+
+/// Admit settled commands until the budget is full (the next one evicts); returns the
+/// correlation of the last command admitted. Alternating Refused and restored-Unknown
+/// shows both are evictable.
+fn fill_settled_to_budget(app: &mut App, tag: &str) -> String {
+    use alfredo_tui::console_command::CommandState;
+    for number in 0..2000 {
+        let correlation = format!("{tag}-{number}");
+        let before = app.sessions[0].commands().len();
+        let id = app.sessions[0]
+            .submit_command("/task Settled".into(), command_intent(&correlation))
+            .unwrap();
+        let state = if number % 2 == 0 {
+            CommandState::Refused {
+                reason: "settled".into(),
+            }
+        } else {
+            CommandState::Unknown {
+                reason: "restored".into(),
+            }
+        };
+        app.sessions[0].set_command_state(&id, state);
+        if app.sessions[0].commands().len() <= before {
+            return correlation;
+        }
+    }
+    panic!("the command budget was never reached");
+}
+
+fn enabling_source(correlation: &str, enabled: bool) -> alfredo_tui::control_command::Request {
+    alfredo_tui::control_command::Request {
+        correlation: correlation.into(),
+        controller: "controller".into(),
+        operation: alfredo_tui::control_command::Operation::Dispatch {
+            enabled,
+            expected_epoch: 0,
+            scope_revision_for_on: enabled.then_some(1),
+        },
+    }
+}
+
+#[test]
+fn full_command_history_evicts_the_oldest_settled_commands_and_keeps_live_ones() {
+    use alfredo_tui::console_command::CommandState;
+    let mut app = App::new("fixture".into());
+    // The oldest two commands are live and must outlast every settled neighbour.
+    let pending = app.sessions[0]
+        .submit_command("/task Live".into(), command_intent("live-pending"))
+        .unwrap();
+    let submitted = app.sessions[0]
+        .submit_command("/task Live".into(), command_intent("live-submitted"))
+        .unwrap();
+    app.sessions[0].set_command_state(&submitted, CommandState::Submitted);
+    fill_settled_to_budget(&mut app, "old");
+    let full = app.sessions[0].commands().len();
+    let first_old = app.sessions[0].commands()[2].id.clone();
+    let mut newest = String::new();
+    for number in 0..40 {
+        newest = app.sessions[0]
+            .submit_command("/task New".into(), command_intent(&format!("new-{number}")))
+            .unwrap();
+    }
+    let commands = app.sessions[0].commands();
+    assert!(commands.len() <= full + 1, "{} vs {full}", commands.len());
+    let ids: std::collections::BTreeSet<_> = commands.iter().map(|c| &c.id).collect();
+    assert_eq!(ids.len(), commands.len(), "ids stay unique");
+    assert!(ids.contains(&pending) && ids.contains(&submitted));
+    assert!(
+        !ids.contains(&first_old),
+        "the oldest settled command goes first"
+    );
+    assert_eq!(commands.last().unwrap().id, newest);
+    // A live command is idempotent: the same intent is not admitted twice.
+    assert!(app.sessions[0]
+        .submit_command("/task Live".into(), command_intent("live-pending"))
+        .is_err());
+    assert_saved_history_loads(&app);
+}
+
+#[test]
+fn evicting_the_command_a_reader_is_anchored_to_still_saves_the_conversation() {
+    use alfredo_tui::reading::{Block, BlockKey};
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("fixture".into());
+    fill_settled_to_budget(&mut app, "anchored");
+    let oldest = app.sessions[0].commands()[0].clone();
+    app.sessions[0].scroll.set(2);
+    app.sessions[0].reading_position_blocks(
+        &[1; 5],
+        5,
+        &[Block {
+            key: BlockKey::Command(oldest.sequence),
+            start: 0,
+            len: 5,
+        }],
+    );
+    app.sessions[0]
+        .submit_command("/task New".into(), command_intent("anchored-new"))
+        .unwrap();
+    assert!(app.sessions[0].commands().iter().all(|c| c.id != oldest.id));
+    let saved = Snapshot::capture(&app, "default");
+    store.save(&saved).unwrap();
+    assert!(store.load().unwrap().is_some());
+}
+
+#[test]
+fn a_full_history_of_live_commands_still_refuses_with_the_capacity_error() {
+    let mut app = App::new("fixture".into());
+    let mut number = 0;
+    let error = loop {
+        let result = app.sessions[0].submit_command(
+            "/task Live".into(),
+            command_intent(&format!("live-{number}")),
+        );
+        number += 1;
+        if let Err(error) = result {
+            break error;
+        }
+        assert!(number < 2000);
+    };
+    assert!(
+        error.contains("Command history capacity reached"),
+        "{error}"
+    );
+    let before = app.sessions[0].commands().to_vec();
+    assert!(app.sessions[0]
+        .submit_command("/task One more".into(), command_intent("one-more"))
+        .is_err());
+    assert_eq!(app.sessions[0].commands(), before);
+}
+
+#[test]
+fn eviction_keeps_the_enabling_dispatch_command_while_dispatch_is_on() {
+    use alfredo_tui::{
+        command_intent::Intent, console_command::CommandState, control_command::Outcome,
+    };
+    let mut app = App::new("fixture".into());
+    let enable = app.sessions[0]
+        .submit_command(
+            "/dispatch on".into(),
+            Intent::Control {
+                request: enabling_source("enable-dispatch", true),
+            },
+        )
+        .unwrap();
+    app.sessions[0].set_command_state(
+        &enable,
+        CommandState::Control {
+            outcome: Outcome::DispatchChanged { enabled: true },
+        },
+    );
+    // No child yet: dispatch is on, so this is the parent a later automatic /run needs.
+    fill_settled_to_budget(&mut app, "dispatch-old");
+    for number in 0..30 {
+        app.sessions[0]
+            .submit_command(
+                "/task New".into(),
+                command_intent(&format!("dispatch-new-{number}")),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        app.sessions[0].commands()[0].id,
+        enable,
+        "the enabling command is pinned"
+    );
+    assert_saved_history_loads(&app);
+    // Once dispatch is switched off the pin is released and it is the oldest victim.
+    let off = app.sessions[0]
+        .submit_command(
+            "/dispatch off".into(),
+            Intent::Control {
+                request: enabling_source("disable-dispatch", false),
+            },
+        )
+        .unwrap();
+    app.sessions[0].set_command_state(
+        &off,
+        CommandState::Control {
+            outcome: Outcome::DispatchChanged { enabled: false },
+        },
+    );
+    app.sessions[0]
+        .submit_command("/task Newer".into(), command_intent("dispatch-newer"))
+        .unwrap();
+    assert!(app.sessions[0].commands().iter().all(|c| c.id != enable));
+}
+
+fn architect_draft(source: alfredo_tui::tasks::Request) -> alfredo_tui::command_intent::Intent {
+    use alfredo_tui::{
+        architecture::Origin,
+        planner_command::{ArchitectRequest, Operation, Request as PlannerRequest},
+    };
+    alfredo_tui::command_intent::Intent::ArchitectDraft {
+        request: ArchitectRequest {
+            request: PlannerRequest {
+                correlation: "automatic-architect".into(),
+                operation: Operation::Architect {
+                    origin: Origin {
+                        task: 2,
+                        review_revision: 6,
+                        run: "task-2-run-5".into(),
+                        evidence_sha256: "a".repeat(64),
+                    },
+                    revision: 6,
+                },
+            },
+            source,
+        },
+    }
+}
+
+#[test]
+fn eviction_keeps_a_task_named_by_an_architect_draft() {
+    use alfredo_tui::{
+        assessment::{Decision, FailureKind, Outcome},
+        command_intent::Intent,
+        console_command::CommandState,
+        tasks::{Action, Request},
+    };
+    let mut app = App::new("fixture".into());
+    let source = Request {
+        correlation: "review-source".into(),
+        expected_revision: 5,
+        action: Action::ReviewArchitecture {
+            task: 2,
+            decision: Decision {
+                failure: Some(FailureKind::Architecture),
+                risk: None,
+                outcome: Outcome::Rejected,
+                reason: "Repeated architecture failure".into(),
+                criteria: vec![],
+                limitations: vec![],
+            },
+        },
+    };
+    let review = app.sessions[0]
+        .submit_command(
+            "/review 2".into(),
+            Intent::Task {
+                request: source.clone(),
+            },
+        )
+        .unwrap();
+    app.sessions[0].set_command_state(
+        &review,
+        CommandState::Refused {
+            reason: "settled".into(),
+        },
+    );
+    let draft = app.sessions[0]
+        .submit_automatic_command("Automatic Architect draft".into(), architect_draft(source))
+        .unwrap();
+    // The live (Pending) draft keeps its source Task for as long as it exists.
+    fill_settled_to_budget(&mut app, "architect-old");
+    for number in 0..20 {
+        app.sessions[0]
+            .submit_command(
+                "/task New".into(),
+                command_intent(&format!("architect-new-{number}")),
+            )
+            .unwrap();
+    }
+    let ids: Vec<_> = app.sessions[0]
+        .commands()
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    assert!(ids.contains(&review), "the draft's source Task is pinned");
+    assert!(ids.contains(&draft));
+    assert_saved_history_loads(&app);
+}
+
+#[test]
+fn invalid_admission_at_the_budget_never_evicts() {
+    use alfredo_tui::tasks::{Action, Request};
+    let mut app = App::new("fixture".into());
+    let last = fill_settled_to_budget(&mut app, "settled");
+    let before = app.sessions[0].commands().to_vec();
+    // An automatic draft without its saved source Task is invalid for a reason that
+    // is not capacity, so it is refused and nothing is dropped to make room.
+    let orphan = app.sessions[0].submit_automatic_command(
+        "Automatic Architect draft".into(),
+        architect_draft(Request {
+            correlation: "missing-source".into(),
+            expected_revision: 5,
+            action: Action::Approve { task: 2 },
+        }),
+    );
+    assert!(orphan.is_err());
+    assert_eq!(app.sessions[0].commands(), before);
+    // A repeated intent id is refused before any eviction too.
+    assert!(app.sessions[0]
+        .submit_command("/task Settled".into(), command_intent(&last))
+        .is_err());
+    assert_eq!(app.sessions[0].commands(), before);
+}
+
+#[test]
+fn an_over_budget_saved_history_is_refused_not_trimmed() {
+    use alfredo_tui::{
+        console_command::{CommandState, ConsoleCommand},
+        model::MAX_DRAFT,
+    };
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("fixture".into());
+    fill_settled_to_budget(&mut app, "saved");
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    assert!(store.load().unwrap().is_some());
+    let mut saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture.file()).unwrap()).unwrap();
+    let sequence = app.sessions[0].commands().last().unwrap().sequence + 1;
+    let intent = command_intent("tampered-extra");
+    let extra = ConsoleCommand {
+        id: ConsoleCommand::identity(&intent),
+        sequence,
+        after_messages: 0,
+        attempt: 1,
+        text: "x".repeat(MAX_DRAFT),
+        intent,
+        state: CommandState::Refused {
+            reason: "settled".into(),
+        },
+    };
+    saved["sessions"][0]["commands"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(extra).unwrap());
+    let bytes = serde_json::to_vec(&saved).unwrap();
+    fs::write(fixture.file(), &bytes).unwrap();
+    assert!(
+        store.load().is_err(),
+        "an over-budget file must not load or be trimmed"
+    );
+    assert_eq!(
+        fs::read(fixture.file()).unwrap(),
+        bytes,
+        "the file is left as found"
+    );
+}
+
+#[test]
+fn command_history_warns_at_eighty_percent_and_names_clear() {
+    let mut app = App::new("fixture".into());
+    let mut capacity = app.sessions[0].clone();
+    let mut full = 0;
+    while capacity
+        .submit_command("/task Live".into(), command_intent(&format!("cap-{full}")))
+        .is_ok()
+    {
+        full += 1;
+    }
+    let mut warned_at = None;
+    for number in 0..full {
+        assert!(app.sessions[0].command_history_warning().is_none() || warned_at.is_some());
+        app.sessions[0]
+            .submit_command(
+                "/task Live".into(),
+                command_intent(&format!("cap-{number}")),
+            )
+            .unwrap();
+        if warned_at.is_none() && app.sessions[0].command_history_warning().is_some() {
+            warned_at = Some(number + 1);
+        }
+    }
+    let warned_at = warned_at.expect("a warning before the budget is full");
+    assert!(
+        warned_at * 10 >= full * 7 && warned_at < full,
+        "{warned_at} of {full}"
+    );
+    let warning = app.sessions[0].command_history_warning().unwrap();
+    assert!(
+        warning.contains("/clear") && warning.contains("80%"),
+        "{warning}"
+    );
+}
+
 #[test]
 fn command_order_and_anchor_order_must_match_saved_chronology() {
     let fixture = Fixture::new();

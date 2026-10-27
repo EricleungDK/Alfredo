@@ -1609,6 +1609,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     work.app.sessions[index].clear_draft();
                                     work.app.notice = notice;
                                     if text.split_whitespace().next() == Some("/go") {
+                                        warn_command_history(&mut work.app, index);
                                         // Autopilot work is watched on the dashboard.
                                         work.app.models_visible = false;
                                         work.tasks.set_visible(true);
@@ -2070,6 +2071,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 work.tasks.set_visible(false);
                                             }
                                             work.app.notice.clear();
+                                            warn_command_history(&mut work.app, origin);
                                             if origin != index {
                                                 work.app.notice = format!(
                                                     "Retry remains linked to Session {}",
@@ -2445,6 +2447,13 @@ fn submit_autopilot(
     true
 }
 
+/// Name `/clear` in the footer once a conversation's command history is 80% full.
+fn warn_command_history(app: &mut alfredo_tui::model::App, session: usize) {
+    if let Some(warning) = app.sessions[session].command_history_warning() {
+        app.notice = warning;
+    }
+}
+
 /// Record autopilot's command in conversation `origin`. A command that cannot be
 /// recorded pauses autopilot with the error as its own notice, so the status panel,
 /// the saved state and headless output all name the reason, not just the footer.
@@ -2455,7 +2464,10 @@ fn record_autopilot_command(
     pending: &mut Option<(usize, String)>,
 ) {
     match work.app.sessions[origin].submit_autopilot_command(submission.text, submission.intent) {
-        Ok(id) => *pending = Some((origin, id)),
+        Ok(id) => {
+            warn_command_history(&mut work.app, origin);
+            *pending = Some((origin, id));
+        }
         Err(error) => {
             let notice = format!("Autopilot paused: command not recorded: {error}");
             work.autopilot
@@ -2483,7 +2495,10 @@ fn submit_owner(work: &mut Workstation, pending: &mut Option<(usize, String)>) -
         return false;
     };
     match work.app.sessions[origin].submit_autopilot_command(submission.text, submission.intent) {
-        Ok(id) => *pending = Some((origin, id)),
+        Ok(id) => {
+            warn_command_history(&mut work.app, origin);
+            *pending = Some((origin, id));
+        }
         Err(error) => work.app.notice = format!("Instruction step not recorded: {error}"),
     }
     true
