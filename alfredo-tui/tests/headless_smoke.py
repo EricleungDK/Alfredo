@@ -51,13 +51,15 @@ class HeadlessSmoke(unittest.TestCase):
                               timeout=10, capture_output=True, text=True).stdout.strip()
 
     def start(self, *extra, goal=GOAL):
-        args = [str(self.binary), '--model', 'fixture', '--endpoint', self.fixture.endpoint,
+        # --resume rejects an explicit --model, so resume runs get the model from the environment.
+        model = [] if '--resume' in extra else ['--model', 'fixture']
+        args = [str(self.binary), *model, '--endpoint', self.fixture.endpoint,
                 '--workspace', str(self.workspace), '--state-dir', str(self.state)]
         if goal is not None:
             args += ['--go', goal]
         return subprocess.Popen([*args, *extra], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, cwd=self.workspace,
-                                env=dict(os.environ, ALFREDO_STATE_DIR=str(self.state)))
+                                env=dict(os.environ, ALFREDO_STATE_DIR=str(self.state), ALFREDO_MODEL='fixture'))
 
     def run_headless(self, *extra, goal=GOAL, timeout=90):
         process = self.start(*extra, goal=goal)
@@ -268,6 +270,85 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual(statuses.get(1), 'cancelled', statuses)
         saved = list(self.state.glob('**/autopilot*'))
         self.assertTrue(saved, 'autopilot state is kept for /resume')
+
+
+    def pause_run(self):
+        """A headless run SIGTERMed while task 1 is held: the run stays paused (issue #280)."""
+        self.fixture.hold_calc = release = threading.Event()
+        process = self.start('--headless')
+        deadline = time.monotonic() + 60
+        while 'CALC' not in self.fixture.markers() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                self.fail(f'Exited early: {process.communicate()}')
+            time.sleep(0.05)
+        self.assertIn('CALC', self.fixture.markers())
+        process.send_signal(signal.SIGTERM)
+        out, err = process.communicate(timeout=30)
+        release.set()
+        self.assertEqual(self.result(out)['state'], 'paused', err)
+
+    def task_files(self):
+        return sorted((path, path.read_text()) for path in self.state.glob('rust-tasks-v1/*/tasks.json'))
+
+    def test_resume_headless_continues_the_paused_run_without_planning_again(self):
+        self.pause_run()
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual(code, 0, err)
+        result = self.result(out)
+        self.assertEqual((result['state'], result['goal'], result['accepted'], result['total'], result['failed']),
+                         ('done', GOAL, 2, 2, []))
+        self.assertEqual(self.fixture.markers().count('PLAN'), 1, self.fixture.markers())
+        self.assertIn(f"done 2/2 {result['branch']}", err.splitlines())
+        self.assertEqual(self.git('show', f"{result['branch']}:calc.py"), 'def answer():\n    return 42')
+
+    def test_go_over_a_paused_run_is_refused_and_plans_nothing(self):
+        self.pause_run()
+        before, markers = self.task_files(), self.fixture.markers()
+        code, out, err = self.run_headless('--headless')
+        self.assertEqual((code, out), (2, ''), err)
+        for expected in [GOAL, '0/2', '--resume --headless', '--conversation']:
+            self.assertIn(expected, err)
+        self.assertEqual((self.task_files(), self.fixture.markers()), (before, markers))
+
+    def test_resume_headless_with_nothing_to_resume_exits_2(self):
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('nothing to resume', err)
+        self.assertEqual(self.fixture.markers(), [])
+        # A finished run is not resumable either.
+        self.assertEqual(self.run_headless('--headless')[0], 0)
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('nothing to resume', err)
+
+    def test_a_fresh_conversation_name_starts_a_new_run_beside_the_paused_one(self):
+        self.pause_run()
+        code, out, err = self.run_headless('--headless', '--conversation', 'fresh')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.result(out)['state'], 'done')
+        # The paused run is untouched and still resumable by its own conversation.
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.result(out)['goal'], GOAL)
+
+    def test_resume_of_a_paused_wayfinder_goal_is_refused(self):
+        self.pause_run()
+        saved = next(self.state.glob('**/autopilot-*.json'))
+        saved.write_text(saved.read_text().replace(GOAL, 'wayfinder map the repository'))
+        before = self.task_files()
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('Wayfinder goals need the interactive terminal', err)
+        self.assertEqual(self.task_files(), before)
+
+    def test_resume_usage_errors_exit_2(self):
+        for extra, goal, message in [(['--resume'], None, '--resume needs --headless'),
+                                     (['--resume', '--headless'], GOAL, '--resume cannot be combined with --go'),
+                                     (['--resume', '--headless', '--model', 'other'], None, 'omit --model and --max-repairs'),
+                                     (['--resume', '--headless', '--max-repairs', '1'], None, 'omit --model and --max-repairs')]:
+            code, out, err = self.run_headless(*extra, goal=goal)
+            self.assertEqual((code, out), (2, ''), err)
+            self.assertIn(message, err)
 
 
 if __name__ == '__main__':
