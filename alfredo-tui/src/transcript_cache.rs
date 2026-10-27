@@ -24,21 +24,6 @@ fn bold_style() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
 }
 
-/// Bidi controls would reorder what the transcript shows (issue #400); `safe` keeps them,
-/// so model text shows them as `<U+XXXX>`, as the approval card does.
-fn show_bidi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
-        {
-            out.push_str(&format!("<U+{:04X}>", c as u32));
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// A line with an opening or closing code fence marker.
 fn is_fence(line: &str) -> bool {
     let trimmed = line.trim_start();
@@ -251,9 +236,11 @@ impl Inner {
                 continue;
             }
             self.builds += 1;
-            let shown = crate::dashboard::expand_tabs(&crate::dashboard::safe(text));
+            // Shown as the approval card shows them (issues #400, #436): every character
+            // `card_hidden` flags is `<U+XXXX>` before Markdown parses the text.
+            let shown = crate::dashboard::expand_tabs(&crate::dashboard::safe_visible(text));
             let (lines, cut) = if styled {
-                markdown(&show_bidi(&shown))
+                markdown(&shown)
             } else {
                 let lines: Vec<Line<'static>> = shown
                     .lines()

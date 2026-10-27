@@ -2037,3 +2037,67 @@ async fn an_edit_approved_by_an_always_allow_rule_is_undoable() {
     undo_now(&root, &state);
     assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), README);
 }
+
+/// Issue #468: a lone CR is a line break to Python, Node and YAML, so the card must show it.
+#[test]
+fn approval_card_shows_a_lone_carriage_return() {
+    let root = workspace("card-cr");
+    let content = "x = 1  # harmless note\rimport os; os.system('id')\n";
+    let card = approval::card(
+        &root,
+        &call("write_file", json!({"path": "tool.py", "content": content})),
+    )
+    .unwrap();
+    let shown = alfredo_tui::dashboard::safe_visible(&card.preview);
+    assert!(
+        shown.contains("<U+000D>"),
+        "the CR is silently dropped:\n{shown}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #468: every Unicode Default_Ignorable_Code_Point (DerivedCoreProperties, Unicode 16)
+/// is shown as `<U+XXXX>` on the card and in single-line rows, never drawn raw.
+const DEFAULT_IGNORABLE: [(u32, u32); 17] = [
+    (0x00AD, 0x00AD),
+    (0x034F, 0x034F),
+    (0x061C, 0x061C),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x206F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
+    (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+];
+
+#[test]
+fn approval_card_escapes_every_default_ignorable_code_point() {
+    let mut leaked = vec![];
+    for (low, high) in DEFAULT_IGNORABLE {
+        for cp in low..=high {
+            let Some(ch) = char::from_u32(cp) else {
+                continue;
+            };
+            let shown = alfredo_tui::dashboard::safe_visible(&format!("sh ./install{ch}.sh"));
+            if shown.contains(ch) {
+                leaked.push(format!("U+{cp:04X}"));
+            }
+            let row = alfredo_tui::dashboard::single_line_visible(&format!("a{ch}b"));
+            if row.contains(ch) {
+                leaked.push(format!("row U+{cp:04X}"));
+            }
+        }
+    }
+    assert!(
+        leaked.is_empty(),
+        "drawn raw on the approval card: {leaked:?}"
+    );
+}

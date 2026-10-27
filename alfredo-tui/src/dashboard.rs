@@ -49,15 +49,44 @@ pub fn hidden(c: char) -> bool {
         )
 }
 
-/// Like [`safe`], but a format (Cf) character that [`hidden`] flags is shown as
-/// `<U+XXXX>` instead of drawn, so an approval card never shows other text than runs
-/// (issue #305). Text, CJK, accents and emoji are unchanged.
+/// Unicode Default_Ignorable_Code_Point (DerivedCoreProperties, Unicode 16) characters
+/// that [`hidden`] does not already flag: they draw as nothing in most fonts and
+/// renderers, so a card could show other text than the bytes hold (issue #468).
+fn default_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{034F}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180D}'
+            | '\u{180F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// What the approval card and the chat transcript show as `<U+XXXX>` instead of drawing:
+/// [`hidden`] plus every Default_Ignorable code point. One list, so the card and the
+/// transcript agree (issues #305, #436, #468). Narrower than widening [`hidden`], which
+/// `propose_plan`, project notes and the planner also use, so their text stays as typed.
+pub fn card_hidden(c: char) -> bool {
+    hidden(c) || default_ignorable(c)
+}
+
+/// Like [`safe`], but a character that [`card_hidden`] flags is shown as `<U+XXXX>`
+/// instead of drawn or dropped, so an approval card never shows other text than the bytes
+/// hold (issues #305, #468). That covers every C0/C1 control except newline and tab, so a
+/// bare CR (Python, Node and YAML read it as a line break) and an ESC never vanish.
+/// Text, CJK, accents and emoji are unchanged.
 pub fn safe_visible(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if c == '\n' || c == '\t' || !hidden(c) {
+        if c == '\n' || c == '\t' || !card_hidden(c) {
             out.push(c);
-        } else if !c.is_control() {
+        } else {
             out.push_str(&format!("<U+{:04X}>", c as u32));
         }
     }
@@ -577,12 +606,37 @@ mod visible_tests {
     fn format_characters_show_as_code_points_and_text_is_unchanged() {
         assert_eq!(
             safe_visible("a\u{202E}b\u{200B}c\u{E0041}\u{7}d"),
-            "a<U+202E>b<U+200B>c<U+E0041>d"
+            "a<U+202E>b<U+200B>c<U+E0041><U+0007>d"
         );
         let plain = "你好 café 🙂\n\tx";
         assert_eq!(safe_visible(plain), plain);
         assert_eq!(single_line_visible("a\u{2066}\nb"), "a<U+2066> b");
         assert!(hidden('\u{FEFF}') && !hidden('é'));
+    }
+
+    /// Issue #468: every C0/C1 control except newline and tab shows as a code point instead
+    /// of being dropped, so the card never shows other text than the bytes hold.
+    #[test]
+    fn every_c0_and_c1_control_shows_as_a_code_point() {
+        assert_eq!(
+            safe_visible("a\x01b\x1bc\x7fd\u{85}e\x07f\rg"),
+            "a<U+0001>b<U+001B>c<U+007F>d<U+0085>e<U+0007>f<U+000D>g"
+        );
+        assert_eq!(safe_visible("a\n\tb"), "a\n\tb");
+    }
+
+    /// Issue #468: a lone CR shows as a code point; a Default_Ignorable character the
+    /// planner and notes do not reject still shows on the card; emoji keep their text.
+    #[test]
+    fn a_lone_cr_and_default_ignorables_show_on_the_card() {
+        assert_eq!(safe_visible("x  # n\rimport os"), "x  # n<U+000D>import os");
+        assert_eq!(safe_visible("a\r\nb"), "a<U+000D>\nb");
+        assert_eq!(
+            safe_visible("sh\u{034F}./a\u{FE0F}b"),
+            "sh<U+034F>./a<U+FE0F>b"
+        );
+        assert!(!hidden('\u{034F}') && card_hidden('\u{034F}'));
+        assert_eq!(safe_visible("👨\u{200D}👩 ❤"), "👨<U+200D>👩 ❤");
     }
 
     /// Issue #404: tabs expand to the next 4-column stop per line; the card form marks
