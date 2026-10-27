@@ -914,7 +914,12 @@ fn refuse_special_start_up_files(root: &Path, clock: Clock) -> Result<(), String
     }
     // git falls back to the root as a bare repository when it rejects this one; its HEAD
     // may be a FIFO.
+    // A directory of that name (a project's `config/`) cannot block git; only a FIFO,
+    // socket, device or link can.
     for name in ["HEAD", "commondir", "config"] {
+        if fs::symlink_metadata(root.join(name)).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
         ordinary_or_missing(&root.join(name), clock, name)?;
     }
     // Walk only a directory that is the workspace's own or a worktree entry; the full
