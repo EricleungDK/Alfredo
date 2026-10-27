@@ -1038,6 +1038,21 @@ fn a_bare_root_fallback_with_a_fifo_commondir_or_config_is_refused() {
     }
 }
 
+/// Issue #461 (review 3): a directory named `config`, `HEAD` or `commondir` at the workspace
+/// root (common in real projects) cannot block git and must not refuse a valid repository.
+#[test]
+fn root_directories_named_like_git_files_do_not_refuse_a_valid_repository() {
+    let repo = Repo::new();
+    for name in ["config", "HEAD", "commondir"] {
+        fs::create_dir_all(repo.root.join(name)).unwrap();
+        fs::write(repo.root.join(name).join("settings.txt"), "x\n").unwrap();
+    }
+    for tool in ["git_status", "git_log"] {
+        let output = dispatch_promptly(&repo.root, tool);
+        assert!(!output.starts_with("error:"), "{tool}: {output}");
+    }
+}
+
 /// Issue #461 (6): an oversize gitfile or alternates file says it is too large, not that it
 /// is a FIFO, device or link.
 #[test]
