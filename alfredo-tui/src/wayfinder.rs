@@ -66,20 +66,74 @@ pub fn entry_mode(prompt: &str) -> Option<Mode> {
                 "project" | "app" | "application" | "service" | "repository" | "product"
             )
     });
-    let consequential = words.iter().any(|word| {
+    let object = |word: &str| {
         matches!(
-            *word,
-            "architecture" | "architectural" | "redesign" | "migrate" | "migration"
+            word,
+            "migration" | "migrate" | "architecture" | "architectural" | "redesign"
         )
-    }) || words.windows(2).any(|w| {
-        matches!(
-            w,
-            ["consequential", "change"] | ["cross", "cutting"] | ["platform", "wide"]
-        )
-    }) || words
-        .windows(3)
-        .any(|w| matches!(w, ["replace", "the", "system"]));
+    };
+    // Project-start phrasing only: a planning verb before the word, or a redesign or
+    // migration of a whole system. Bare words ("add a migration") stay ordinary chat.
+    let planned = words.iter().enumerate().any(|(at, word)| {
+        matches!(*word, "plan" | "design" | "propose" | "outline" | "scope")
+            && words[at + 1..]
+                .iter()
+                .take(4)
+                .take_while(|next| {
+                    matches!(
+                        **next,
+                        "a" | "an"
+                            | "the"
+                            | "our"
+                            | "this"
+                            | "new"
+                            | "major"
+                            | "large"
+                            | "full"
+                            | "big"
+                            | "whole"
+                    ) || object(next)
+                })
+                .any(|next| object(next))
+    });
+    let whole = words.windows(3).any(|w| {
+        matches!(w[0], "redesign" | "migrate" | "rearchitect")
+            && matches!(w[1], "the" | "our" | "this" | "entire" | "whole")
+            && matches!(
+                w[2],
+                "architecture"
+                    | "system"
+                    | "platform"
+                    | "codebase"
+                    | "stack"
+                    | "app"
+                    | "application"
+                    | "service"
+                    | "backend"
+                    | "frontend"
+            )
+    });
+    let consequential = planned
+        || whole
+        || words.windows(2).any(|w| {
+            matches!(
+                w,
+                ["consequential", "change"] | ["cross", "cutting"] | ["platform", "wide"]
+            )
+        })
+        || words
+            .windows(3)
+            .any(|w| matches!(w, ["replace", "the", "system"]));
     (explicit.is_some() || new || consequential).then_some(Mode::Chart)
+}
+
+/// Footer notice while a Wayfinder discussion is tool-free (issue #334).
+pub const TOOLS_OFF_NOTICE: &str = "Wayfinder chat: tools off here · /scope-clear gives them back";
+
+/// Chat turns get the coding tools (and task context) outside Wayfinder: with no scope
+/// revision, or after `/scope-clear` at the current revision.
+pub fn tools_enabled(store: &Store, revision: u64) -> bool {
+    revision == 0 || store.flow_cleared(revision)
 }
 
 fn supplied_brief(prompt: &str) -> Option<Brief> {
@@ -225,7 +279,7 @@ pub fn prepare(
                 .ok_or("Open /scope before supplying a scope draft")?,
             action: Action::Draft { brief },
         })
-    } else if state.brief.is_none() {
+    } else if state.brief.is_none() && !store.flow_cleared(state.revision) {
         entry_mode(original_prompt).map(|mode| Request {
             correlation: correlation.into(),
             expected_revision: 0,
