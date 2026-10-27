@@ -273,7 +273,8 @@ fn serve_reply(
                         || prompt.contains("AssertionError")
                         || prompt.contains("previous attempt changed nothing")
                         || prompt.contains("-token limit")
-                        || prompt.contains("(truncated)"))
+                        || prompt.contains("(truncated)")
+                        || prompt.contains("SEARCH text"))
             );
         }
         if let Some(capture) = capture {
@@ -6416,6 +6417,418 @@ fn file_blocks_parse_verbatim_code_and_refuse_truncated_or_missing_blocks() {
     assert!(worker::validate_plan(&binary, &policy).is_err());
 }
 
+/// EDIT blocks (issue #366): `=== EDIT: path ===` with SEARCH/REPLACE pairs.
+fn edit_block(path: &str, pairs: &[(&str, &str)]) -> String {
+    let body: String = pairs
+        .iter()
+        .map(|(old, new)| format!("<<<<<<< SEARCH\n{old}=======\n{new}>>>>>>> REPLACE\n"))
+        .collect();
+    format!("=== EDIT: {path} ===\n{body}=== END EDIT ===\n")
+}
+
+fn edit_policy() -> WorkPolicy {
+    WorkPolicy {
+        files: vec!["calc.py".into(), "notes.txt".into()],
+        check: vec!["true".into()],
+    }
+}
+
+/// Resolve `answer` against `calc.py` = `base` and run the plan validation.
+fn resolve_with(answer: &str, base: &str) -> Result<FilePlan, String> {
+    let policy = edit_policy();
+    let plan = worker::resolve_answer(answer, &policy, &|path| {
+        (path == "calc.py").then(|| base.to_string())
+    })?;
+    worker::validate_plan(&plan, &policy)?;
+    Ok(plan)
+}
+
+#[test]
+fn edit_block_with_pairs_applies_in_order_and_becomes_a_whole_file() {
+    let base = "def a():\n    return 1\n\ndef answer():\n    return 0\n";
+    let answer = format!(
+        "Done.\n{}",
+        edit_block(
+            "calc.py",
+            &[
+                ("    return 0\n", "    return 41\n"),
+                // The second pair sees the first pair's result.
+                ("    return 41\n", "    return 42\n"),
+            ]
+        )
+    );
+    let plan = resolve_with(&answer, base).unwrap();
+    assert_eq!(plan.files.len(), 1);
+    assert_eq!(plan.files[0].path, "calc.py");
+    assert_eq!(
+        plan.files[0].content,
+        "def a():\n    return 1\n\ndef answer():\n    return 42\n"
+    );
+    // An empty REPLACE deletes; CRLF in the answer and in the file is read as LF.
+    let plan = resolve_with(
+        &edit_block("calc.py", &[("def a():\n    return 1\n\n", "")]).replace('\n', "\r\n"),
+        &base.replace('\n', "\r\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.files[0].content,
+        "def answer():\n    return 0\n".to_string()
+    );
+    // FILE answers are untouched, alone or beside an EDIT of another file.
+    let mixed = format!(
+        "{}{}",
+        blocks(&[("notes.txt", "n\n")]),
+        edit_block("calc.py", &[("return 0\n", "return 9\n")])
+    );
+    let plan = resolve_with(&mixed, base).unwrap();
+    assert_eq!(plan.files.len(), 2);
+    assert_eq!(plan.files[0].content, "n\n");
+    assert_eq!(
+        resolve_with(&blocks(&[("calc.py", "x\n")]), base)
+            .unwrap()
+            .files[0]
+            .content,
+        "x\n"
+    );
+}
+
+#[test]
+fn edit_with_missing_ambiguous_or_empty_search_fails_with_the_reason_and_changes_nothing() {
+    let base = "x = 1\ny = 1\nz = 2\n";
+    let missing = resolve_with(&edit_block("calc.py", &[("q = 3\n", "q = 4\n")]), base);
+    let missing = missing.unwrap_err();
+    assert!(
+        missing.contains("calc.py") && missing.contains("not found") && missing.contains("q = 3"),
+        "{missing}"
+    );
+    let ambiguous = resolve_with(&edit_block("calc.py", &[(" = 1\n", " = 5\n")]), base);
+    let ambiguous = ambiguous.unwrap_err();
+    assert!(
+        ambiguous.contains("calc.py") && ambiguous.contains("matches 2 times"),
+        "{ambiguous}"
+    );
+    // A good first pair does not survive a failing second pair: the whole answer fails.
+    let partial = resolve_with(
+        &edit_block("calc.py", &[("z = 2\n", "z = 3\n"), ("nope\n", "x\n")]),
+        base,
+    )
+    .unwrap_err();
+    assert!(
+        partial.contains("pair 2") && partial.contains("not found"),
+        "{partial}"
+    );
+    let empty = resolve_with(&edit_block("calc.py", &[("", "x = 0\n")]), base).unwrap_err();
+    assert!(empty.contains("empty SEARCH"), "{empty}");
+    // Editing a file that does not exist yet is refused; a FILE block creates it.
+    let new = resolve_with(&edit_block("notes.txt", &[("a\n", "b\n")]), base).unwrap_err();
+    assert!(
+        new.contains("notes.txt") && new.contains("does not exist"),
+        "{new}"
+    );
+}
+
+#[test]
+fn edit_blocks_refuse_double_use_of_a_path_and_malformed_pairs() {
+    let base = "x = 1\n";
+    let both = format!(
+        "{}{}",
+        blocks(&[("calc.py", "y = 2\n")]),
+        edit_block("calc.py", &[("x\n", "z\n")])
+    );
+    assert!(resolve_with(&both, base).unwrap_err().contains("both"));
+    let twice = format!(
+        "{}{}",
+        edit_block("calc.py", &[("x\n", "z\n")]),
+        edit_block("calc.py", &[("z\n", "x\n")])
+    );
+    assert!(resolve_with(&twice, base)
+        .unwrap_err()
+        .contains("more than once"));
+    for (answer, reason) in [
+        (
+            "=== EDIT: calc.py ===\njust text\n=== END EDIT ===\n",
+            "unexpected text",
+        ),
+        (
+            "=== EDIT: calc.py ===\n<<<<<<< SEARCH\nx\n=== END EDIT ===\n",
+            "before =======",
+        ),
+        (
+            "=== EDIT: calc.py ===\n<<<<<<< SEARCH\nx\n=======\ny\n=== END EDIT ===\n",
+            "before >>>>>>> REPLACE",
+        ),
+        (
+            "=== EDIT: calc.py ===\n=== END EDIT ===\n",
+            "no SEARCH/REPLACE",
+        ),
+        (
+            "=== EDIT: calc.py ===\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n=== FILE: notes.txt ===\n",
+            "marker line",
+        ),
+    ] {
+        let error = resolve_with(answer, base).unwrap_err();
+        assert!(error.contains(reason), "{reason}: {error}");
+    }
+}
+
+#[test]
+fn truncated_edit_blocks_are_refused_like_truncated_file_blocks() {
+    let base = "x = 1\n";
+    for answer in [
+        "=== EDIT: calc.py ===\n<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n",
+        "=== EDIT: calc.py ===\n<<<<<<< SEARCH\nx = 1\n=======\nx = ",
+    ] {
+        assert_eq!(
+            resolve_with(answer, base).unwrap_err(),
+            "Model output ended inside EDIT block for calc.py (truncated)"
+        );
+    }
+}
+
+#[test]
+fn edit_blocks_meet_the_same_policy_checks_as_file_blocks() {
+    let base = "x = 1\n";
+    // Same refusal text for the same path, whichever block kind names it.
+    for path in [
+        "test_calc.py",
+        ".env",
+        "secrets/.env",
+        "../escape",
+        "/etc/passwd",
+        "link.py",
+        "a/../calc.py",
+    ] {
+        let by_file = resolve_with(&blocks(&[(path, "x = 2\n")]), base).unwrap_err();
+        let by_edit = resolve_with(&edit_block(path, &[("x = 1\n", "x = 2\n")]), base).unwrap_err();
+        assert!(by_file.starts_with("Returned unapproved file"), "{by_file}");
+        assert_eq!(by_edit, by_file, "{path}");
+    }
+    // NUL in the result is binary content, as for FILE.
+    let by_file = resolve_with(&blocks(&[("calc.py", "x\0\n")]), base).unwrap_err();
+    let by_edit = resolve_with(&edit_block("calc.py", &[("x = 1\n", "x\0\n")]), base).unwrap_err();
+    assert!(by_file.contains("binary content"), "{by_file}");
+    assert_eq!(by_edit, by_file);
+    // The 128 KiB total bound applies to the edited result.
+    let big = "a\n".repeat(60 * 1024);
+    let other = "b\n".repeat(40 * 1024);
+    let two = format!(
+        "{}{}",
+        edit_block("calc.py", &[("x = 1\n", &big)]),
+        blocks(&[("notes.txt", &other)])
+    );
+    let by_edit = resolve_with(&two, base).unwrap_err();
+    let by_file =
+        resolve_with(&blocks(&[("calc.py", &big), ("notes.txt", &other)]), base).unwrap_err();
+    assert_eq!(by_edit, "Worker edits exceed 128 KiB");
+    assert_eq!(by_edit, by_file);
+    // A path outside the policy is never read: the reader is not asked for it.
+    let plan = worker::resolve_answer(
+        &edit_block("../escape", &[("a\n", "b\n")]),
+        &edit_policy(),
+        &|path| panic!("read {path}"),
+    )
+    .unwrap();
+    assert_eq!(plan.files[0].path, "../escape");
+}
+
+#[tokio::test]
+async fn edit_block_changes_the_tail_of_a_large_file_without_re_emitting_it() {
+    let fixture = unittest_fixture();
+    let helpers: String = (0..1700)
+        .map(|i| format!("def helper_{i}():\n    return {i}\n\n"))
+        .collect();
+    let big = format!("{helpers}def answer():\n    return 0\n");
+    assert!(
+        big.len() > 40 * 1024 && big.len() < 64 * 1024,
+        "{}",
+        big.len()
+    );
+    commit_files(&fixture, &[("calc.py", &big)]);
+    let answer = format!(
+        "Fixing the tail.\n{}",
+        edit_block(
+            "calc.py",
+            &[(
+                "def answer():\n    return 0\n",
+                "def answer():\n    return 42\n"
+            )]
+        )
+    );
+    assert!(answer.len() < 400, "{}", answer.len());
+    let (capture, captured) = std::sync::mpsc::channel();
+    let (provider, server, _) = serve_reply(answer, Duration::ZERO, "", Some(capture), true, None);
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "edit-run".into(),
+        fixture.store.snapshot().unwrap().revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        snapshot.tasks[0].status,
+        TaskStatus::ReviewReady,
+        "{detail}"
+    );
+    let prompt = last_prompt(&captured.recv().unwrap());
+    assert!(
+        prompt.contains("=== EDIT: <path> ===") && prompt.contains("<<<<<<< SEARCH"),
+        "{prompt}"
+    );
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert!(
+        evidence.patch.contains("-    return 0"),
+        "{}",
+        evidence.patch
+    );
+    assert!(evidence.patch.contains("+    return 42"));
+    assert!(evidence.patch.len() < 2048, "{}", evidence.patch.len());
+    let directory = fixture.store.run_directory(&evidence.run).unwrap();
+    assert_eq!(
+        fs::read_to_string(directory.join("worktree/calc.py")).unwrap(),
+        format!("{helpers}def answer():\n    return 42\n")
+    );
+}
+
+#[tokio::test]
+async fn failed_edit_is_repairable_and_the_repair_prompt_names_the_reason() {
+    for (search, reason) in [
+        ("def missing():\n", "not found"),
+        ("    return 0\n", "matches 2 times"),
+    ] {
+        let fixture = unittest_fixture();
+        commit_files(
+            &fixture,
+            &[(
+                "calc.py",
+                "def other():\n    return 0\n\ndef answer():\n    return 0\n",
+            )],
+        );
+        let (_, detail) = run_reply(
+            &fixture,
+            1,
+            edit_block("calc.py", &[(search, "    return 42\n")]),
+        )
+        .await;
+        assert!(detail.contains(reason), "{detail}");
+        assert_eq!(
+            fixture.store.snapshot().unwrap().tasks[0].status,
+            TaskStatus::Failed
+        );
+        let second = repair_of(&fixture, 1);
+        let (request, _) = run_reply(
+            &fixture,
+            second,
+            blocks(&[("calc.py", "def answer():\n    return 42\n")]),
+        )
+        .await;
+        let section = failing_section(&last_prompt(&request));
+        assert!(section.contains(reason), "{section}");
+        assert!(section.contains("calc.py"), "{section}");
+    }
+}
+
+#[tokio::test]
+async fn truncated_edit_block_repair_says_the_previous_response_was_truncated() {
+    let fixture = unittest_fixture();
+    let (_, detail) = run_reply(
+        &fixture,
+        1,
+        "=== EDIT: calc.py ===\n<<<<<<< SEARCH\n    return 0\n=======\n    return {todo[".into(),
+    )
+    .await;
+    assert_eq!(
+        detail,
+        "Model output ended inside EDIT block for calc.py (truncated)"
+    );
+    let second = repair_of(&fixture, 1);
+    let (request, _) = run_reply(
+        &fixture,
+        second,
+        blocks(&[("calc.py", "def answer():\n    return 42\n")]),
+    )
+    .await;
+    let section = failing_section(&last_prompt(&request));
+    assert!(
+        section.contains("previous response was truncated inside the EDIT block for calc.py")
+            && section.contains("=== END EDIT ==="),
+        "{section}"
+    );
+}
+
+#[tokio::test]
+async fn edit_to_an_unapproved_path_fails_exactly_like_a_file_block() {
+    for path in ["test_calc.py", ".env", "../escape", "/etc/passwd"] {
+        let mut details = Vec::new();
+        for answer in [
+            blocks(&[(path, "x = 2\n")]),
+            edit_block(path, &[("x = 1\n", "x = 2\n")]),
+        ] {
+            let fixture = unittest_fixture();
+            let (_, detail) = run_reply(&fixture, 1, answer).await;
+            let run = fixture.store.snapshot().unwrap().tasks[0]
+                .run
+                .clone()
+                .unwrap();
+            let directory = fixture.store.run_directory(&run.id).unwrap();
+            assert_eq!(
+                fs::read_to_string(directory.join("worktree/calc.py")).unwrap(),
+                "def answer():\n    return 0\n"
+            );
+            details.push(detail);
+        }
+        assert!(
+            details[0].starts_with("Returned unapproved file"),
+            "{details:?}"
+        );
+        assert_eq!(details[0], details[1], "{path}");
+    }
+}
+
+#[test]
+fn live_display_shows_edit_blocks_as_a_heading_without_their_end_line() {
+    let shown = worker::display_output(&edit_block("calc.py", &[("a\n", "b\n")]));
+    assert_eq!(
+        shown,
+        "▸ calc.py (edit)\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n"
+    );
+}
+
+#[tokio::test]
+async fn fresh_repair_sees_the_previous_edit_block_as_an_edit_block() {
+    let fixture = unittest_fixture();
+    let edit = edit_block("calc.py", &[("    return 0\n", "    return 41\n")]);
+    let (_, detail) = run_reply(&fixture, 1, edit.clone()).await;
+    assert!(detail.starts_with("Check failed"), "{detail}");
+    let second = repair_of(&fixture, 1);
+    let edit = edit_block("calc.py", &[("    return 0\n", "    return 40\n")]);
+    let (_, detail) = run_reply(&fixture, second, edit.clone()).await;
+    assert!(detail.starts_with("Check failed"), "{detail}");
+    fixture.action(Action::Repair {
+        task: second,
+        reason: "Fix the failing test".into(),
+    });
+    let third = fixture.store.snapshot().unwrap().tasks.len() as u64;
+    fixture.action(Action::Assign {
+        task: third,
+        model: "other".into(),
+    });
+    fixture.action(Action::Approve { task: third });
+    let (request, _) = run_reply(
+        &fixture,
+        third,
+        edit_block("calc.py", &[("    return 0\n", "    return 42\n")]),
+    )
+    .await;
+    let prompt = last_prompt(&request);
+    assert!(prompt.contains("PREVIOUS ATTEMPT FILES"), "{prompt}");
+    assert!(prompt.contains(&edit), "{prompt}");
+}
+
 #[test]
 fn worker_format_names_parse_and_legacy_generation_reads_unrecorded() {
     assert_eq!(
@@ -6484,7 +6897,7 @@ async fn blocks_answer_is_requested_without_schema_and_applied_verbatim() {
     // The format is restated after the long source context.
     assert!(
         prompt.trim_end().ends_with(
-            "Answer only with FILE blocks, one per changed file, each ending with === END FILE ==="
+            "Answer only with FILE blocks, one per changed file, each ending with === END FILE ===, or with EDIT blocks for small changes to large files, each ending with === END EDIT ==="
         ),
         "{prompt}"
     );

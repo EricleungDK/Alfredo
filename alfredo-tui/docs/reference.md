@@ -1444,6 +1444,39 @@ in the saved `model-response.txt`. Rules:
 - File content cannot contain a line equal to a marker line. A FILE marker inside
   an open block is refused as ambiguous.
 
+For a small change to an existing large file (a file near the 64 KiB bound does not
+fit the 4096-token output cap whole), a worker may instead answer with an EDIT block:
+
+```
+=== EDIT: relative/path.py ===
+<<<<<<< SEARCH
+exact old lines
+=======
+new lines
+>>>>>>> REPLACE
+=== END EDIT ===
+```
+
+One or more SEARCH/REPLACE pairs per block, applied in order to the approved file's
+baseline text (CRLF read as LF, as for FILE). Rules:
+
+- Each SEARCH must match the current text exactly once (counting overlaps, after the
+  earlier pairs); an empty SEARCH, no match and several matches fail with a message
+  naming the file, the pair and the first SEARCH line, which the next repair prompt
+  carries. A failing pair changes nothing: the whole answer fails.
+- An EDIT edits an existing file; a new file needs a FILE block. A path may be named
+  once, as a FILE or an EDIT block, not both and not twice.
+- The edit result becomes the equivalent whole-file edit before the same checks as a FILE block run,
+  so the approved-file list, secret and path refusals, NUL check and 128 KiB bound apply
+  unchanged, and an unapproved path is refused with the FILE message without being read.
+  The 64 KiB approved-file bound and plan lint are unchanged.
+- Text between pairs may only be blank lines. Marker lines (`=== FILE:`, `=== EDIT:`,
+  `=== END FILE ===`, `=== END EDIT ===`, and the three pair markers in the wrong place)
+  cannot appear inside the text. Output ending inside an EDIT block fails with
+  `Model output ended inside EDIT block for PATH (truncated)`.
+- A fresh repair sees a previous EDIT answer as the same EDIT blocks, applied against
+  the original baseline again.
+
 A legacy JSON answer (`{"files":[{"path","content"}]}`) is still accepted in either
 mode, so older conversations and fixtures keep working. When continuing a Local
 Agent conversation, a retained JSON answer is replayed as FILE blocks. A fresh
