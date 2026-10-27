@@ -326,16 +326,18 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     git_output(root, args, MAX_OUTPUT * 2).map(|(_, output)| output)
 }
 
-/// Config keys that can run a filter driver, pull in another config file or move the
-/// working tree outside the workspace (`core.worktree`, #309), in every scope git reads
+/// Config keys that can run a filter driver, pull in another config file, move the working
+/// tree outside the workspace (`core.worktree`, #309), or make git lazy-fetch through a
+/// partial clone's promisor and its transport program (#467), in every scope git reads
 /// (includes are followed; no scope flag, as `REPOSITORY_CONFIG_ARGS`). git prints only the
 /// matching key names, so a large config cannot push one out of the output the way it cuts
-/// a full `config --list` (#308).
+/// a full `config --list` (#308). `remote\..+` spans subsections that hold `=`, as
+/// `qualification_key` does.
 const FILTER_KEYS_ARGS: [&str; 4] = [
     "config",
     "--name-only",
     "--get-regexp",
-    "^(filter|include|includeif)\\.|^core\\.worktree$",
+    "^(filter|include|includeif)\\.|^core\\.(worktree|sshcommand|gitproxy)$|^extensions\\.partialclone$|^remote\\..+\\.(promisor|uploadpack|receivepack)$",
 ];
 
 /// Most bytes of matching key names read; a listing past it is refused.
@@ -358,15 +360,26 @@ fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), 
         None => Err(format!(
             "repository config is too large to check for filter drivers; {NOT_RUN}"
         )),
-        // Every listed key is a filter, include or worktree key, so any output refuses.
+        // Every listed key is a qualifying key, so any output refuses; the first three are named.
         Some(status) if status.success() => {
-            if out.is_empty() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "repository config defines filter drivers, includes or core.worktree; {NOT_RUN}"
-                ))
+            let listing = String::from_utf8_lossy(&out);
+            let keys: Vec<&str> = listing.lines().collect();
+            if keys.is_empty() {
+                return Ok(());
             }
+            let named: Vec<String> = keys
+                .iter()
+                .take(3)
+                .map(|key| format!("{:?}", key.chars().take(96).collect::<String>()))
+                .collect();
+            let more = match keys.len().saturating_sub(3) {
+                0 => String::new(),
+                count => format!(" and {count} more"),
+            };
+            Err(format!(
+                "repository config sets {}{more}, which git would run or follow (filter drivers, includes, core.worktree, partial-clone or transport settings); {NOT_RUN}",
+                named.join(", ")
+            ))
         }
         // `--get-regexp` exits 1 when no key matches; a broken config exits 128.
         Some(status) if status.code() == Some(1) && out.is_empty() => Ok(()),
@@ -1149,10 +1162,12 @@ pub(crate) fn hardened(command: &mut Command) -> &mut Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_PAGER", "cat")
         .arg("--no-optional-locks")
         .arg("--no-pager")
         .args(crate::worker::HARDENED_GIT_ARGS)
+        .args(crate::worker::LOCAL_ONLY_GIT_ARGS)
         .args(["-c", "diff.external=", "-c", "core.pager=cat"])
 }
 

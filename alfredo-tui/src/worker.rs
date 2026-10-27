@@ -799,6 +799,12 @@ pub(crate) const HARDENED_GIT_ARGS: [&str; 12] = [
     "submodule.recurse=false",
 ];
 
+/// Command-line overrides for host git calls that must never reach a remote (#467).
+/// `protocol.allow=never` stops every transport, so a partial clone's promisor remote
+/// cannot run its repository-chosen `uploadpack`/`receivepack` program. Not in
+/// `HARDENED_GIT_ARGS`: `git push` needs its own transport policy.
+pub(crate) const LOCAL_ONLY_GIT_ARGS: [&str; 2] = ["-c", "protocol.allow=never"];
+
 fn git_blocking(workspace: &Path, args: &[&str], stdout: Stdio) -> Option<std::process::Output> {
     std::process::Command::new("/usr/bin/git")
         .env_clear()
@@ -807,7 +813,9 @@ fn git_blocking(workspace: &Path, args: &[&str], stdout: Stdio) -> Option<std::p
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .args(HARDENED_GIT_ARGS)
+        .args(LOCAL_ONLY_GIT_ARGS)
         .arg("-C")
         .arg(workspace)
         .args(args)
@@ -834,11 +842,36 @@ pub(crate) const REPOSITORY_CONFIG_ARGS: [&str; 2] = ["config", "--list"];
 /// it inspects or checks out files, so every gate that reads the config refuses
 /// them until they are qualified.
 pub(crate) fn config_needs_qualification(config: &str) -> bool {
-    config.lines().any(|line| {
-        line.starts_with("filter.")
-            || line.starts_with("include.")
-            || line.starts_with("includeif.")
+    qualification_key(config).is_some()
+}
+
+/// The first key of `config` that needs qualification, for a refusal to name it. A line is
+/// `key=value`, but a subsection may hold `=` (`[remote "a=b"]`), so every `=` split is
+/// tried: a key that hides behind one still qualifies (fails closed).
+pub(crate) fn qualification_key(config: &str) -> Option<&str> {
+    config.lines().find_map(|line| {
+        line.match_indices('=')
+            .map(|(index, _)| &line[..index])
+            .chain(std::iter::once(line))
+            .find(|key| is_qualification_key(key))
     })
+}
+
+/// Keys that make git run a repository-chosen program or follow another file: filter
+/// drivers, includes, partial-clone promisors and their transport programs, ssh and proxy
+/// commands (#467).
+fn is_qualification_key(key: &str) -> bool {
+    key.starts_with("filter.")
+        || key.starts_with("include.")
+        || key.starts_with("includeif.")
+        || matches!(
+            key,
+            "extensions.partialclone" | "core.sshcommand" | "core.gitproxy"
+        )
+        || (key.starts_with("remote.")
+            && [".promisor", ".uploadpack", ".receivepack"]
+                .iter()
+                .any(|suffix| key.ends_with(suffix)))
 }
 
 /// The `dirty` count recorded when uncommitted changes could not be checked
@@ -908,7 +941,9 @@ fn host_git_command(root: &Path, args: &[&str]) -> tokio::process::Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .args(HARDENED_GIT_ARGS)
+        .args(LOCAL_ONLY_GIT_ARGS)
         .arg("-C")
         .arg(root)
         .args(args);
@@ -1848,11 +1883,11 @@ pub async fn start_checked(
         return Err("Execution workspace must be the Git repository root".into());
     }
     let config = git(&before.workspace, &REPOSITORY_CONFIG_ARGS).await?;
-    if config_needs_qualification(&config) {
-        return Err(
-            "Repository checkout filters/includes need qualification before worker execution"
-                .into(),
-        );
+    if let Some(key) = qualification_key(&config) {
+        return Err(format!(
+            "Repository checkout filters/includes need qualification before worker execution: {key:?} is set"
+        )
+        .into());
     }
     let repair = store.repair_context(
         before

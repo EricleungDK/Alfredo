@@ -1729,10 +1729,14 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `--end-of-options`; `path` is a literal pathspec under the same exclusions. Diffs leave
   out secret files (the **Secret files** list above) and files renamed or
   copied from them. Git runs only in the workspace itself (`GIT_CEILING_DIRECTORIES`),
-  a call is stopped after 15 s, and when the repository config defines filter drivers or
-  includes, `git_status` and working-tree or staged diffs are refused (they would run the
-  repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work.
-  A config too large to check is refused the same way.
+  a call is stopped after 15 s, and when the repository config defines filter drivers,
+  includes, a partial clone (`extensions.partialclone`, `remote.*.promisor`), a remote's
+  `uploadpack` or `receivepack` program, `core.sshcommand` or `core.gitproxy`, `git_status`
+  and working-tree or staged diffs are refused (they would run the repository's clean
+  filters, or lazy-fetch through its transport); the refusal names the keys. Host git runs
+  with lazy fetch and every transport disabled (`GIT_NO_LAZY_FETCH`, `protocol.allow=never`),
+  so a missing object is an error, never a fetch. `git_log` and `git_diff` with `base` and
+  `target` still work. A config too large to check is refused the same way.
   Git also refuses a `.git` that points at another repository (a gitfile, a `commondir`
   file, or `objects/info/alternates` into another repository); a linked worktree of the
   workspace's own repository is read. The control files git reads (`gitdir`,
@@ -1941,7 +1945,9 @@ credentials). Each call pauses for Approval like a file edit.
   committable), remotes that are not a
   configured remote name (URLs and paths are refused), nothing to commit, an
   already-up-to-date merge or push, a detached HEAD for commit, merge and push, and
-  repositories whose config defines filter drivers, includes or `core.worktree`.
+  repositories whose config defines filter drivers, includes, `core.worktree`, a partial
+  clone (`extensions.partialclone`, `remote.*.promisor`), a remote's `uploadpack` or
+  `receivepack` program, `core.sshcommand` or `core.gitproxy`.
 - **Changed since the preview.** On approval HEAD, the current branch, local and
   remote-tracking refs, the index, working-tree status, the remote URLs and the
   repository config must match the preview; otherwise nothing runs and the model gets
