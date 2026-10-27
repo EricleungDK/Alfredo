@@ -2914,6 +2914,59 @@ fn eviction_never_takes_the_generated_command_a_saved_draft_names() {
     store.save(&again).unwrap();
 }
 
+/// A restored conversation whose pending draft names an origin command that has since
+/// gone `Unknown` (a planner command that ended without a matching receipt), driven
+/// past the history budget.
+fn unknown_origin_after_eviction() -> (App, Snapshot, String, ConversationStore, Fixture) {
+    use alfredo_tui::{console_command::CommandState, planner_command::Outcome::Generated};
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let (snapshot, id) = draft_origin_snapshot(|draft| CommandState::Planner {
+        outcome: Generated {
+            draft_sha256: draft.digest().unwrap(),
+            tasks: 1,
+        },
+    });
+    store.save(&snapshot).unwrap();
+    let draft = snapshot.plan_draft.clone();
+    let mut app = store.load().unwrap().unwrap().restore();
+    app.sessions[0].set_command_state(
+        &id,
+        CommandState::Unknown {
+            reason: "unconfirmed".into(),
+        },
+    );
+    fill_settled_to_budget(&mut app, "unknown-origin");
+    for number in 0..40 {
+        app.sessions[0]
+            .submit_command(
+                "/task New".into(),
+                command_intent(&format!("unknown-origin-new-{number}")),
+            )
+            .unwrap();
+    }
+    let mut again = Snapshot::capture(&app, "default");
+    again.plan_draft = draft;
+    (app, again, id, store, fixture)
+}
+
+#[test]
+fn eviction_never_takes_an_unknown_command_a_saved_draft_names() {
+    let (app, again, id, store, _fixture) = unknown_origin_after_eviction();
+    assert!(
+        app.sessions[0].commands().iter().any(|c| c.id == id),
+        "eviction took the draft's origin command"
+    );
+    store.save(&again).unwrap();
+}
+
+#[test]
+fn a_draft_with_an_unknown_origin_round_trips_after_eviction() {
+    let (_app, again, _id, store, _fixture) = unknown_origin_after_eviction();
+    store.save(&again).unwrap();
+    assert_eq!(store.load().unwrap().unwrap(), again);
+}
+
 #[test]
 fn clearing_a_conversation_never_leaves_a_plan_draft_without_its_origin() {
     use alfredo_tui::{console_command::CommandState, planner_command::Outcome::Generated};
