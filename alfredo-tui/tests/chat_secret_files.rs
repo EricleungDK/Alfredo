@@ -208,6 +208,9 @@ fn common_credential_files_are_excluded_from_read_tools() {
         ".htpasswd",
         ".vault-token",
         "kubeconfig",
+        "kubeconfig.yaml",
+        "kubeconfig.yml",
+        "terraform.tfstate.1700000000.backup",
         "AuthKey_X.p8",
         "key.ppk",
         ".s3cfg",
@@ -300,6 +303,51 @@ fn git_commit_refuses_the_issue_471_credential_files() {
         .unwrap_err();
     assert!(staged.contains("terraform.tfstate"), "{staged}");
     assert!(staged.contains("by hand"), "{staged}");
+}
+
+/// Issue #471 review round 2: outside git, list_files walks the directory. The walk
+/// must test each workspace-relative path (not only the basename), so a credential
+/// file inside a directory such as `.docker/` or `.config/gh/` is not listed.
+#[test]
+fn list_files_outside_git_does_not_list_nested_credential_files() {
+    let base = std::env::temp_dir().join(format!("secret-walk-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let root = base.join("workspace");
+    let secrets = [
+        ".docker/config.json",
+        ".cargo/credentials",
+        ".config/gh/hosts.yml",
+        "terraform.tfstate.1700000000.backup",
+        "kubeconfig.yaml",
+    ];
+    for path in ["README.md", "src/state.rs", ".docker/daemon.json"]
+        .into_iter()
+        .chain(secrets)
+    {
+        let full = root.join(path);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, "content\n").unwrap();
+    }
+    let listing = chat_tools::dispatch(
+        &root,
+        &ToolCall {
+            name: "list_files".into(),
+            arguments: json!({}),
+        },
+    );
+    let _ = fs::remove_dir_all(&base);
+    for ordinary in ["README.md", "src/state.rs", ".docker/daemon.json"] {
+        assert!(
+            listing.lines().any(|line| line == ordinary),
+            "{ordinary} missing: {listing}"
+        );
+    }
+    for path in secrets {
+        assert!(
+            !listing.contains(path),
+            "list_files lists {path}: {listing}"
+        );
+    }
 }
 
 /// Detection: the planner's named-file reader and planning context never carry
