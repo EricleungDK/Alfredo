@@ -1591,4 +1591,16 @@ mod tests {
         assert!(error.contains("remote.origin.uploadpack"), "{error}");
         assert!(!marker.exists());
     }
+
+    /// Review round 2 (#467): a repository's `protocol.<name>.allow` overrides the
+    /// command-line `protocol.allow=never`, so the config gate refuses it by name. The
+    /// unrelated `protocol.version` stays allowed.
+    #[test]
+    fn refuse_filters_refuses_and_names_protocol_allow_overrides() {
+        let root = scratch_repo("protocol-allow", "[protocol \"file\"]\n\tallow = always\n");
+        let error = refuse_filters(&root).unwrap_err();
+        assert!(error.contains("protocol.file.allow"), "{error}");
+        let version = scratch_repo("protocol-version", "[protocol]\n\tversion = 2\n");
+        assert!(refuse_filters(&version).is_ok());
+    }
 }

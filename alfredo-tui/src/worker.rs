@@ -3672,4 +3672,18 @@ mod host_git_tests {
             "remote.origin.url=/x\nremote.origin.fetch=+refs/*:refs/*\n"
         ));
     }
+
+    /// Review round 2 (#467): a `protocol.allow` or `protocol.<name>.allow` setting can
+    /// override the command-line transport policy, so the worker gate qualifies it too.
+    #[test]
+    fn protocol_allow_overrides_need_qualification() {
+        for config in [
+            "protocol.allow=always\n",
+            "protocol.file.allow=always\n",
+            "protocol.https.allow=user\n",
+        ] {
+            assert!(super::config_needs_qualification(config), "{config:?}");
+        }
+        assert!(!super::config_needs_qualification("protocol.version=2\n"));
+    }
 }
