@@ -293,7 +293,7 @@ fn project_notes_arrival_row_is_shown_once_reset_by_clear_and_never_sent_or_save
     assert!(!screen(&restored).contains("project notes: AGENTS.md"));
     // /clear starts the conversation over: the line comes back with the next turn.
     session.apply(1, Update::Done);
-    session.clear_conversation().unwrap();
+    session.clear_conversation(None).unwrap();
     assert!(!screen(&session).contains("project notes: AGENTS.md"));
     assert!(session.show_project_notes(1, line.into()));
 }

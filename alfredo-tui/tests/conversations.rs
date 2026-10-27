@@ -2915,6 +2915,66 @@ fn eviction_never_takes_the_generated_command_a_saved_draft_names() {
 }
 
 #[test]
+fn clearing_a_conversation_never_leaves_a_plan_draft_without_its_origin() {
+    use alfredo_tui::{console_command::CommandState, planner_command::Outcome::Generated};
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let (snapshot, id) = draft_origin_snapshot(|draft| CommandState::Planner {
+        outcome: Generated {
+            draft_sha256: draft.digest().unwrap(),
+            tasks: 1,
+        },
+    });
+    let draft = snapshot.plan_draft.clone();
+    store.save(&snapshot).unwrap();
+    let mut app = snapshot.restore();
+    // Whatever /clear decides, the next autosave of the still-pending draft must work.
+    let origin = draft.as_ref().and_then(|draft| draft.origin.as_ref());
+    if let Err(message) = app.sessions[0].clear_conversation(origin) {
+        assert!(message.contains("plan draft"), "{message}");
+        assert!(app.sessions[0].commands().iter().any(|c| c.id == id));
+    }
+    let mut again = Snapshot::capture(&app, "default");
+    again.plan_draft = draft;
+    store.save(&again).unwrap();
+    assert_eq!(store.load().unwrap().unwrap(), again);
+}
+
+#[test]
+fn a_refused_clear_changes_nothing_and_a_clear_without_a_draft_still_saves() {
+    use alfredo_tui::{console_command::CommandState, planner_command::Outcome::Generated};
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let (snapshot, _) = draft_origin_snapshot(|draft| CommandState::Planner {
+        outcome: Generated {
+            draft_sha256: draft.digest().unwrap(),
+            tasks: 1,
+        },
+    });
+    let draft = snapshot.plan_draft.clone().unwrap();
+    let mut app = snapshot.restore();
+    let before = Snapshot::capture(&app, "default");
+    let error = app.sessions[0]
+        .clear_conversation(draft.origin.as_ref())
+        .unwrap_err();
+    assert!(
+        error.contains("plan draft") && error.contains("/plan-cancel"),
+        "{error}"
+    );
+    assert_eq!(Snapshot::capture(&app, "default"), before);
+    // Another conversation does not hold the origin, so it clears and still saves.
+    app.add_session();
+    app.sessions[1]
+        .clear_conversation(draft.origin.as_ref())
+        .unwrap();
+    // After the draft is cancelled the owning conversation clears too.
+    app.sessions[0].clear_conversation(None).unwrap();
+    let cleared = Snapshot::capture(&app, "default");
+    store.save(&cleared).unwrap();
+    assert_eq!(store.load().unwrap().unwrap(), cleared);
+}
+
+#[test]
 fn controller_schema13_preserves_v12_and_never_reactivates_restored_control() {
     use alfredo_tui::{
         command_intent::Intent,
