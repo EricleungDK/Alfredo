@@ -1,5 +1,6 @@
 //! Real model-driven coding in retained isolated worktrees. No effect is replayed.
 use crate::{
+    chat_tools::git_read,
     execution::*,
     model::Update,
     provider::Ollama,
@@ -805,8 +806,23 @@ pub(crate) const HARDENED_GIT_ARGS: [&str; 12] = [
 /// `HARDENED_GIT_ARGS`: `git push` needs its own transport policy.
 pub(crate) const LOCAL_ONLY_GIT_ARGS: [&str; 2] = ["-c", "protocol.allow=never"];
 
-fn git_blocking(workspace: &Path, args: &[&str], stdout: Stdio) -> Option<std::process::Output> {
-    std::process::Command::new("/usr/bin/git")
+/// Longest output one synchronous host git call may produce (#470). A listing past it is
+/// an error, like a call that ran out of time, never a prefix.
+const BLOCKING_OUTPUT_LIMIT: usize = 64 << 20;
+
+/// One synchronous host git call that ran to its end: its success and its stdout.
+struct GitRan {
+    success: bool,
+    stdout: Vec<u8>,
+}
+
+/// One synchronous host git call, bounded by the running call's budget (#470): git is
+/// stopped at the deadline, so a repository that blocks git (a FIFO where git reads a
+/// file) cannot hang the caller. `Err` when git gave no answer: it did not start, was
+/// stopped, or its output was cut.
+fn git_blocking(workspace: &Path, args: &[&str]) -> Result<GitRan> {
+    let mut command = std::process::Command::new("/usr/bin/git");
+    command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", "/nonexistent")
@@ -818,16 +834,21 @@ fn git_blocking(workspace: &Path, args: &[&str], stdout: Stdio) -> Option<std::p
         .args(LOCAL_ONLY_GIT_ARGS)
         .arg("-C")
         .arg(workspace)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(Stdio::null())
-        .output()
-        .ok()
+        .args(args);
+    let clock = git_read::call_clock();
+    match git_read::run_bounded(command, BLOCKING_OUTPUT_LIMIT, clock.left())? {
+        (Some(status), stdout, _) => Ok(GitRan {
+            success: status.success(),
+            stdout,
+        }),
+        (None, _, _) => Err(format!(
+            "git output is larger than {BLOCKING_OUTPUT_LIMIT} bytes"
+        )),
+    }
 }
 
 fn git_succeeds(workspace: &Path, args: &[&str]) -> bool {
-    git_blocking(workspace, args, Stdio::null()).is_some_and(|output| output.status.success())
+    git_blocking(workspace, args).is_ok_and(|ran| ran.success)
 }
 
 /// The config listing every repository-config gate reads. Plain `--list` spans
@@ -878,6 +899,10 @@ fn is_qualification_key(key: &str) -> bool {
 /// (refused repository config). It is a marker, not a real count.
 pub(crate) const UNCHECKED_CHANGES: u32 = u32::MAX;
 
+/// The `dirty` count recorded when git gave no answer for the uncommitted-changes check
+/// within its deadline (#470). Also a marker, not a real count.
+pub(crate) const UNCHECKED_TIMED_OUT: u32 = u32::MAX - 1;
+
 /// Number of uncommitted changes (tracked modifications and untracked,
 /// non-ignored files) and the short HEAD they are not based on. Read-only
 /// (`GIT_OPTIONAL_LOCKS=0`; no index refresh is written). `None` when the
@@ -885,29 +910,38 @@ pub(crate) const UNCHECKED_CHANGES: u32 = u32::MAX;
 /// config needs qualification, `git status` is not run at all (it would run
 /// the repository's clean filters); the count is `UNCHECKED_CHANGES`.
 pub fn uncommitted_changes(workspace: &Path) -> Option<(u32, String)> {
-    let head = git_blocking(
-        workspace,
-        &["rev-parse", "--short=7", "HEAD"],
-        Stdio::piped(),
-    )
-    .filter(|output| output.status.success())?;
-    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    // The three git calls share one deadline (#470): a status that blocks is stopped, and
+    // the start is never held longer than that deadline in all.
+    git_read::call_scope(git_read::DEADLINE, || uncommitted_changes_within(workspace))
+}
+
+/// [`uncommitted_changes`] within the running call's budget.
+fn uncommitted_changes_within(workspace: &Path) -> Option<(u32, String)> {
+    let head = match git_blocking(workspace, &["rev-parse", "--short=7", "HEAD"]) {
+        Ok(ran) if ran.success => String::from_utf8_lossy(&ran.stdout).trim().to_string(),
+        Ok(_) => return None,
+        Err(_) => return Some((UNCHECKED_TIMED_OUT, "unknown".into())),
+    };
     // Listing the config executes nothing. An unreadable listing is treated
     // as unqualified: the status call below would not be trustworthy either.
-    let qualified = git_blocking(workspace, &REPOSITORY_CONFIG_ARGS, Stdio::piped())
-        .filter(|output| output.status.success())
-        .is_some_and(|config| {
+    let qualified = match git_blocking(workspace, &REPOSITORY_CONFIG_ARGS) {
+        Ok(config) if config.success => {
             !config_needs_qualification(&String::from_utf8_lossy(&config.stdout))
-        });
+        }
+        Ok(_) => false,
+        Err(_) => return Some((UNCHECKED_TIMED_OUT, head)),
+    };
     if !qualified {
         return Some((UNCHECKED_CHANGES, head));
     }
-    let status = git_blocking(
+    let status = match git_blocking(
         workspace,
         &["status", "--porcelain", "--untracked-files=all"],
-        Stdio::piped(),
-    )
-    .filter(|output| output.status.success())?;
+    ) {
+        Ok(status) if status.success => status,
+        Ok(_) => return None,
+        Err(_) => return Some((UNCHECKED_TIMED_OUT, head)),
+    };
     let count = String::from_utf8_lossy(&status.stdout)
         .lines()
         .filter(|line| !line.trim().is_empty())

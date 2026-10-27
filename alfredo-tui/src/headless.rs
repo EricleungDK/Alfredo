@@ -328,9 +328,13 @@ pub fn run(options: Options) -> Result<i32, String> {
             run.total
         ));
     } else {
-        work.autopilot
+        // The start notice carries the start warning (e.g. a timed-out uncommitted-changes
+        // check, #470), which headless shows on stderr like the other start lines.
+        let notice = work
+            .autopilot
             .start(&goal, &model, max_repairs, &work.tasks)
             .map_err(|error| format!("--go refused: {error}"))?;
+        say(&notice);
     }
     work.tasks.set_visible(true);
     catch_signals();

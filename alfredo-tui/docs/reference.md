@@ -1736,7 +1736,9 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   filters, or lazy-fetch through its transport); the refusal names the keys. Host git runs
   with lazy fetch and every transport disabled (`GIT_NO_LAZY_FETCH`, `protocol.allow=never`),
   so a missing object is an error, never a fetch. `git_log` and `git_diff` with `base` and
-  `target` still work. A config too large to check is refused the same way.
+  `target` still work. A config too large to check is refused the same way. Host git
+  calls that `/go` makes at start (the uncommitted-changes check) share the same 15 s
+  limit; when git gives no answer in time, the start notice says so and the run goes on.
   Git also refuses a `.git` that points at another repository (a gitfile, a `commondir`
   file, or `objects/info/alternates` into another repository); a linked worktree of the
   workspace's own repository is read. The control files git reads (`gitdir`,
