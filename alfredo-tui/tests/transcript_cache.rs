@@ -522,3 +522,26 @@ fn a_user_draft_with_cjk_accents_emoji_and_tabs_renders_unchanged() {
         "nothing escaped in plain text: {text}"
     );
 }
+
+/// Issue #436 (decision): in a reply an emoji zero-width joiner and a variation selector show
+/// as `<U+200D>` and `<U+FE0F>`, as on the approval card; plain emoji, accents and CJK are
+/// unchanged.
+#[test]
+fn reply_emoji_joiners_and_selectors_show_as_code_points() {
+    let app = chat(&[(
+        "user",
+        "x",
+    ), (BODY, "fam \u{1F468}\u{200D}\u{1F469} heart \u{2764}\u{FE0F} smile \u{1F642} caf\u{E9} \u{4F60}")]);
+    let buffer = draw_buffer(&app, 80, 30);
+    let text = row_text(&buffer).join("\n");
+    assert!(text.contains("<U+200D>"), "{text}");
+    assert!(text.contains("<U+FE0F>"), "{text}");
+    assert!(
+        text.contains('\u{1F642}') && text.contains("caf\u{E9}") && text.contains('\u{4F60}'),
+        "{text}"
+    );
+    assert!(
+        !text.contains("\u{200D}") && !text.contains("\u{FE0F}"),
+        "{text}"
+    );
+}

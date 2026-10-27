@@ -417,8 +417,8 @@ the text or after whitespace, a non-ASCII character or one of ``([{"'>:,;-|``, a
 next character is not whitespace; it closes at the next exactly-two `**` whose previous
 character is not whitespace. So `src/**/*.rs`, `2 ** 3`, `2**3`, `f(**kw, **o)` and
 `***both***` show every asterisk. An unclosed fence, `**` or backtick stays plain
-text (an open fence shows as an open code block while the reply streams). Your own messages are shown as typed.
-Control characters (such as ESC and BEL, except newline and tab) show as `<U+XXXX>`; bidi controls, zero-width and tag characters, line separators and other invisible characters in a reply show as `<U+XXXX>`, as on the approval card (issues #400, #436).
+text (an open fence shows as an open code block while the reply streams). Your own messages are shown as typed, except that invisible and control characters in them show as `<U+XXXX>` too.
+In a reply a zero-width joiner in an emoji sequence shows as `<U+200D>` and a variation selector as `<U+FE0F>`, as on the card. Control characters (such as ESC and BEL, except newline and tab) show as `<U+XXXX>`; bidi controls, zero-width and tag characters, line separators and other invisible characters in a reply show as `<U+XXXX>`, as on the approval card (issues #400, #436).
 
 ## Establish scope in conversation
 

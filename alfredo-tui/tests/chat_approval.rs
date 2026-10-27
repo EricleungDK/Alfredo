@@ -2050,7 +2050,7 @@ fn approval_card_shows_a_lone_carriage_return() {
     .unwrap();
     let shown = alfredo_tui::dashboard::safe_visible(&card.preview);
     assert!(
-        shown.contains("<U+000D>") || shown.lines().any(|l| l.starts_with("+import os")),
+        shown.contains("<U+000D>"),
         "the CR is silently dropped:\n{shown}"
     );
     let _ = fs::remove_dir_all(root);
