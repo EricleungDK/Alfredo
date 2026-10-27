@@ -420,7 +420,7 @@ fn clear_starts_this_conversation_fresh_and_keeps_the_model() {
     compact(&mut session, "note");
     session.model = "other-model".into();
     let attempt = session.attempt;
-    session.clear_conversation().unwrap();
+    session.clear_conversation(None).unwrap();
     assert!(session.messages.is_empty() && session.compaction().is_none());
     assert_eq!(session.model, "other-model");
     assert_eq!(session.status, Status::Ready);
@@ -437,11 +437,11 @@ fn clear_refuses_while_a_reply_or_summary_is_running() {
     let mut session = long(1);
     session.insert("go");
     session.begin().unwrap();
-    assert!(session.clear_conversation().is_err());
+    assert!(session.clear_conversation(None).is_err());
     let mut session = long(7);
     session.insert("go");
     session.start_compaction(None, true).unwrap();
-    assert!(session.clear_conversation().is_err());
+    assert!(session.clear_conversation(None).is_err());
 }
 
 #[test]
