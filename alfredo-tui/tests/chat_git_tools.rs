@@ -1159,6 +1159,65 @@ fn git_log_refuses_a_config_include_before_git_runs() {
     }
 }
 
+/// Issue #465 (review): a symlinked hook (`ln -s ../../hook.sh .git/hooks/pre-commit`, common
+/// in setup scripts) is never opened by these calls (hooks are off), so it must not refuse a
+/// valid repository, also from a linked worktree.
+#[test]
+fn a_symlinked_hook_does_not_refuse_a_valid_repository() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("hook.sh"), "#!/bin/sh\n").unwrap();
+    let hooks = repo.root.join(".git/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    std::os::unix::fs::symlink("../../hook.sh", hooks.join("pre-commit")).unwrap();
+    let wt = repo.base.join("wt");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt-branch",
+            wt.to_str().unwrap(),
+        ],
+    );
+    for (root, tool) in [
+        (&repo.root, "git_status"),
+        (&repo.root, "git_log"),
+        (&wt, "git_status"),
+    ] {
+        let output = dispatch_promptly(root, tool);
+        assert!(!output.starts_with("error:"), "{tool}: {output}");
+    }
+}
+
+/// Issue #465 (review): git's fsmonitor socket in a linked worktree's entry stays allowed
+/// while the common directory (and its `worktrees/*` entries) are walked.
+#[test]
+fn the_fsmonitor_socket_in_a_worktree_entry_is_accepted_from_the_main_workspace() {
+    let repo = Repo::new();
+    let wt = repo.base.join("wt");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt-branch",
+            wt.to_str().unwrap(),
+        ],
+    );
+    let _listener = std::os::unix::net::UnixListener::bind(
+        repo.root.join(".git/worktrees/wt/fsmonitor--daemon.ipc"),
+    )
+    .unwrap();
+    for root in [&repo.root, &wt] {
+        let output = dispatch_promptly(root, "git_status");
+        assert!(!output.starts_with("error:"), "{output}");
+    }
+}
+
 /// Issue #461 (6): an oversize gitfile or alternates file says it is too large, not that it
 /// is a FIFO, device or link.
 #[test]
