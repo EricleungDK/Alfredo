@@ -1009,6 +1009,47 @@ fn answer_y(command: &str, escalate: bool, width: u16, height: u16) -> (Option<D
     (answer, text)
 }
 
+/// What a drawn run_command card answers to `y`, `a` and `n` once armed.
+#[derive(Debug)]
+struct KeyProbe {
+    y: Option<Decision>,
+    a: Option<Decision>,
+    n: Option<Decision>,
+    whole: bool,
+    header: bool,
+    text: String,
+}
+
+/// Draws a pending run_command card at `width`x`height`, waits out the arm delay and
+/// tries `y`, `a` then `n` (a refused key leaves the card pending).
+fn probe_keys(command: &str, escalate: bool, width: u16, height: u16) -> KeyProbe {
+    probe_session(shell_session(command, escalate), width, height)
+}
+
+fn probe_session(session: Session, width: u16, height: u16) -> KeyProbe {
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    let start = Instant::now();
+    draw_and_report(&mut terminal, &mut app, start);
+    let later = start + approval::ARM * 2;
+    let text = draw_and_report(&mut terminal, &mut app, later);
+    let session = &mut app.sessions[0];
+    let (whole, header) = (session.approval_whole(), session.approval_header_drawn());
+    let at = later + approval::ARM;
+    let y = session.answer_approval('y', at);
+    let a = session.answer_approval('a', at);
+    let n = session.answer_approval('n', at);
+    KeyProbe {
+        y,
+        a,
+        n,
+        whole,
+        header,
+        text,
+    }
+}
+
 /// Issue #303: every run_command card that fits arms with its header on screen, at the
 /// sizes the 10-21 attempt broke (80x10 armed with the header scrolled off).
 #[test]
@@ -1026,14 +1067,16 @@ fn a_run_command_card_that_fits_is_answered_with_header_and_command_on_screen() 
             assert!(text.contains("y approve"), "{w}x{h}: {text}");
             assert!(text.contains(command.lines().last().unwrap()), "{w}x{h}");
         }
-        // Tiny terminals (80x12 leaves the chat 3 rows; 80x10 fewer): whatever the
-        // draw does, `y` never approves a card whose header is off screen.
+        // Tiny terminals (80x12 leaves the chat 3 rows; 80x10 fewer): the card cannot
+        // be shown whole, so `y` and `a` are refused whatever the draw did.
         for (w, h) in [(80, 12), (80, 10)] {
-            let (answer, text) = answer_y(&command, escalate, w, h);
-            if answer == Some(Decision::Approve) {
-                assert!(text.contains("? Approve run_command"), "{w}x{h}: {text}");
-                assert!(text.contains("y approve"), "{w}x{h}: {text}");
-            }
+            let probe = probe_keys(&command, escalate, w, h);
+            assert_eq!(probe.y, None, "{w}x{h} {command}: {}", probe.text);
+            assert_eq!(probe.a, None, "{w}x{h} {command}: {}", probe.text);
+            assert!(!probe.whole, "{w}x{h} {command}: {}", probe.text);
+            // The header is off screen too, so even `n` waits for a bigger terminal.
+            assert!(!probe.header, "{w}x{h} {command}: {}", probe.text);
+            assert_eq!(probe.n, None, "{w}x{h} {command}: {}", probe.text);
         }
     }
 }
@@ -1047,30 +1090,58 @@ fn a_run_command_card_too_long_to_show_is_deny_only_with_a_note() {
     let wide = "漢字🙂".repeat(300);
     for command in [long, multi, wide] {
         for escalate in [false, true] {
-            for (w, h) in [(80, 24), (80, 12), (100, 24), (80, 40)] {
-                let (answer, text) = answer_y(&command, escalate, w, h);
-                assert_eq!(answer, None, "{w}x{h}: {text}");
-                if h >= 24 {
-                    assert!(text.contains("press n"), "{w}x{h}: {text}");
-                    assert!(text.contains("? Approve run_command"), "{w}x{h}: {text}");
-                }
-                let mut app = App::new("m".into());
-                app.sessions[0] = shell_session(&command, escalate);
-                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-                let start = Instant::now();
-                draw_and_report(&mut terminal, &mut app, start);
-                let later = start + approval::ARM * 2;
-                draw_and_report(&mut terminal, &mut app, later);
-                assert_eq!(app.sessions[0].answer_approval('a', later), None);
-                if h >= 24 {
-                    assert_eq!(
-                        app.sessions[0].answer_approval('n', later),
-                        Some(Decision::Deny),
-                        "{w}x{h}: n still denies"
-                    );
-                }
+            for (w, h) in [(80, 24), (100, 24), (80, 40)] {
+                let probe = probe_keys(&command, escalate, w, h);
+                let text = &probe.text;
+                assert_eq!(probe.y, None, "{w}x{h}: {text}");
+                assert_eq!(probe.a, None, "{w}x{h}: {text}");
+                assert!(!probe.whole && probe.header, "{w}x{h}: {text}");
+                assert!(text.contains("press n"), "{w}x{h}: {text}");
+                assert!(text.contains("? Approve run_command"), "{w}x{h}: {text}");
+                assert_eq!(probe.n, Some(Decision::Deny), "{w}x{h}: n still denies");
             }
+            // 80x12 leaves the chat 3 rows: nothing of the card is answerable.
+            let probe = probe_keys(&command, escalate, 80, 12);
+            assert_eq!(probe.y, None, "80x12: {}", probe.text);
+            assert_eq!(probe.a, None, "80x12: {}", probe.text);
+            assert_eq!(probe.n, None, "80x12: {}", probe.text);
+            assert!(!probe.whole && !probe.header, "80x12: {}", probe.text);
         }
+    }
+}
+
+/// Issue #303: a write_file whose path is wider than the terminal, so the card header
+/// cannot be shown whole, is deny-only: `y` and `a` approve nothing, nothing is written.
+#[test]
+fn a_write_file_card_with_a_very_long_path_is_deny_only_and_writes_nothing() {
+    let path = format!("{}/payload.txt", "dir/".repeat(300));
+    for (w, h) in [(80, 24), (100, 24), (80, 40)] {
+        let root = workspace("longpath");
+        let card = approval::card(
+            &root,
+            &call("write_file", json!({"path": path, "content": "pwn\n"})),
+        )
+        .unwrap();
+        assert!(card.summary.contains("payload.txt"), "card summary");
+        let mut session = Session::new("m".into());
+        session.insert("write it");
+        session.begin().unwrap();
+        let attempt = session.attempt;
+        session.apply(attempt, Update::Admitted);
+        assert!(session.await_approval(attempt, card.clone(), Instant::now()));
+        let probe = probe_session(session, w, h);
+        let text = &probe.text;
+        assert!(text.contains("Approve write_file"), "{w}x{h}: {text}");
+        assert!(text.contains("press n"), "{w}x{h}: {text}");
+        assert!(text.contains("y is off"), "{w}x{h}: {text}");
+        assert!(!text.contains("a always"), "{w}x{h}: {text}");
+        assert!(probe.header && !probe.whole, "{w}x{h}: {text}");
+        assert_eq!(probe.y, None, "{w}x{h}: {text}");
+        assert_eq!(probe.a, None, "{w}x{h}: {text}");
+        assert_eq!(probe.n, Some(Decision::Deny), "{w}x{h}: {text}");
+        // Nothing was approved, so nothing was applied.
+        assert!(!root.join("dir").exists(), "{w}x{h}: wrote under the root");
+        let _ = fs::remove_dir_all(root);
     }
 }
 
