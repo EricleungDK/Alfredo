@@ -423,10 +423,14 @@ pub fn parse_answer(answer: &str) -> Result<FilePlan> {
     })
 }
 
-/// Occurrences of `needle` in `haystack`, overlapping ones included.
+/// Occurrences of `needle` in `haystack`, overlapping ones included, counted up to
+/// 2: callers only need none, one or many, and a full count is quadratic.
 fn occurrences(haystack: &str, needle: &str) -> usize {
     let (mut count, mut from) = (0, 0);
-    while let Some(at) = haystack[from..].find(needle) {
+    while count < 2 {
+        let Some(at) = haystack[from..].find(needle) else {
+            break;
+        };
         count += 1;
         from += at
             + haystack[from + at..]
@@ -442,6 +446,12 @@ fn occurrences(haystack: &str, needle: &str) -> usize {
 fn apply_edit(block: &EditBlock, current: &str) -> Result<String> {
     let shown = shown_path(&block.path);
     let mut content = current.replace("\r\n", "\n");
+    // The prompt shows the file with a newline appended, so a SEARCH may end on the
+    // last line; the appended newline is dropped again so none is invented.
+    let appended = !content.is_empty() && !content.ends_with('\n');
+    if appended {
+        content.push('\n');
+    }
     for (index, (search, replace)) in block.pairs.iter().enumerate() {
         let number = index + 1;
         if search.is_empty() {
@@ -460,12 +470,15 @@ fn apply_edit(block: &EditBlock, current: &str) -> Result<String> {
                     "EDIT for {shown} pair {number}: SEARCH text not found in the current file (\"{excerpt}\"); copy it exactly from the file, including indentation"
                 ))
             }
-            many => {
+            _ => {
                 return Err(format!(
-                    "EDIT for {shown} pair {number}: SEARCH text matches {many} times (\"{excerpt}\"); add neighbouring lines so it matches exactly once"
+                    "EDIT for {shown} pair {number}: SEARCH text matches more than once (\"{excerpt}\"); add neighbouring lines so it matches exactly once"
                 ))
             }
         }
+    }
+    if appended && content.ends_with('\n') {
+        content.pop();
     }
     Ok(content)
 }
@@ -635,16 +648,18 @@ pub fn display_output(text: &str) -> String {
     // Inside a FILE block: content seen yet, a wrapper fence was hidden, and the
     // depth of the file's own fences within it.
     let (mut in_block, mut seen, mut wrapped, mut depth) = (false, false, false, 0usize);
+    // Inside a FILE block EDIT marker lines are file content, not markers.
+    let mut in_file = false;
     for line in text.split_inclusive('\n') {
         let complete = line.ends_with('\n');
         if let Some(path) = file_marker(line) {
             shown.push_str(&format!("▸ {path}\n"));
-            (in_block, seen, wrapped, depth) = (true, false, false, 0);
-        } else if let Some(path) = edit_marker(line) {
+            (in_block, in_file, seen, wrapped, depth) = (true, true, false, false, 0);
+        } else if let Some(path) = edit_marker(line).filter(|_| !in_file) {
             shown.push_str(&format!("▸ {path} (edit)\n"));
             (in_block, seen, wrapped, depth) = (true, false, false, 0);
-        } else if end_marker(line) || line.trim_end() == EDIT_END {
-            in_block = false;
+        } else if end_marker(line) || (!in_file && line.trim_end() == EDIT_END) {
+            (in_block, in_file) = (false, false);
         } else if (!complete && (line.starts_with("===") || partial_fence(line)))
             || (fence_line(line)
                 && hides_fence(in_block, &mut seen, &mut wrapped, &mut depth, line))
@@ -1569,7 +1584,12 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
             Some((kind, end, rest.strip_suffix(" (truncated)")?))
         });
     if let Some((kind, end, path)) = truncated {
-        section.push_str(&format!("The previous response was truncated inside the {kind} block for {path} before its {end} line. Return every changed file completely, each block ending with {end}.\n"));
+        let advice = if kind == "EDIT" {
+            "Return fewer or shorter SEARCH/REPLACE pairs (split a large change over several short pairs), the block ending"
+        } else {
+            "Return every changed file completely, each block ending"
+        };
+        section.push_str(&format!("The previous response was truncated inside the {kind} block for {path} before its {end} line. {advice} with {end}.\n"));
     }
     let output = parent
         .as_ref()
