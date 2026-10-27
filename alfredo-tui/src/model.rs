@@ -14,16 +14,40 @@ pub const OUTPUT_LIMIT: &str = "Conversation output limit reached; run /compact 
 pub const MAX_DRAFT: usize = 16 * 1024;
 const COMMAND_BUDGET_COUNT: usize = 512;
 const COMMAND_BUDGET_BYTES: usize = 512 * 1024;
+/// Largest console sequence a saved command or task receipt may carry.
+const MAX_CONSOLE_SEQUENCE: u64 = 8192;
+const CAPACITY: &str = "Command history capacity reached; start another conversation";
 /// Normalized command JSON plus 1 KiB reserved per command for terminal metadata.
 fn command_budget_use(commands: &[crate::console_command::ConsoleCommand]) -> usize {
-    let mut budgeted = commands.to_vec();
-    for command in &mut budgeted {
-        command.state = crate::console_command::CommandState::Pending;
-        command.attempt = 1;
+    budget_bytes(
+        commands.len(),
+        command_sizes(commands)
+            .iter()
+            .fold(0, |sum, size| sum.saturating_add(*size)),
+    )
+}
+/// The JSON array of `count` commands whose sized lengths add up to `sum`: brackets and
+/// one comma between neighbours.
+fn budget_bytes(count: usize, sum: usize) -> usize {
+    if count == 0 {
+        2
+    } else {
+        sum.saturating_add(count + 1)
     }
-    serde_json::to_vec(&budgeted)
-        .map_or(usize::MAX, |bytes| bytes.len())
-        .saturating_add(commands.len() * 1024)
+}
+/// Each command's normalized JSON length plus its 1 KiB reservation, serialized once.
+fn command_sizes(commands: &[crate::console_command::ConsoleCommand]) -> Vec<usize> {
+    commands
+        .iter()
+        .map(|command| {
+            let mut budgeted = command.clone();
+            budgeted.state = crate::console_command::CommandState::Pending;
+            budgeted.attempt = 1;
+            serde_json::to_vec(&budgeted)
+                .map_or(usize::MAX, |bytes| bytes.len())
+                .saturating_add(1024)
+        })
+        .collect()
 }
 /// Messages that can wait behind a running turn, and their total size (issue #338).
 pub const MAX_QUEUED: usize = 3;
@@ -1447,14 +1471,53 @@ impl Session {
         self.reading.set(reading);
         position
     }
-    fn next_console_sequence(&self) -> u64 {
-        self.task_receipts
+    fn next_console_sequence(&mut self) -> u64 {
+        let next = |session: &Self| {
+            session
+                .task_receipts
+                .iter()
+                .map(|r| r.sequence)
+                .chain(session.commands.iter().map(|c| c.sequence))
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1)
+        };
+        if next(self) > MAX_CONSOLE_SEQUENCE {
+            self.renumber_console_sequences();
+        }
+        next(self)
+    }
+    /// Evictions leave gaps, so the lifetime counter would otherwise reach the cap with
+    /// few commands left. Renumber 1.. in the existing order (parents stay earlier,
+    /// ids are intent hashes and unchanged) and move the reader's command anchor along.
+    fn renumber_console_sequences(&mut self) {
+        let mut old: Vec<u64> = self
+            .task_receipts
             .iter()
             .map(|r| r.sequence)
             .chain(self.commands.iter().map(|c| c.sequence))
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1)
+            .filter(|sequence| *sequence > 0)
+            .collect();
+        old.sort_unstable();
+        let renumbered = |sequence: u64| old.binary_search(&sequence).map_or(0, |at| at as u64 + 1);
+        for reference in &mut self.task_receipts {
+            reference.sequence = renumbered(reference.sequence);
+        }
+        for command in &mut self.commands {
+            command.sequence = renumbered(command.sequence);
+        }
+        self.remap_reading_commands(|sequence| Some(renumbered(sequence)));
+    }
+    /// Move or drop the reader's anchor on a command (`None` drops it).
+    fn remap_reading_commands(&self, map: impl Fn(u64) -> Option<u64>) {
+        let mut reading = self.reading.get();
+        reading.remap_block(|key| match key {
+            crate::reading::BlockKey::Command(sequence) => {
+                map(sequence).map(crate::reading::BlockKey::Command)
+            }
+            other => Some(other),
+        });
+        self.reading.set(reading);
     }
     pub fn commands(&self) -> &[crate::console_command::ConsoleCommand] {
         &self.commands
@@ -1623,15 +1686,16 @@ impl Session {
             return Err("Invalid command intent".into());
         }
         self.commands.push(command);
-        // Only a full budget evicts, and only settled commands; a refusal restores all.
-        let before = (!self.commands_within_budget()).then(|| self.commands.clone());
-        if before.is_some() {
-            self.evict_settled_commands();
-        }
-        if !self.valid_commands(17) {
-            self.commands = before.unwrap_or_else(|| self.commands.clone());
+        // Everything but capacity is judged on the full history, before any eviction, so
+        // a duplicate correlation is refused at the budget exactly as under it.
+        if !self.valid_command_structure(17) {
             self.commands.pop();
-            return Err("Command history capacity reached; start another conversation".into());
+            return Err(CAPACITY.into());
+        }
+        // Only a full budget evicts, and only settled commands; a refusal drops nothing.
+        if !self.commands_within_budget() && !self.evict_settled_commands() {
+            self.commands.pop();
+            return Err(CAPACITY.into());
         }
         if reveal {
             self.scroll.set(0);
@@ -1707,6 +1771,10 @@ impl Session {
         }
     }
     pub(crate) fn valid_commands(&self, schema: u32) -> bool {
+        self.valid_command_structure(schema) && self.commands_within_budget()
+    }
+    /// Every command rule except the size budget.
+    fn valid_command_structure(&self, schema: u32) -> bool {
         use std::collections::BTreeSet;
         if (schema < 10 && !self.commands.is_empty())
             || (schema < 12
@@ -1761,11 +1829,11 @@ impl Session {
             || self
                 .commands
                 .iter()
-                .any(|c| !c.valid(self.messages.len()) || c.sequence > 8192)
+                .any(|c| !c.valid(self.messages.len()) || c.sequence > MAX_CONSOLE_SEQUENCE)
             || self
                 .task_receipts
                 .iter()
-                .any(|reference| reference.sequence > 8192)
+                .any(|reference| reference.sequence > MAX_CONSOLE_SEQUENCE)
         {
             return false;
         }
@@ -1869,7 +1937,7 @@ impl Session {
         }) {
             return false;
         }
-        self.commands_within_budget()
+        true
     }
     /// The command-history budget alone: 512 commands and 512 KiB, counting terminal
     /// metadata once against an immutable normalized base.
@@ -1881,60 +1949,71 @@ impl Session {
     pub fn command_history_warning(&self) -> Option<String> {
         (self.commands.len() * 5 >= COMMAND_BUDGET_COUNT * 4
             || command_budget_use(&self.commands) * 5 >= COMMAND_BUDGET_BYTES * 4)
-            .then(|| "Command history is 80% full; the oldest settled commands are dropped at the limit. /clear starts a fresh history".into())
+            .then(|| "Command history 80% full; /clear starts a fresh one".into())
     }
-    /// Drop the fewest oldest settled commands that bring the history within budget.
-    /// Live (Pending, Submitted), selection, wayfinder, generated-plan and still-needed
-    /// parent commands stay, so a restored Unknown or Refused entry is the usual victim.
-    fn evict_settled_commands(&mut self) {
-        let candidates: Vec<usize> = (0..self.commands.len())
-            .filter(|&index| self.evictable(index))
-            .collect();
-        let kept = |count: usize| -> Vec<_> {
-            let dropped = &candidates[..count];
-            let mut index = 0;
-            self.commands
-                .iter()
-                .filter(|_| {
-                    index += 1;
-                    !dropped.contains(&(index - 1))
-                })
-                .cloned()
-                .collect()
-        };
-        let fits = |count: usize| {
-            let commands = kept(count);
-            command_budget_use(&commands) <= COMMAND_BUDGET_BYTES
-                && commands.len() <= COMMAND_BUDGET_COUNT
-        };
-        if !fits(candidates.len()) {
-            return;
-        }
-        let (mut low, mut high) = (0, candidates.len());
-        while low < high {
-            let middle = (low + high) / 2;
-            if fits(middle) {
-                high = middle;
-            } else {
-                low = middle + 1;
+    /// Drop the fewest oldest settled commands that bring the history within budget, and
+    /// say whether that was possible. Live (Pending, Submitted), selection, wayfinder,
+    /// generated-plan and still-needed parent commands stay, so a restored Unknown or
+    /// Refused entry is the usual victim. The command just admitted (last) stays too.
+    /// Sizes are measured once per command, then the victims are found in one scan, so the
+    /// cost does not grow with the number evicted.
+    fn evict_settled_commands(&mut self) -> bool {
+        let sizes = command_sizes(&self.commands);
+        let (mut left, mut sum) = (
+            self.commands.len(),
+            sizes.iter().fold(0usize, |a, b| a.saturating_add(*b)),
+        );
+        let latest_dispatch = self.commands.iter().rposition(|other| {
+            matches!(
+                other.state,
+                crate::console_command::CommandState::Control {
+                    outcome: crate::control_command::Outcome::DispatchChanged { .. }
+                }
+            )
+        });
+        let mut dropped = Vec::new();
+        for (index, size) in sizes
+            .iter()
+            .enumerate()
+            .take(self.commands.len().saturating_sub(1))
+        {
+            if left <= COMMAND_BUDGET_COUNT && budget_bytes(left, sum) <= COMMAND_BUDGET_BYTES {
+                break;
+            }
+            if self.evictable(index, latest_dispatch) {
+                dropped.push(index);
+                left -= 1;
+                sum = sum.saturating_sub(*size);
             }
         }
-        self.commands = kept(low);
+        if left > COMMAND_BUDGET_COUNT || budget_bytes(left, sum) > COMMAND_BUDGET_BYTES {
+            return false;
+        }
+        let kept: Vec<_> = (0..self.commands.len())
+            .filter(|index| dropped.binary_search(index).is_err())
+            .map(|index| self.commands[index].clone())
+            .collect();
+        let sequences: Vec<u64> = dropped
+            .iter()
+            .map(|index| self.commands[*index].sequence)
+            .collect();
+        let before = std::mem::replace(&mut self.commands, kept);
+        if !self.commands_within_budget() {
+            self.commands = before;
+            return false;
+        }
+        // A reader anchored to an evicted command must not keep a dangling anchor.
+        self.remap_reading_commands(|sequence| {
+            (!sequences.contains(&sequence)).then_some(sequence)
+        });
+        true
     }
-    fn evictable(&self, index: usize) -> bool {
+    fn evictable(&self, index: usize, latest_dispatch: Option<usize>) -> bool {
         use crate::{
             command_intent::Intent, console_command::CommandState, control_command::Outcome,
             planner_command::Outcome as Planned,
         };
         let command = &self.commands[index];
-        let latest_dispatch = self.commands.iter().rposition(|other| {
-            matches!(
-                other.state,
-                CommandState::Control {
-                    outcome: Outcome::DispatchChanged { .. }
-                }
-            )
-        });
         let enabling = latest_dispatch == Some(index)
             && matches!(
                 command.state,
@@ -1983,7 +2062,7 @@ impl Session {
             return false;
         }
         reference.sequence = self.next_console_sequence();
-        if reference.sequence > 8192 {
+        if reference.sequence > MAX_CONSOLE_SEQUENCE {
             return false;
         }
         self.task_receipts.push(reference);
@@ -2403,6 +2482,19 @@ pub struct App {
 }
 
 impl App {
+    /// Put the command-history warning after the notice already shown (the `/go`
+    /// acknowledgement) instead of replacing it, once per notice.
+    pub fn append_history_warning(&mut self, session: usize) {
+        if let Some(warning) = self.sessions[session].command_history_warning() {
+            if !self.notice.contains(&warning) {
+                self.notice = if self.notice.is_empty() {
+                    warning
+                } else {
+                    format!("{} · {warning}", self.notice)
+                };
+            }
+        }
+    }
     /// A card was raised in chat `index`. Only the selected chat shows it, so a
     /// background chat gets a notice (issue #273).
     pub fn note_approval_wait(&mut self, index: usize) {
