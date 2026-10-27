@@ -44,20 +44,31 @@ pub(crate) fn path_valid(path: &str) -> bool {
 /// `/`-separated path in any case; every rule is tested on each lowercased path component,
 /// so a directory such as `.aws/` or `.ssh/` excludes everything under it.
 ///
-/// - Directories: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`.
-/// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `secrets.y*ml`
-///   (starts `secrets.y`, ends `ml`).
+/// - Directories: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.azure`, `.password-store`
+///   (everything under them), and `gh` under `.config` (`.config/gh`).
+/// - Directory-scoped files: `.docker/config.json`, `.cargo/credentials` and
+///   `.cargo/credentials.toml`, `.gem/credentials`. Only those names: `.docker/daemon.json`
+///   and `.cargo/config.toml` stay readable.
+/// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
+///   `application_default_credentials.json`, `secrets.y*ml` (starts `secrets.y`, ends `ml`).
 /// - Name prefixes: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa` (private keys and
-///   their `.pub`/backup siblings; a name that merely starts so is refused too), and
-///   `credentials` with a `.json` ending (`credentials*.json`).
+///   their `.pub`/backup siblings; a name that merely starts so is refused too),
+///   `credentials` with a `.json` ending (`credentials*.json`), `service-account` and
+///   `client_secret` with a `.json` ending (`service-account*.json`, `client_secret*.json`).
 /// - Suffixes: `.pem`, `.key`, `.p12`, `.pfx`, `.env`, `.keystore`, `.jks`, `.tfvars`,
-///   `.tfvars.json`.
+///   `.tfvars.json`, `.tfstate`, `.tfstate.backup`, `.p8`, `.ppk`, `.gpg`.
 ///
 /// Bare `credentials` and `secrets.*` names other than the two above stay readable.
+/// Directory-scoped rules look at the component directly above the name, so a nested
+/// `sub/.docker/config.json` is refused too.
 pub(crate) fn secret(path: &str) -> bool {
-    path.split('/').any(|raw| {
-        let lower = raw.to_lowercase();
-        let part = lower.as_str();
+    let lower = path.to_lowercase();
+    let parts: Vec<&str> = lower.split('/').collect();
+    parts.iter().enumerate().any(|(index, &part)| {
+        // The component directly above this one, for the rules scoped to a directory.
+        let parent = index.checked_sub(1).map(|up| parts[up]);
+        let json = Path::new(part).extension().is_some_and(|ext| ext == "json");
         matches!(
             part,
             ".git"
@@ -65,17 +76,33 @@ pub(crate) fn secret(path: &str) -> bool {
                 | ".gnupg"
                 | ".aws"
                 | ".kube"
+                | ".azure"
+                | ".password-store"
                 | ".npmrc"
                 | ".netrc"
                 | ".pgpass"
                 | ".git-credentials"
-        ) || part.starts_with(".env")
+                | ".pypirc"
+                | ".htpasswd"
+                | ".vault-token"
+                | ".s3cfg"
+                | ".boto"
+                | ".dockercfg"
+                | "kubeconfig"
+                | "application_default_credentials.json"
+        ) || (parent == Some(".config") && part == "gh")
+            || (parent == Some(".docker") && part == "config.json")
+            || (parent == Some(".cargo") && matches!(part, "credentials" | "credentials.toml"))
+            || (parent == Some(".gem") && part == "credentials")
+            || part.starts_with(".env")
             || (part.starts_with("secrets.y") && part.ends_with("ml"))
             || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
                 .iter()
                 .any(|prefix| part.starts_with(prefix))
-            || (part.starts_with("credentials")
-                && Path::new(part).extension().is_some_and(|ext| ext == "json"))
+            || (["credentials", "service-account", "client_secret"]
+                .iter()
+                .any(|prefix| part.starts_with(prefix))
+                && json)
             || [
                 ".pem",
                 ".key",
@@ -86,6 +113,11 @@ pub(crate) fn secret(path: &str) -> bool {
                 ".jks",
                 ".tfvars",
                 ".tfvars.json",
+                ".tfstate",
+                ".tfstate.backup",
+                ".p8",
+                ".ppk",
+                ".gpg",
             ]
             .iter()
             .any(|suffix| part.ends_with(suffix))

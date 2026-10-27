@@ -229,7 +229,10 @@ fn common_credential_files_are_excluded_from_read_tools() {
             readable.push(n);
         }
     }
-    assert!(readable.is_empty(), "readable credential files: {readable:?}");
+    assert!(
+        readable.is_empty(),
+        "readable credential files: {readable:?}"
+    );
 }
 
 /// Issue #471 negative guard: ordinary files whose names only look like the new
@@ -285,8 +288,18 @@ fn git_commit_refuses_the_issue_471_credential_files() {
             .card("git_commit", json!({"message": "add it", "files": [path]}))
             .unwrap_err();
         assert!(error.contains(path), "git_commit {path}: {error}");
-        assert!(error.contains("by hand"), "git_commit {path}: {error}");
+        assert!(
+            error.contains("by hand") || error.contains("excluded"),
+            "git_commit {path}: {error}"
+        );
     }
+    // Staged before the preview: refused by the staged-name check (refuse_secrets).
+    git(&repo.root, &["add", "-f", "terraform.tfstate"]);
+    let staged = repo
+        .card("git_commit", json!({"message": "oops"}))
+        .unwrap_err();
+    assert!(staged.contains("terraform.tfstate"), "{staged}");
+    assert!(staged.contains("by hand"), "{staged}");
 }
 
 /// Detection: the planner's named-file reader and planning context never carry
