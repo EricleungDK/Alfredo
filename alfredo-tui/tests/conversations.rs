@@ -1805,6 +1805,150 @@ fn the_lifetime_sequence_also_renumbers_for_a_task_receipt() {
     assert_saved_history_loads(&app);
 }
 
+/// An app whose first session holds one task receipt per entry of `receipts` and one
+/// refused command per entry of `commands`, saved and restored carrying exactly those
+/// sequence numbers (a receipt at 0 is a legacy one).
+fn app_with_sequences(receipts: &[u64], commands: &[u64], tag: &str) -> App {
+    use alfredo_tui::{console_command::CommandState, model::TaskReceiptRef};
+    let mut app = App::new("fixture".into());
+    for (number, _) in receipts.iter().enumerate() {
+        assert!(app.sessions[0].observe_task_receipt(TaskReceiptRef {
+            sequence: 0,
+            after_messages: 0,
+            revision: number as u64 + 1,
+            task: 1,
+            correlation: format!("{tag}-receipt-{number}"),
+        }));
+    }
+    for number in 0..commands.len() {
+        let id = app.sessions[0]
+            .submit_command(
+                "/task Settled".into(),
+                command_intent(&format!("{tag}-{number}")),
+            )
+            .unwrap();
+        app.sessions[0].set_command_state(
+            &id,
+            CommandState::Refused {
+                reason: "settled".into(),
+            },
+        );
+    }
+    let mut value = serde_json::to_value(Snapshot::capture(&app, "default")).unwrap();
+    for (entry, sequence) in value["sessions"][0]["task_receipts"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(receipts)
+    {
+        entry["sequence"] = (*sequence).into();
+    }
+    for (entry, sequence) in value["sessions"][0]["commands"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(commands)
+    {
+        entry["sequence"] = (*sequence).into();
+    }
+    serde_json::from_value::<Snapshot>(value).unwrap().restore()
+}
+
+fn sequences(app: &App) -> (Vec<u64>, Vec<u64>) {
+    (
+        app.sessions[0]
+            .task_receipts()
+            .iter()
+            .map(|r| r.sequence)
+            .collect(),
+        app.sessions[0]
+            .commands()
+            .iter()
+            .map(|c| c.sequence)
+            .collect(),
+    )
+}
+
+#[test]
+fn a_refused_admission_at_the_cap_changes_no_number_receipt_or_anchor() {
+    use alfredo_tui::reading::{Block, BlockKey};
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = app_with_sequences(&[8192], &[8190, 8191], "refused-cap");
+    app.sessions[0].scroll.set(10);
+    app.sessions[0].reading_position_blocks(
+        &[1; 34],
+        5,
+        &[Block {
+            key: BlockKey::Command(8190),
+            start: 0,
+            len: 34,
+        }],
+    );
+    let before = serde_json::to_value(&app.sessions[0]).unwrap();
+    assert!(before["reading"]["block_anchor"].is_object(), "{before}");
+    // The same intent again is refused for a reason that is not capacity.
+    assert!(app.sessions[0]
+        .submit_autopilot_command("/task Settled".into(), command_intent("refused-cap-0"))
+        .is_err());
+    assert_eq!(serde_json::to_value(&app.sessions[0]).unwrap(), before);
+    // A capacity refusal must not leave a renumbering behind either.
+    let mut live = App::new("fixture".into());
+    for number in 0..2000 {
+        let intent = command_intent(&format!("live-cap-{number}"));
+        if live.sessions[0]
+            .submit_command("/task Live".into(), intent)
+            .is_err()
+        {
+            break;
+        }
+    }
+    let mut value = serde_json::to_value(Snapshot::capture(&live, "default")).unwrap();
+    let count = value["sessions"][0]["commands"].as_array().unwrap().len() as u64;
+    for (number, entry) in value["sessions"][0]["commands"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        entry["sequence"] = (8192 - count + 1 + number as u64).into();
+    }
+    value["sessions"][0]["task_receipts"] = serde_json::json!([]);
+    let mut live = serde_json::from_value::<Snapshot>(value).unwrap().restore();
+    // A restart turns live commands into settled Unknown ones; make them live again.
+    let ids: Vec<String> = live.sessions[0]
+        .commands()
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    for id in &ids {
+        live.sessions[0].set_command_state(id, alfredo_tui::console_command::CommandState::Pending);
+    }
+    let held = serde_json::to_value(&live.sessions[0]).unwrap();
+    assert!(live.sessions[0]
+        .submit_command("/task Over".into(), command_intent("over-capacity"))
+        .is_err());
+    assert_eq!(serde_json::to_value(&live.sessions[0]).unwrap(), held);
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    assert!(store.load().unwrap().is_some());
+}
+
+#[test]
+fn renumbering_keeps_interleaved_receipts_in_order_and_legacy_zero_at_zero() {
+    let mut app = app_with_sequences(&[5, 20, 8190], &[10, 30, 8192], "interleaved");
+    app.sessions[0]
+        .submit_autopilot_command("/task Next".into(), command_intent("interleaved-next"))
+        .unwrap();
+    assert_eq!(sequences(&app), (vec![1, 3, 5], vec![2, 4, 6, 7]));
+    assert_saved_history_loads(&app);
+    let mut legacy = app_with_sequences(&[0, 3], &[4, 8192], "legacy");
+    legacy.sessions[0]
+        .submit_autopilot_command("/task Next".into(), command_intent("legacy-next"))
+        .unwrap();
+    assert_eq!(sequences(&legacy), (vec![0, 1], vec![2, 3, 4]));
+    assert_saved_history_loads(&legacy);
+}
+
 fn scope_intent(correlation: &str, prompt: &str) -> alfredo_tui::command_intent::Intent {
     use alfredo_tui::understanding::{Action, Flow, Mode, Request};
     alfredo_tui::command_intent::Intent::Scope {

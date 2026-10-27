@@ -9,4 +9,5 @@
   headless 80% check runs only when a command count changes. An evicted command no longer
   leaves the reader's scroll anchor dangling. The `/go` acknowledgement stays in the
   footer beside the 80% warning, which is now shorter (`Command history 80% full; /clear
-  starts a fresh one`).
+  starts a fresh one`). Command numbers can change when the history renumbers at the
+  cap, so an older `/retry-command` or "command #N" notice may name a different command.

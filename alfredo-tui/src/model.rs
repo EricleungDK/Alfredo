@@ -1471,21 +1471,20 @@ impl Session {
         self.reading.set(reading);
         position
     }
+    fn next_sequence_value(&self) -> u64 {
+        self.task_receipts
+            .iter()
+            .map(|r| r.sequence)
+            .chain(self.commands.iter().map(|c| c.sequence))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
     fn next_console_sequence(&mut self) -> u64 {
-        let next = |session: &Self| {
-            session
-                .task_receipts
-                .iter()
-                .map(|r| r.sequence)
-                .chain(session.commands.iter().map(|c| c.sequence))
-                .max()
-                .unwrap_or(0)
-                .saturating_add(1)
-        };
-        if next(self) > MAX_CONSOLE_SEQUENCE {
+        if self.next_sequence_value() > MAX_CONSOLE_SEQUENCE {
             self.renumber_console_sequences();
         }
-        next(self)
+        self.next_sequence_value()
     }
     /// Evictions leave gaps, so the lifetime counter would otherwise reach the cap with
     /// few commands left. Renumber 1.. in the existing order (parents stay earlier,
@@ -1661,7 +1660,32 @@ impl Session {
             crate::console_command::CommandState::Selection { outcome },
         )
     }
+    /// Admit a command; a refusal leaves commands, task receipts and the reader's
+    /// anchor exactly as found, even when the lifetime numbers were renumbered for it.
     fn admit_command(
+        &mut self,
+        text: String,
+        intent: crate::command_intent::Intent,
+        reveal: bool,
+        after_messages: Option<usize>,
+        state: crate::console_command::CommandState,
+    ) -> Result<String, String> {
+        let saved = (self.next_sequence_value() > MAX_CONSOLE_SEQUENCE).then(|| {
+            (
+                self.commands.clone(),
+                self.task_receipts.clone(),
+                self.reading.get(),
+            )
+        });
+        let admitted = self.admit_command_numbered(text, intent, reveal, after_messages, state);
+        if let (Err(_), Some((commands, receipts, reading))) = (&admitted, saved) {
+            self.commands = commands;
+            self.task_receipts = receipts;
+            self.reading.set(reading);
+        }
+        admitted
+    }
+    fn admit_command_numbered(
         &mut self,
         text: String,
         intent: crate::command_intent::Intent,
