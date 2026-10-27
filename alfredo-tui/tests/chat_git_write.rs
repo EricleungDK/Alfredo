@@ -857,6 +857,70 @@ fn a_merge_card_shows_a_deep_long_path_whole_and_is_deny_only_when_it_cannot_fit
     assert_eq!(repo.head(), head, "nothing was merged");
 }
 
+/// Commits `files` (path, content) on a branch `name` off main and returns to main.
+fn branch_with_paths(repo: &Repo, name: &str, files: &[String]) {
+    git(&repo.root, &["checkout", "-q", "-b", name]);
+    for file in files {
+        let target = repo.root.join(file);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, "x\n").unwrap();
+    }
+    git(&repo.root, &["add", "."]);
+    git(&repo.root, &["commit", "-q", "-m", "paths"]);
+    git(&repo.root, &["checkout", "-q", "main"]);
+}
+
+/// Issue #269 (round 3): a file list git prints past the read limit was cut silently, so
+/// the payload files after the long lines never reached the card.
+#[test]
+fn a_merge_file_list_past_the_read_limit_never_hides_the_files_after_it() {
+    let repo = Repo::new();
+    let part = format!("a{}", "\u{301}".repeat(124));
+    let deep = vec![part; 14].join("/");
+    let mut files: Vec<String> = (0..12).map(|i| format!("{i:02}{deep}/f")).collect();
+    files.push("zz/.github/workflows/ci.yml".into());
+    files.push("zz-payload.sh".into());
+    branch_with_paths(&repo, "alfredo/long", &files);
+    let head = repo.head();
+    match repo.card("git_merge", json!({"source": "alfredo/long"})) {
+        Err(_) => {}
+        Ok(card) => {
+            assert!(card.preview.contains("zz-payload.sh"), "payload hidden");
+            assert!(card.preview.contains("zz/.github/workflows/ci.yml"));
+            let (y, a, _, whole) = probe_card(card, 80, 24);
+            assert!(!whole);
+            assert_eq!((y, a), (None, None));
+        }
+    }
+    assert_eq!(repo.head(), head);
+}
+
+/// Issue #269 (round 3): git also shortens a name to `.../` when control bytes widen it.
+#[test]
+fn a_merge_path_full_of_control_bytes_keeps_its_directory_on_the_card() {
+    let repo = Repo::new();
+    let part = "\u{1}".repeat(250);
+    let path = format!(".github/workflows/{part}/{part}/{part}/{part}");
+    branch_with_paths(&repo, "alfredo/ctl", &[path]);
+    let head = repo.head();
+    {
+        let card = repo
+            .card("git_merge", json!({"source": "alfredo/ctl"}))
+            .unwrap();
+        assert!(
+            card.preview.contains(".github/workflows/"),
+            "{}",
+            card.preview
+        );
+        assert!(!card.preview.contains(".../"), "{}", card.preview);
+        assert!(
+            !card.preview.contains('\u{1}'),
+            "raw control byte on the card"
+        );
+    }
+    assert_eq!(repo.head(), head);
+}
+
 #[test]
 fn git_and_push_cards_render_their_effect_and_push_is_distinct() {
     let repo = Repo::new().with_remote();

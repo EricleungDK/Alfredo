@@ -855,25 +855,28 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
         ],
     )?;
     let three = format!("HEAD...{source}");
-    let files = git_read::git(
+    // `--numstat -z` names every path whole (`--stat` shortens a long or control-byte
+    // name to `.../`), and `full` refuses a listing git printed past the read limit
+    // rather than trusting its first bytes (issue #269).
+    let raw = full(
         root,
         &[
             "diff",
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
-            // Wide enough that git never shortens a path to `.../ci.yml`: the owner must
-            // see which directory each merged file lands in (issue #269).
-            "--stat=4096,4000",
-            "--stat-graph-width=20",
+            "--no-renames",
+            "--numstat",
+            "-z",
             "--end-of-options",
             &three,
             "--",
         ],
     )?;
+    let files = merge_file_list(&raw);
     refuse_long_list(
         "merge file list",
-        files.trim_end().lines().count(),
+        files.lines().count(),
         "merge a smaller branch, or land the work in smaller pieces",
     )?;
     Ok(MergePlan {
@@ -881,8 +884,47 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
         target: current,
         count,
         commits: commits.trim_end().to_string(),
-        files: files.trim_end().to_string(),
+        files,
     })
+}
+
+/// One row per changed file, `path | +added -deleted`, and a count row. Names are shown
+/// whole with control and invisible characters escaped, so a card row is what the path is.
+fn merge_file_list(raw: &str) -> String {
+    let mut rows = Vec::new();
+    for entry in raw.split('\0').filter(|entry| !entry.is_empty()) {
+        let mut parts = entry.splitn(3, '\t');
+        let (added, deleted, path) = (
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or(""),
+        );
+        let counts = if added == "-" {
+            "binary".to_string()
+        } else {
+            format!("+{added} -{deleted}")
+        };
+        rows.push(format!("{} | {counts}", visible_name(path)));
+    }
+    let count = rows.len();
+    rows.push(format!(
+        "{count} file{} changed",
+        if count == 1 { "" } else { "s" }
+    ));
+    rows.join("\n")
+}
+
+/// A path with control characters written as `\xNN` and invisible ones as `<U+XXXX>`.
+fn visible_name(path: &str) -> String {
+    path.chars()
+        .map(|c| {
+            if c.is_control() {
+                format!("\\x{:02x}", c as u32)
+            } else {
+                crate::dashboard::safe_visible(&c.to_string())
+            }
+        })
+        .collect()
 }
 
 /// Refuses a card list over [`MAX_CARD_LINES`]: the owner would approve lines the card
