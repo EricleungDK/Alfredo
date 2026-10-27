@@ -77,16 +77,16 @@ pub fn card_hidden(c: char) -> bool {
 }
 
 /// Like [`safe`], but a character that [`card_hidden`] flags is shown as `<U+XXXX>`
-/// instead of drawn, so an approval card never shows other text than runs (issue #305).
-/// A carriage return is shown too: Python, Node and YAML read a bare CR as a line break,
-/// so a hidden second statement must be visible (issue #468). Text, CJK, accents and emoji
-/// are unchanged.
+/// instead of drawn or dropped, so an approval card never shows other text than the bytes
+/// hold (issues #305, #468). That covers every C0/C1 control except newline and tab, so a
+/// bare CR (Python, Node and YAML read it as a line break) and an ESC never vanish.
+/// Text, CJK, accents and emoji are unchanged.
 pub fn safe_visible(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         if c == '\n' || c == '\t' || !card_hidden(c) {
             out.push(c);
-        } else if c == '\r' || !c.is_control() {
+        } else {
             out.push_str(&format!("<U+{:04X}>", c as u32));
         }
     }
@@ -606,7 +606,7 @@ mod visible_tests {
     fn format_characters_show_as_code_points_and_text_is_unchanged() {
         assert_eq!(
             safe_visible("a\u{202E}b\u{200B}c\u{E0041}\u{7}d"),
-            "a<U+202E>b<U+200B>c<U+E0041>d"
+            "a<U+202E>b<U+200B>c<U+E0041><U+0007>d"
         );
         let plain = "你好 café 🙂\n\tx";
         assert_eq!(safe_visible(plain), plain);

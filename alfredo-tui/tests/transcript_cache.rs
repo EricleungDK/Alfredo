@@ -104,7 +104,9 @@ fn scenario() -> Vec<String> {
 /// to four spaces (the golden had it vanish);
 /// re-captured for #399, which adds the `Ctrl+R retries` footer hint to the two failed-turn frames;
 /// re-captured for #393, which widens the chat footer's scroll hint to `PgUp/Dn/Home/End scroll`
-/// (the changed frames are the wide ones that show that hint; bodies are unchanged).
+/// (the changed frames are the wide ones that show that hint; bodies are unchanged);
+/// re-captured for #468 and #436: ESC and BEL in message 1 now show as `<U+001B>` and
+/// `<U+0007>` (controls are shown as code points), in the three frames that show that line.
 const GOLDEN: [&str; 21] = [
     "79e33b494ca7e0b0cb7efaab742759b360f99eee302a32277dc3072722b42b53",
     "d10d31cdc917e429a66da765248b31f13eed56bef302b23ce67adeef890a560a",
@@ -117,9 +119,9 @@ const GOLDEN: [&str; 21] = [
     "36846bf02582e75bf51e282bab99b4e75844967430d9f7507aeff9fea813fbd7",
     "fc4ca5b9376d952cbcf62f5e9fbb371c58c6e087223afd22f605894cf92a6cd7",
     "fc4ca5b9376d952cbcf62f5e9fbb371c58c6e087223afd22f605894cf92a6cd7",
-    "bfbbefefaaff5d19f25d0c8765b289619655e24648378a3206a689644a63fb39",
-    "aa6a34899781549760aa6bf14e88ea43b7f79b3584069a44a8c9b324360e241c",
-    "88fdba48d3cad1878c13c2b654f1e4303189df075d2b4c5e1dfa020e4a73184f",
+    "bbf69a63d98905924d0ce3c009d76e8623874e75457344bce82efb1d948429b6",
+    "3d898a4d31d2001109a6c08ca03481704939276a3ecc1015f0bfc8a9c0836d70",
+    "2a3b86b03b85ef7a357e80bb37fbcf46c5dd0422c005af241f17f6c4334eab60",
     "79e33b494ca7e0b0cb7efaab742759b360f99eee302a32277dc3072722b42b53",
     "67e61da96f70b321c2c04f48f2143c92268b82e19dff3bc4ed6d271c7eac2474",
     "27cbd2754954363982606a6a6fe9482ad1ac544d75073539149b60ffdf608378",
@@ -501,4 +503,22 @@ fn hidden_characters_beside_bold_markers_keep_the_bold() {
             "{line:?}: {bold:?} not bold"
         );
     }
+}
+
+/// Issue #436 (guard): a user draft is shown through the same helper as replies, and CJK,
+/// accents, emoji and tab expansion must render exactly as before.
+#[test]
+fn a_user_draft_with_cjk_accents_emoji_and_tabs_renders_unchanged() {
+    let app = chat(&[("user", "你好 café 🙂\n\tx"), (BODY, "ok")]);
+    let buffer = draw_buffer(&app, 60, 30);
+    let text = row_text(&buffer).join("\n");
+    assert!(text.contains('你') && text.contains("café 🙂"), "{text}");
+    assert!(
+        text.contains("    x"),
+        "tab expanded to the next stop: {text}"
+    );
+    assert!(
+        !text.contains("<U+"),
+        "nothing escaped in plain text: {text}"
+    );
 }
