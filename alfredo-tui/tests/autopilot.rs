@@ -3714,6 +3714,53 @@ fn dirty_working_tree_warns_at_start_and_in_the_summary_without_touching_it() {
     assert!(reopened.report().unwrap().contains(&warning));
 }
 
+/// Issue #470: `/go` start checks uncommitted changes, and a nested gitfile to a FIFO makes
+/// `git status` block forever. The start must return within its deadline, and its notice
+/// must name the timeout instead of hanging or reporting a clean tree.
+#[test]
+fn go_start_names_the_timeout_when_git_status_blocks_on_a_fifo() {
+    let (fifo_tx, fifo_rx) = std::sync::mpsc::channel();
+    let (notice_tx, notice_rx) = std::sync::mpsc::channel();
+    // Everything with a Drop or a runtime lives on this thread, so a hung start can be
+    // abandoned by the test thread without leaking state into the assertions.
+    thread::spawn(move || {
+        let fixture = Fixture::new();
+        let fifo_dir = fixture.workspace.join("fifodir");
+        fs::create_dir_all(&fifo_dir).unwrap();
+        let fifo = fifo_dir.join("HEAD");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        fs::create_dir_all(fixture.workspace.join("sub")).unwrap();
+        fs::write(fixture.workspace.join("sub/.git"), "gitdir: ../fifodir\n").unwrap();
+        fifo_tx.send(fifo).unwrap();
+        let server = one_good_task();
+        let runtime = Runtime::new().unwrap();
+        let control = control(&fixture, &server, &runtime);
+        let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+        let _ = notice_tx.send(autopilot.start("Answer", "fixture", 1, &control));
+    });
+    let fifo = fifo_rx.recv().unwrap();
+    let received = notice_rx.recv_timeout(Duration::from_secs(40));
+    if received.is_err() {
+        // Unblock the stuck git (its FIFO open now has a writer) so no child is left behind.
+        let unblock = fifo.clone();
+        thread::spawn(move || {
+            let _ = fs::OpenOptions::new().write(true).open(unblock);
+        });
+    }
+    let notice = received
+        .expect("/go start did not return within 40 s: git status hung on the FIFO")
+        .expect("/go still starts with an unchecked tree");
+    assert!(notice.starts_with(START_NOTICE), "{notice}");
+    assert!(
+        notice.contains("did not answer within 15 s"),
+        "the start notice must name the timeout: {notice}"
+    );
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Loop {
     None,
