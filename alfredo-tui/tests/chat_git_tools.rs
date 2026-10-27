@@ -1159,6 +1159,40 @@ fn git_log_refuses_a_config_include_before_git_runs() {
     }
 }
 
+/// Issue #465 (mutation review): the include refusal says so, and a config git cannot read
+/// at all fails closed with its own message rather than the include one.
+#[test]
+fn the_include_refusal_and_the_unreadable_config_refusal_are_told_apart() {
+    let repo = Repo::new();
+    let mut config = fs::read_to_string(repo.root.join(".git/config")).unwrap();
+    config.push_str("[include]\n\tpath = /nonexistent/x\n");
+    fs::write(repo.root.join(".git/config"), &config).unwrap();
+    let output = dispatch_promptly(&repo.root, "git_log");
+    assert!(
+        output.starts_with("error:")
+            && output.contains("includes another file")
+            && !output.contains("cannot be read or checked"),
+        "{output}"
+    );
+
+    for broken in [
+        "[include\n\tpath = /nonexistent/x\n",
+        "[include]\n\tpath = /x\n[broken\n",
+    ] {
+        let repo = Repo::new();
+        let mut config = fs::read_to_string(repo.root.join(".git/config")).unwrap();
+        config.push_str(broken);
+        fs::write(repo.root.join(".git/config"), config).unwrap();
+        let output = dispatch_promptly(&repo.root, "git_log");
+        assert!(
+            output.starts_with("error:")
+                && output.contains("cannot be read or checked for includes")
+                && !output.contains("includes another file"),
+            "{broken:?}: {output}"
+        );
+    }
+}
+
 /// Issue #465 (review): a symlinked hook (`ln -s ../../hook.sh .git/hooks/pre-commit`, common
 /// in setup scripts) is never opened by these calls (hooks are off), so it must not refuse a
 /// valid repository, also from a linked worktree.
