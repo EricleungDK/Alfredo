@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
 
 /// Largest file write_file or edit_file produces or edits, in bytes.
-const MAX_FILE: usize = 1024 * 1024;
+pub(crate) const MAX_FILE: usize = 1024 * 1024;
 /// Most lines an approval card's diff may hold (issue #269). The count is every line of
 /// the diff text: the `@@` header, `-`/`+` lines, line-ending notes and the
 /// `new directories:` line. A change over it is refused before any card is shown, so
@@ -91,6 +91,24 @@ pub(crate) fn fingerprint(
             }
             Err(error) => Err(error.to_string()),
         }
+    }))
+}
+
+/// The file a write_file/edit_file call changes and its workspace-relative display form
+/// (issue #325: `/undo` keys its pre-image on it). `None` when `name` is not one of these
+/// tools.
+pub(crate) fn target(
+    root: &Path,
+    name: &str,
+    arguments: &Value,
+) -> Option<Result<(PathBuf, String), String>> {
+    if !matches!(name, "write_file" | "edit_file") {
+        return None;
+    }
+    Some(required(arguments, "path").and_then(|path| {
+        let target = resolve_target(root, path, name == "write_file")?.path;
+        let shown = display(root, &target);
+        Ok((target, shown))
     }))
 }
 
@@ -362,7 +380,7 @@ fn write_regular(target: &Path, text: &str) -> Result<(), String> {
 
 /// [`write_regular`] with a seam that runs after the temp file is written and synced,
 /// right before the rename; tests inject a failure there.
-fn write_atomic(
+pub(crate) fn write_atomic(
     target: &Path,
     text: &str,
     before_rename: impl FnOnce() -> std::io::Result<()>,
@@ -439,7 +457,7 @@ fn write_atomic(
 
 /// Refuse a target whose owner write bit is clear. `rename` ignores the file's own
 /// permissions, so without this check the atomic write would replace a `chmod 444` file.
-fn refuse_read_only(metadata: &std::fs::Metadata, shown: &str) -> Result<(), String> {
+pub(crate) fn refuse_read_only(metadata: &std::fs::Metadata, shown: &str) -> Result<(), String> {
     #[cfg(unix)]
     let read_only = {
         use std::os::unix::fs::PermissionsExt;

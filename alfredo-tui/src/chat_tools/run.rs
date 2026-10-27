@@ -106,6 +106,14 @@ pub async fn run_turn_limited(
     gate: Option<Gate>,
     round_limit: std::time::Duration,
 ) {
+    // A new turn forgets the last one's undo pre-images (issue #325).
+    let gate = gate.map(|mut gate| {
+        gate.turn = super::undo::new_turn();
+        if let Some(log) = &gate.log {
+            super::undo::begin_turn(log.directory());
+        }
+        gate
+    });
     let known = |model: &str| {
         no_tools_models()
             .lock()
@@ -444,6 +452,7 @@ async fn gated(
                 .await;
             let root = workspace.to_path_buf();
             let log = gate.log.clone();
+            let turn = gate.turn.clone();
             let stop_guard = super::shell::StopOnDrop::default();
             let stop = stop_guard.stop();
             let late = Late::new(&stop_guard, events, session, attempt, call, new_round);
@@ -454,7 +463,7 @@ async fn gated(
                         &card,
                         Decision::Approve,
                         log.as_ref(),
-                        Some(rule.id),
+                        (Some(rule.id), &turn),
                     ))
                 })
             })
@@ -496,6 +505,7 @@ async fn gated(
     guard.decision = None;
     let root = workspace.to_path_buf();
     let log = gate.log.clone();
+    let turn = gate.turn.clone();
     let rules = gate.rules.clone();
     // Aborting this turn (Esc, /stop, switch, retry, quit) drops the guard, which
     // stops a running command; the blocking call then logs `cancelled` (issue #302).
@@ -512,7 +522,7 @@ async fn gated(
                 (Decision::AlwaysAllow, Some(rules)) => rules.add_for(&card).ok().map(|r| r.id),
                 _ => None,
             };
-            late.report(decided(&root, &card, decision, log.as_ref(), rule))
+            late.report(decided(&root, &card, decision, log.as_ref(), (rule, &turn)))
         })
     })
     .await
@@ -577,14 +587,23 @@ fn decided(
     card: &approval::Card,
     decision: Decision,
     log: Option<&approval::Log>,
-    rule: Option<u64>,
+    (rule, turn): (Option<u64>, &str),
 ) -> String {
     let (result, outcome) = match decision {
         Decision::Deny => (approval::DENIED.to_string(), Outcome::Denied),
         Decision::Approve | Decision::AlwaysAllow => {
             let started = std::time::Instant::now();
+            // Keep the file's pre-image so `/undo` can restore it (issue #325).
+            let capture = log
+                .filter(|_| card.kind == approval::CardKind::Edit)
+                .and_then(|_| super::undo::before(root, card));
             match approval::apply(root, card) {
-                Ok(output) => (super::cap(output), Outcome::Applied),
+                Ok(output) => {
+                    if let (Some(capture), Some(log)) = (capture, log) {
+                        capture.applied(root, log.directory(), turn);
+                    }
+                    (super::cap(output), Outcome::Applied)
+                }
                 // A command stopped mid-run (issue #302) was not applied, but it may have
                 // partly run (issue #333); one stopped before it started ran nothing.
                 Err(reason)

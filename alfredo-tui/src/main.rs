@@ -1773,6 +1773,38 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                        KeyCode::Enter
+                            if work.app.sessions[index].draft.trim() == "/undo"
+                                && work.tasks.agent_shown().is_none() =>
+                        {
+                            // Owner-typed only (issue #325): restore the last turn's chat edits.
+                            let result = if work.app.sessions[index].status.active() {
+                                Err("Wait for this turn to finish before /undo".to_string())
+                            } else {
+                                work.tasks.store().conversation_directory().and_then(|dir| {
+                                    alfredo_tui::chat_tools::undo::slash(
+                                        &dir,
+                                        work.tasks.workspace(),
+                                    )
+                                })
+                            };
+                            match result {
+                                Ok(lines) => {
+                                    work.app.sessions[index].remember_submission();
+                                    work.app.sessions[index].clear_draft();
+                                    if lines.len() > 1 {
+                                        work.app.notice.clear();
+                                        work.app.transient_rows = lines;
+                                    } else {
+                                        work.app.notice = lines.join(" ");
+                                    }
+                                }
+                                Err(error) => {
+                                    work.app.notice = error;
+                                    work.app.sessions[index].reject_draft();
+                                }
+                            }
+                        }
                         KeyCode::Enter if work.app.sessions[index].draft.trim() == "/models" => {
                             work.app.models_visible = true;
                             work.app.models_scroll = 0;
@@ -2670,6 +2702,7 @@ const HELP_LINES: &[&str] = &[
     "/clear start this conversation fresh (tasks are kept)",
     "/compact summarise older turns into a short note now (also automatic near the size limit)",
     "/allow list always-allow rules (a on an approval card adds one; never for push) · /allow clear [ID]",
+    "/undo restore the files the last chat turn's approved edits changed; refuses any file changed since and names it (no run_command, no Git)",
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
     "Enter send · Ctrl+N new · Tab switch · Esc or Ctrl+C (while replying) cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",

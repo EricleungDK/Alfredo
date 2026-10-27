@@ -23,6 +23,7 @@ pub(crate) mod read;
 mod run;
 mod shell;
 pub mod summary;
+pub mod undo;
 
 pub use run::{parse_max_turns, run_turn, run_turn_limited, MAX_STEPS, STEP_CAP_NOTICE};
 pub use shell::stop_all as stop_running_commands;

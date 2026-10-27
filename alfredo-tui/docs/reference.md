@@ -1826,6 +1826,19 @@ Approval (ADR 0004); there is no skip-approval mode.
   task receipt capacity. F4 activity lists these first as `chat · Chat edit_file …`.
 - **Restarts.** A pending action is never saved; a restored session shows the turn as
   interrupted and never re-asks or runs it.
+- **`/undo`** (issue #325) is an owner-typed slash command, never a model tool. It
+  restores the files the last chat turn's approved `write_file`/`edit_file` calls
+  changed, and deletes the files that turn created, from pre-image copies kept in
+  `chat-undo/` in the mission's State Directory (private mode; never in the repository).
+  It acts per file only while the file still equals what the edit left; a file changed
+  since, a symlink (or a symlinked parent), a read-only file or an excluded path (`.git`,
+  secrets) is refused and named, and the rest is still undone. A pre-image over 256 KiB
+  (or past 2 MiB for the turn) is not kept, never truncated, and `/undo`
+  says it is not available for that file. A new turn forgets the previous turn's
+  pre-images, so `/undo` covers the last turn only; a second `/undo` says `Nothing to
+  undo`. Each file's outcome is logged to `chat-approvals.jsonl` (tool `undo`). Not
+  covered: `run_command`, Git (commits, branches, pushes), `/go` runs, the
+  conversation itself. Directories a `write_file` created are left in place.
 
 ## Chat git writes and push
 

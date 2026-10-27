@@ -107,6 +107,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/allow",
         "[clear [ID]] — list or clear always-allow rules (a on an approval card)",
     ),
+    (
+        "/undo",
+        "restore the files the last chat turn's approved edits changed (refuses any changed since)",
+    ),
     ("/models", "list installed models"),
     ("/model", "NAME — select conversation model"),
 ];
@@ -188,6 +192,7 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
             "/clear",
             "/compact",
             "/allow",
+            "/undo",
             "/model",
             "/models",
             "@wayfinder",
