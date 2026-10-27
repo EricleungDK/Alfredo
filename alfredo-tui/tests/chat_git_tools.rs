@@ -23,6 +23,14 @@ fn git(root: &Path, args: &[&str]) -> String {
         .arg("-C")
         .arg(root)
         .args([
+            // Issue #448: no automatic maintenance. `git commit` runs `maintenance run --auto`,
+            // which may prune `.git/worktrees/*` entries that still lack `gitdir`/`index`.
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "gc.autoDetach=false",
+            "-c",
+            "maintenance.auto=false",
             "-c",
             "user.name=T",
             "-c",
@@ -35,6 +43,22 @@ fn git(root: &Path, args: &[&str]) -> String {
         .unwrap();
     assert!(output.status.success(), "git {args:?}: {output:?}");
     String::from_utf8(output.stdout).unwrap()
+}
+
+/// Issue #448: install a hand-built linked-worktree entry (`HEAD`, `commondir`, `gitdir`) as
+/// `<git_dir>/worktrees/<name>` in one rename. An entry directory without a `gitdir` file and
+/// without an `index` is "prunable" at once, whatever the expiry, so any `git worktree prune`,
+/// `gc` or auto-maintenance run on the repository would delete it half-built.
+fn install_worktree_entry(git_dir: &Path, name: &str, head: &str, gitdir: &str) -> PathBuf {
+    let staging = git_dir.join(format!("staging-{name}"));
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join("HEAD"), head).unwrap();
+    fs::write(staging.join("commondir"), "../..\n").unwrap();
+    fs::write(staging.join("gitdir"), gitdir).unwrap();
+    fs::create_dir_all(git_dir.join("worktrees")).unwrap();
+    let entry = git_dir.join("worktrees").join(name);
+    fs::rename(&staging, &entry).unwrap();
+    entry
 }
 
 struct Repo {
@@ -427,20 +451,13 @@ fn a_worktree_entry_of_another_repository_that_is_not_ours_is_never_read() {
     fs::write(other.root.join("creds.txt"), "AWS_SECRET=hunter2\n").unwrap();
     git(&other.root, &["add", "creds.txt"]);
     git(&other.root, &["commit", "-q", "-m", "add creds"]);
-    let entry = other.root.join(".git/worktrees/evil");
-    fs::create_dir_all(&entry).unwrap();
     let branch = git(&other.root, &["symbolic-ref", "--short", "HEAD"]);
-    fs::write(
-        entry.join("HEAD"),
-        format!("ref: refs/heads/{}\n", branch.trim()),
-    )
-    .unwrap();
-    fs::write(entry.join("commondir"), "../..\n").unwrap();
-    fs::write(
-        entry.join("gitdir"),
-        format!("{}/elsewhere/.git\n", other.base.display()),
-    )
-    .unwrap();
+    let entry = install_worktree_entry(
+        &other.root.join(".git"),
+        "evil",
+        &format!("ref: refs/heads/{}\n", branch.trim()),
+        &format!("{}/elsewhere/.git\n", other.base.display()),
+    );
     let ws = other.base.join("ws");
     fs::create_dir_all(&ws).unwrap();
     fs::write(ws.join(".git"), format!("gitdir: {}\n", entry.display())).unwrap();
@@ -649,8 +666,10 @@ fn a_worktree_back_reference_fifo_refuses_promptly_and_never_hangs() {
         ],
     );
     let back = repo.root.join(".git/worktrees/wt/gitdir");
-    fs::remove_file(&back).unwrap();
-    mkfifo(&back);
+    // Swap the FIFO in by rename: removing `gitdir` first would leave a prunable entry.
+    let fifo = back.with_file_name("gitdir.fifo");
+    mkfifo(&fifo);
+    fs::rename(&fifo, &back).unwrap();
     for (tool, arguments) in [("git_status", json!({})), ("git_log", json!({}))] {
         let output = dispatch_within(&wt, tool, arguments);
         assert!(output.starts_with("error:"), "{tool}: {output}");
@@ -782,20 +801,13 @@ fn a_linked_worktree_whose_main_repository_is_inside_the_workspace_is_refused() 
     fs::write(main.join("creds.txt"), "AWS_SECRET=hunter2\n").unwrap();
     git(&main, &["add", "creds.txt"]);
     git(&main, &["commit", "-q", "-m", "add creds"]);
-    let entry = main.join(".git/worktrees/x");
-    fs::create_dir_all(&entry).unwrap();
     let branch = git(&main, &["symbolic-ref", "--short", "HEAD"]);
-    fs::write(
-        entry.join("HEAD"),
-        format!("ref: refs/heads/{}\n", branch.trim()),
-    )
-    .unwrap();
-    fs::write(entry.join("commondir"), "../..\n").unwrap();
-    fs::write(
-        entry.join("gitdir"),
-        format!("{}\n", ws.join(".git").display()),
-    )
-    .unwrap();
+    let entry = install_worktree_entry(
+        &main.join(".git"),
+        "x",
+        &format!("ref: refs/heads/{}\n", branch.trim()),
+        &format!("{}\n", ws.join(".git").display()),
+    );
     fs::write(ws.join(".git"), format!("gitdir: {}\n", entry.display())).unwrap();
     for tool in ["git_status", "git_log"] {
         let output = chat_tools::dispatch(
