@@ -1105,10 +1105,10 @@ fn a_tall_card_keeps_its_header_path_and_key_line_on_screen() {
     assert!(text.contains("long.txt"), "{text}");
     assert!(text.contains("+line 1"), "{text}");
     assert!(text.contains("more diff lines"), "{text}");
-    assert!(
-        text.contains("y approve · a always allow write_file in this mission · n deny"),
-        "{text}"
-    );
+    // A cut diff is deny-only (issue #269): the key line says why `y` is off.
+    assert!(text.contains("n deny"), "{text}");
+    assert!(text.contains("y is off"), "{text}");
+    assert!(!text.contains("a always allow"), "{text}");
     assert!(text.contains("Esc cancels the turn (deny)"), "{text}");
 }
 
