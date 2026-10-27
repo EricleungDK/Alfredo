@@ -2531,6 +2531,33 @@ fn the_history_warning_joins_the_go_acknowledgement_instead_of_replacing_it() {
 }
 
 #[test]
+fn the_history_warning_joins_a_stale_notice_once_on_the_autopilot_path() {
+    // record_autopilot_command calls append_history_warning after each recorded command;
+    // an earlier notice stays (as for /go) and the warning appears exactly once.
+    let mut app = App::new("fixture".into());
+    app.notice = "Earlier notice".into();
+    let mut number = 0;
+    while app.sessions[0].command_history_warning().is_none() {
+        app.sessions[0]
+            .submit_command(
+                "/task Live".into(),
+                command_intent(&format!("auto-{number}")),
+            )
+            .unwrap();
+        app.append_history_warning(0);
+        number += 1;
+    }
+    app.append_history_warning(0);
+    app.append_history_warning(0);
+    assert_eq!(app.notice.matches("80% full").count(), 1, "{}", app.notice);
+    assert!(
+        app.notice.starts_with("Earlier notice · "),
+        "{}",
+        app.notice
+    );
+}
+
+#[test]
 fn command_order_and_anchor_order_must_match_saved_chronology() {
     let fixture = Fixture::new();
     let store = ConversationStore::open(&fixture.tasks, "default").unwrap();

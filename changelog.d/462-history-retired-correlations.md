@@ -6,4 +6,6 @@
   history capacity reached`; a saved plan draft whose origin command is neither
   generated, live nor interrupted is refused at load and save, since eviction could
   otherwise drop it; the autopilot footer warning at 80% full now joins the existing
-  notice like the `/go` one does.
+  notice like the `/go` one does. An older Alfredo build refuses (fails closed, file preserved) a
+  conversation file written after an eviction, since it does not know the new
+  `retired_commands` field.

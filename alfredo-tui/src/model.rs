@@ -38,7 +38,6 @@ fn budget_bytes(count: usize, sum: usize) -> usize {
         sum.saturating_add(count + 1)
     }
 }
-/// Each command's normalized JSON length plus its 1 KiB reservation, serialized once.
 /// What an evicted command keeps refused: its id first, then each correlation the
 /// structure rules keep unique among evictable commands (selection commands are never
 /// evicted).
@@ -54,6 +53,7 @@ fn retirement_keys(command: &crate::console_command::ConsoleCommand) -> Vec<Stri
     keys
 }
 
+/// Each command's normalized JSON length plus its 1 KiB reservation, serialized once.
 fn command_sizes(commands: &[crate::console_command::ConsoleCommand]) -> Vec<usize> {
     commands
         .iter()
