@@ -4,6 +4,7 @@
 //! (refs starting with `-` are refused, `--end-of-options` and `--` separate them).
 use super::{excluded, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
+use std::os::unix::fs::FileTypeExt;
 use std::{
     cell::Cell,
     collections::HashSet,
@@ -741,15 +742,7 @@ pub(crate) fn verified_git_dir_within(
     // Nothing in the git directory, the common directory, refs or info may be a link, and
     // every object store git reads (its own and the alternates it names) is walked for links
     // and kept inside the repository: a link or a borrowed store shows another repository.
-    walk_without_links(&git_dir, clock, false)?;
-    walk_without_links(&common_dir, clock, false)?;
-    for tree in ["refs", "info", "logs"] {
-        walk_without_links(&common_dir.join(tree), clock, true)?;
-        if git_dir != common_dir {
-            walk_without_links(&git_dir.join(tree), clock, true)?;
-        }
-    }
-    object_stores_within(&common_dir, clock)?;
+    walk_repository(&git_dir, &common_dir, clock)?;
     Ok(VerifiedGit {
         git_dir,
         common_dir,
@@ -761,8 +754,8 @@ const UNCHECKED: &str = "the workspace's repository could not be checked for lin
 const UNREADABLE: &str = "the workspace's repository changed or could not be read while it was checked for links or borrowed objects (a background git gc or repack may have been running); git tools refuse, try again";
 const ALTERNATES: &str = "the workspace's repository borrows objects from outside it (objects/info/alternates); git tools refuse";
 
-/// Refuses a symbolic link among the entries of `dir`, or, when `recursive`, anywhere under
-/// it. A missing directory is fine. The walk is charged to `clock`: running out is a refusal,
+/// Refuses a symbolic link, FIFO, socket or device among the entries of `dir`, or, when
+/// `recursive`, anywhere under it. A missing directory is fine. The walk is charged to `clock`: running out is a refusal,
 /// never a partial check (issue #359).
 fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), String> {
     let unreadable = || UNREADABLE.to_string();
@@ -783,6 +776,14 @@ fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), S
             if kind.is_symlink() {
                 return Err(LINKED.to_string());
             }
+            // A FIFO, socket or device blocks any git process that opens it (issue #461).
+            // The one exception: git's fsmonitor daemon socket directly in a git directory
+            // (opening a socket fails, it cannot block; Alfredo's git runs without fsmonitor).
+            let daemon =
+                !recursive && kind.is_socket() && entry.file_name() == "fsmonitor--daemon.ipc";
+            if !kind.is_file() && !kind.is_dir() && !daemon {
+                return Err(special(&entry.file_name().to_string_lossy()));
+            }
             if recursive && kind.is_dir() {
                 pending.push(entry.path());
             }
@@ -792,16 +793,14 @@ fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), S
 }
 
 /// Every object store the repository reads: its own, and each store its `info/alternates`
-/// names, followed transitively. Each store is walked for links and each entry must stay
-/// inside `common_dir`. A store already seen is skipped, so a cycle or a store shared by
+/// names, followed transitively. Each store is walked for links and special files and each
+/// entry must stay inside `common_dir`. A store already seen is skipped, so a cycle or a store shared by
 /// many paths is checked once (issue #359). Charged to `clock`.
 fn object_stores_within(common_dir: &Path, clock: Clock) -> Result<(), String> {
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut pending = vec![common_dir.join("objects")];
+    let first = common_dir.join("objects");
+    let mut seen: HashSet<PathBuf> = HashSet::from([first.clone()]);
+    let mut pending = vec![first];
     while let Some(store) = pending.pop() {
-        if !seen.insert(store.clone()) {
-            continue;
-        }
         if clock.left().is_zero() {
             return Err(UNCHECKED.to_string());
         }
@@ -811,91 +810,131 @@ fn object_stores_within(common_dir: &Path, clock: Clock) -> Result<(), String> {
         else {
             continue;
         };
-        for line in text.lines().map(str::trim) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let entry = store
-                .join(line)
-                .canonicalize()
-                .map_err(|_| ALTERNATES.to_string())?;
-            if !entry.starts_with(common_dir) {
-                return Err(ALTERNATES.to_string());
-            }
+        queue_alternates(&store, common_dir, &text, clock, (&mut seen, &mut pending))?;
+    }
+    Ok(())
+}
+
+/// Everything under the git directory, the common directory, `refs`, `info`, `logs` and
+/// every object store that is not a plain file or directory: no link, FIFO, socket or device
+/// where git may open a file (issue #461). Types only, nothing is opened.
+fn walk_repository(git_dir: &Path, common_dir: &Path, clock: Clock) -> Result<(), String> {
+    walk_without_links(git_dir, clock, false)?;
+    walk_without_links(common_dir, clock, false)?;
+    for tree in ["refs", "info", "logs"] {
+        walk_without_links(&common_dir.join(tree), clock, true)?;
+        if git_dir != common_dir {
+            walk_without_links(&git_dir.join(tree), clock, true)?;
+        }
+    }
+    object_stores_within(common_dir, clock)
+}
+
+/// Queues the stores listed in the `alternates` file `text` of `store` that are not seen yet
+/// (so a crowd of stores listing each other holds each once). Lines are read as git reads
+/// them: split at `\n`, `#` lines and empty ones skipped, nothing trimmed. A quoted or
+/// whitespace-padded line, which git reads differently from a plain path, and any store that
+/// is missing or outside `common_dir` are refused, never skipped. The clock is checked per
+/// line (issue #461).
+fn queue_alternates(
+    store: &Path,
+    common_dir: &Path,
+    text: &str,
+    clock: Clock,
+    (seen, pending): (&mut HashSet<PathBuf>, &mut Vec<PathBuf>),
+) -> Result<(), String> {
+    for line in text.split('\n') {
+        if clock.left().is_zero() {
+            return Err(UNCHECKED.to_string());
+        }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let padded = |c: char| c.is_whitespace();
+        if line.starts_with('"') || line.starts_with(padded) || line.ends_with(padded) {
+            return Err(ALTERNATES.to_string());
+        }
+        let entry = store
+            .join(line)
+            .canonicalize()
+            .map_err(|_| ALTERNATES.to_string())?;
+        if !entry.starts_with(common_dir) {
+            return Err(ALTERNATES.to_string());
+        }
+        if seen.insert(entry.clone()) {
             pending.push(entry);
         }
     }
     Ok(())
 }
 
-/// Refuses a FIFO, device, socket, directory or link where git opens a file while it locates
-/// the repository, before any git process starts (issue #458). `git rev-parse` blocks
-/// reading `HEAD`, `config` and `commondir` when one is a FIFO, and newer git (2.56 on CI)
-/// also opens `objects/info/alternates` (and each store's own) at start-up, so a check made
-/// after that git call came too late: the call ran into its 15 s limit instead of refusing.
-/// Types only, except `.git` (a gitfile) and the alternates files, which are read to learn
-/// where git goes next. A missing file is fine; so is a layout this cannot follow: the
-/// full verification after git runs still decides. Charged to `clock`.
+/// Refuses a repository git could trip over before any git process starts (issues #458,
+/// #461): a FIFO, device, socket or link where git opens a file while it locates the
+/// repository (`HEAD`, `config`, `commondir`, a gitfile, the alternates chain) or later
+/// (`index`, `packed-refs`, `refs`, packs ...; see [`walk_repository`]), and a layout git
+/// would give up on and then read the workspace root as a bare repository (no `.git`, no
+/// `HEAD`, no `objects/` or `refs/`), which is refused as [`OUTSIDE`] too. The gitfile and
+/// alternates lines are parsed as git parses them. Newer git (2.56 on CI) opens
+/// `objects/info/alternates` at start-up; that was inferred from CI, not from git's source.
+/// This is a best-effort fast path: a layout it cannot foresee still ends at git's 15 s time
+/// limit, and the full verification after git runs still decides. Charged to `clock`.
 fn refuse_special_start_up_files(root: &Path, clock: Clock) -> Result<(), String> {
+    let outside = || OUTSIDE.to_string();
     let dot_git = root.join(".git");
     let git_dir = match fs::symlink_metadata(&dot_git) {
         Ok(meta) if meta.is_file() => {
             let text = read_control_file(&dot_git, clock, &special(".git"))?.unwrap_or_default();
-            let Some(target) = text.lines().next().and_then(|l| l.strip_prefix("gitdir:")) else {
-                return Ok(());
-            };
-            root.join(target.trim())
+            // As git: only trailing CR and LF are dropped, then the exact prefix.
+            let target = text.trim_end_matches(['\r', '\n']).strip_prefix("gitdir: ");
+            root.join(target.ok_or_else(outside)?)
         }
         Ok(_) => dot_git,
-        Err(_) => return Ok(()),
+        Err(_) => return Err(outside()),
     };
-    let Ok(git_dir) = git_dir.canonicalize() else {
-        return Ok(());
-    };
+    let git_dir = git_dir.canonicalize().map_err(|_| outside())?;
     let mut common_dir = git_dir.clone();
     for name in ["HEAD", "config", "commondir"] {
         ordinary_or_missing(&git_dir.join(name), clock, name)?;
     }
+    if fs::symlink_metadata(git_dir.join("HEAD")).is_err() {
+        return Err(outside());
+    }
     if let Some(text) = read_control_file(&git_dir.join("commondir"), clock, &special("commondir"))?
     {
-        match git_dir.join(text.trim()).canonicalize() {
-            Ok(common) => common_dir = common,
-            Err(_) => return Ok(()),
-        }
+        common_dir = git_dir
+            .join(text.trim_end_matches(['\r', '\n']))
+            .canonicalize()
+            .map_err(|_| outside())?;
     }
     if common_dir != git_dir {
         ordinary_or_missing(&common_dir.join("config"), clock, "config")?;
     }
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut pending = vec![common_dir.join("objects")];
-    while let Some(store) = pending.pop() {
-        if !seen.insert(store.clone()) {
-            continue;
-        }
-        if clock.left().is_zero() {
-            return Err(UNCHECKED.to_string());
-        }
-        let Some(text) = read_control_file(
-            &store.join("info/alternates"),
-            clock,
-            &special("alternates"),
-        )?
-        else {
-            continue;
-        };
-        for line in text.lines().map(str::trim) {
-            if !line.is_empty() && !line.starts_with('#') {
-                if let Ok(next) = store.join(line).canonicalize() {
-                    pending.push(next);
-                }
-            }
-        }
+    if !(common_dir.join("objects").is_dir() && common_dir.join("refs").is_dir()) {
+        return Err(outside());
     }
-    Ok(())
+    // git falls back to the root as a bare repository when it rejects this one; its HEAD
+    // may be a FIFO.
+    // A directory of that name (a project's `config/`) cannot block git; only a FIFO,
+    // socket, device or link can.
+    for name in ["HEAD", "commondir", "config"] {
+        if fs::symlink_metadata(root.join(name)).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        ordinary_or_missing(&root.join(name), clock, name)?;
+    }
+    // Walk only a directory that is the workspace's own or a worktree entry; the full
+    // verification after git decides the rest.
+    let own = root.join(".git").canonicalize().ok();
+    if own.as_deref() != Some(git_dir.as_path())
+        && git_dir.parent() != Some(common_dir.join("worktrees").as_path())
+    {
+        return Err(outside());
+    }
+    walk_repository(&git_dir, &common_dir, clock)
 }
 
 fn special(name: &str) -> String {
-    format!("the workspace's repository has a {name} that is not an ordinary file (a FIFO, device or link); git tools refuse")
+    format!("the workspace's repository has a {name} that is not an ordinary file (a FIFO, socket, device or link); git tools refuse")
 }
 
 /// `Ok` for an ordinary file or a missing one, the refusal naming `name` for anything else.
@@ -942,7 +981,8 @@ fn read_control_file(path: &Path, clock: Clock, refusal: &str) -> Result<Option<
         .read_to_string(&mut text)
         .map_err(|_| refusal.to_string())?;
     if text.len() as u64 > CONTROL_FILE_LIMIT {
-        return Err(refusal.to_string());
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        return Err(format!("the workspace's repository has a {name} larger than {CONTROL_FILE_LIMIT} bytes; git tools refuse"));
     }
     Ok(Some(text))
 }
@@ -1317,6 +1357,63 @@ mod tests {
         .unwrap();
         let error = refuse_special_start_up_files(&root, clock()).unwrap_err();
         assert!(error.contains("alternates"), "{error}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Issue #461: alternates lines are read as git reads them; a quoted or padded line, a
+    /// missing store and one outside the repository are refused, a spent clock is checked
+    /// per line, and a store already seen is queued once.
+    #[test]
+    fn alternates_lines_are_queued_as_git_reads_them() {
+        let common = scratch_repo("alternates-461", "").join(".git");
+        let common = common.canonicalize().unwrap();
+        let store = common.join("objects");
+        let other = common.join("other");
+        fs::create_dir_all(&other).unwrap();
+        let clock = || Clock::start(Duration::from_secs(5));
+        let queue = |text: &str, clock: Clock| {
+            let mut seen = HashSet::new();
+            let mut pending = Vec::new();
+            let result = queue_alternates(&store, &common, text, clock, (&mut seen, &mut pending));
+            (result, pending)
+        };
+        let ok = format!("# note\n\n{0}\n{0}\n../other\n", other.display());
+        let (result, pending) = queue(&ok, clock());
+        result.unwrap();
+        assert_eq!(pending, vec![other.clone()]);
+        for bad in [
+            format!("\"{}\"", other.display()),
+            format!(" {}", other.display()),
+            format!("{} ", other.display()),
+            format!("{}\r", other.display()),
+            "../missing".to_string(),
+            "/".to_string(),
+        ] {
+            let (result, pending) = queue(&bad, clock());
+            assert_eq!(result.unwrap_err(), ALTERNATES, "{bad:?}");
+            assert!(pending.is_empty(), "{bad:?}");
+        }
+        // Every line is charged to the clock, also a comment or an empty one.
+        for line in ["#", "", "../other"] {
+            let spent = Clock::start(Duration::ZERO);
+            assert_eq!(queue(line, spent).0.unwrap_err(), UNCHECKED, "{line:?}");
+        }
+        let _ = fs::remove_dir_all(common.parent().unwrap());
+    }
+
+    /// Issue #461 (review): `commondir` is read as git reads it, with only a trailing CR/LF
+    /// dropped, so a padded value does not resolve.
+    #[test]
+    fn a_padded_commondir_is_not_trimmed() {
+        let root = scratch_repo("commondir-461", "");
+        let clock = || Clock::start(Duration::from_secs(5));
+        fs::write(root.join(".git/commondir"), ".\r\n").unwrap();
+        refuse_special_start_up_files(&root, clock()).unwrap();
+        fs::write(root.join(".git/commondir"), ". \n").unwrap();
+        assert_eq!(
+            refuse_special_start_up_files(&root, clock()).unwrap_err(),
+            OUTSIDE
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

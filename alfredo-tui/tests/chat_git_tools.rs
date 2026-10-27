@@ -753,6 +753,363 @@ fn a_worktree_back_reference_fifo_refuses_promptly_and_never_hangs() {
     }
 }
 
+/// Issue #461: like `dispatch_within`, but the answer must arrive in 3 s. A refusal made
+/// before git runs is immediate; a git process stuck on a FIFO only gives up at 15 s.
+fn dispatch_promptly(root: &Path, tool: &str) -> String {
+    let (sender, receiver) = mpsc::channel();
+    let (root, name) = (root.to_path_buf(), tool.to_string());
+    std::thread::spawn(move || {
+        let output = chat_tools::dispatch(
+            &root,
+            &ToolCall {
+                name,
+                arguments: json!({}),
+            },
+        );
+        let _ = sender.send(output);
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap_or_else(|_| panic!("{tool} was not refused within 3 s: git blocked on a FIFO"))
+}
+
+const POINTS_OUTSIDE: &str = "points outside the Coding Workspace";
+
+/// A workspace laid out as a bare repository (`objects/`, `refs/`, a FIFO `HEAD`) at its root.
+fn bare_layout_with_fifo_head(dir: &Path) {
+    fs::create_dir_all(dir.join("objects")).unwrap();
+    fs::create_dir_all(dir.join("refs")).unwrap();
+    mkfifo(&dir.join("HEAD"));
+}
+
+/// Issue #461 (1): with `.git` or `.git/HEAD` missing, git treats the workspace root as a
+/// bare repository and blocks on its FIFO `HEAD`. A missing `.git` or `HEAD` is refused
+/// before git runs, also without any bare layout.
+#[test]
+fn a_missing_dot_git_or_head_is_refused_before_git_runs() {
+    let repo = Repo::new();
+    fs::remove_dir_all(repo.root.join(".git")).unwrap();
+    bare_layout_with_fifo_head(&repo.root);
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains(POINTS_OUTSIDE),
+        "{output}"
+    );
+
+    let repo = Repo::new();
+    fs::remove_file(repo.root.join(".git/HEAD")).unwrap();
+    bare_layout_with_fifo_head(&repo.root);
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains(POINTS_OUTSIDE),
+        "{output}"
+    );
+
+    // A `.git` that is not a repository (no `refs/`) makes git look at the root as bare, too.
+    let repo = Repo::new();
+    fs::remove_dir_all(repo.root.join(".git/refs")).unwrap();
+    bare_layout_with_fifo_head(&repo.root);
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains(POINTS_OUTSIDE),
+        "{output}"
+    );
+
+    // A `.git` git rejects for its HEAD leaves the same fallback.
+    let repo = Repo::new();
+    fs::write(repo.root.join(".git/HEAD"), "garbage\n").unwrap();
+    bare_layout_with_fifo_head(&repo.root);
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains("HEAD that is not an ordinary file"),
+        "{output}"
+    );
+
+    let plain = repo.base.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    let output = dispatch_promptly(&plain, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains(POINTS_OUTSIDE),
+        "{output}"
+    );
+}
+
+/// Issue #461 (2): a gitfile needs git's exact `gitdir: ` prefix, with only a trailing
+/// CR/LF dropped. `gitdir:  real` (two spaces) is git's ` real`, not `real`.
+#[test]
+fn a_gitfile_that_git_reads_differently_is_refused_before_git_runs() {
+    // git reads ` real` and `real ` as they are: the FIFO `HEAD` there is what is refused.
+    for (text, name, refusal) in [
+        (
+            "gitdir:  real\n",
+            " real",
+            "has a HEAD that is not an ordinary file",
+        ),
+        (
+            "gitdir: real \n",
+            "real ",
+            "has a HEAD that is not an ordinary file",
+        ),
+    ] {
+        let repo = Repo::new();
+        let root = repo.base.join("ws");
+        fs::create_dir_all(&root).unwrap();
+        // A clean `real` for a trimming reader, and a FIFO-HEAD repository where git looks.
+        fs::rename(repo.root.join(".git"), root.join("real")).unwrap();
+        bare_layout_with_fifo_head(&root.join(name));
+        fs::write(root.join(".git"), text).unwrap();
+        let output = dispatch_promptly(&root, "git_status");
+        assert!(
+            output.starts_with("error:") && output.contains(refusal),
+            "{text:?}: {output}"
+        );
+    }
+}
+
+/// Issue #461 (2): `gitdir:real` (no space) is no gitfile to git, so it is refused.
+#[test]
+fn a_gitfile_without_the_exact_prefix_is_refused() {
+    let repo = Repo::new();
+    let root = repo.base.join("ws");
+    fs::create_dir_all(&root).unwrap();
+    fs::rename(repo.root.join(".git"), root.join("real")).unwrap();
+    fs::write(root.join(".git"), "gitdir:real\n").unwrap();
+    let output = dispatch_promptly(&root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains(POINTS_OUTSIDE),
+        "{output}"
+    );
+}
+
+/// Issue #461 (3): an alternates line git reads differently (quoted, or padded with
+/// whitespace) is refused, not skipped.
+#[test]
+fn a_quoted_or_padded_alternates_line_is_refused_before_git_runs() {
+    for pattern in ["\"{}\"", " {}", "{} ", "{}\r"] {
+        let repo = Repo::new();
+        let store = repo.root.join(".git/second");
+        fs::create_dir_all(store.join("info")).unwrap();
+        mkfifo(&store.join("info/alternates"));
+        let alternates = repo.root.join(".git/objects/info/alternates");
+        fs::create_dir_all(alternates.parent().unwrap()).unwrap();
+        let line = pattern.replace("{}", store.to_str().unwrap());
+        fs::write(&alternates, format!("{line}\n")).unwrap();
+        let output = dispatch_promptly(&repo.root, "git_status");
+        assert!(
+            output.starts_with("error:") && output.contains("borrows objects"),
+            "{pattern:?}: {output}"
+        );
+    }
+}
+
+/// Issue #461 (4): a FIFO, socket or device in any file git opens is refused before git
+/// runs, naming the entry.
+#[test]
+fn a_special_file_anywhere_in_the_repository_is_refused_before_git_runs() {
+    for file in [
+        "index",
+        "packed-refs",
+        "shallow",
+        "config.worktree",
+        "info/grafts",
+        "info/exclude",
+        "refs/heads/branch",
+        "refs/tags/deep/tag",
+        "objects/pack/pack-1.pack",
+        "objects/ab/cdef",
+    ] {
+        let repo = Repo::new();
+        let path = repo.root.join(".git").join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _ = fs::remove_file(&path);
+        mkfifo(&path);
+        let output = dispatch_promptly(&repo.root, "git_status");
+        let name = file.rsplit('/').next().unwrap();
+        assert!(
+            output.starts_with("error:") && output.contains(name) && output.contains("FIFO"),
+            "{file}: {output}"
+        );
+    }
+    let repo = Repo::new();
+    let path = repo.root.join(".git/index");
+    fs::remove_file(&path).unwrap();
+    let _socket = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains("index"),
+        "{output}"
+    );
+}
+
+/// Issue #461 (4): a linked worktree's own `config.worktree` and `index` count too.
+#[test]
+fn a_special_file_in_a_linked_worktrees_entry_is_refused_before_git_runs() {
+    for file in ["index", "config.worktree"] {
+        let repo = Repo::new();
+        let wt = repo.base.join("wt");
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "wt-branch",
+                wt.to_str().unwrap(),
+            ],
+        );
+        let path = repo.root.join(".git/worktrees/wt").join(file);
+        let _ = fs::remove_file(&path);
+        mkfifo(&path);
+        let output = dispatch_promptly(&wt, "git_status");
+        assert!(
+            output.starts_with("error:") && output.contains(file),
+            "{file}: {output}"
+        );
+    }
+}
+
+/// Issue #461 (review): git's own fsmonitor daemon leaves a socket `fsmonitor--daemon.ipc` in
+/// the git directory; Alfredo's git runs with `core.fsmonitor=false`, so a valid repository
+/// with that socket is read. Only that exact socket is exempt: a FIFO of that name, or a
+/// socket anywhere else, is refused.
+#[test]
+fn the_fsmonitor_daemon_socket_is_accepted_but_no_other_special_file() {
+    let repo = Repo::new();
+    let socket = repo.root.join(".git/fsmonitor--daemon.ipc");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    for tool in ["git_status", "git_log"] {
+        let output = dispatch_promptly(&repo.root, tool);
+        assert!(!output.starts_with("error:"), "{tool}: {output}");
+    }
+    let wt = repo.base.join("wt");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt-branch",
+            wt.to_str().unwrap(),
+        ],
+    );
+    let entry_socket = repo.root.join(".git/worktrees/wt/fsmonitor--daemon.ipc");
+    let _entry_listener = std::os::unix::net::UnixListener::bind(&entry_socket).unwrap();
+    let output = dispatch_promptly(&wt, "git_status");
+    assert!(!output.starts_with("error:"), "{output}");
+
+    let repo = Repo::new();
+    mkfifo(&repo.root.join(".git/fsmonitor--daemon.ipc"));
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains("fsmonitor--daemon.ipc"),
+        "{output}"
+    );
+
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".git/info")).unwrap();
+    let _elsewhere =
+        std::os::unix::net::UnixListener::bind(repo.root.join(".git/info/fsmonitor--daemon.ipc"))
+            .unwrap();
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains("socket"),
+        "{output}"
+    );
+}
+
+/// Issue #461 (review): when git falls back to the workspace root as a bare repository, a
+/// FIFO root `commondir` or `config` blocks it just like `HEAD`.
+#[test]
+fn a_bare_root_fallback_with_a_fifo_commondir_or_config_is_refused() {
+    for file in ["commondir", "config"] {
+        let repo = Repo::new();
+        fs::write(repo.root.join(".git/HEAD"), "garbage\n").unwrap();
+        fs::create_dir_all(repo.root.join("objects")).unwrap();
+        fs::create_dir_all(repo.root.join("refs")).unwrap();
+        fs::write(repo.root.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        mkfifo(&repo.root.join(file));
+        let output = dispatch_promptly(&repo.root, "git_status");
+        assert!(
+            output.starts_with("error:") && output.contains(file),
+            "{file}: {output}"
+        );
+    }
+}
+
+/// Issue #461 (review 3): a directory named `config`, `HEAD` or `commondir` at the workspace
+/// root (common in real projects) cannot block git and must not refuse a valid repository.
+#[test]
+fn root_directories_named_like_git_files_do_not_refuse_a_valid_repository() {
+    let repo = Repo::new();
+    for name in ["config", "HEAD", "commondir"] {
+        fs::create_dir_all(repo.root.join(name)).unwrap();
+        fs::write(repo.root.join(name).join("settings.txt"), "x\n").unwrap();
+    }
+    for tool in ["git_status", "git_log"] {
+        let output = dispatch_promptly(&repo.root, tool);
+        assert!(!output.starts_with("error:"), "{tool}: {output}");
+    }
+}
+
+/// Issue #461 (6): an oversize gitfile or alternates file says it is too large, not that it
+/// is a FIFO, device or link.
+#[test]
+fn an_oversize_control_file_is_refused_as_too_large() {
+    let repo = Repo::new();
+    let alternates = repo.root.join(".git/objects/info/alternates");
+    fs::create_dir_all(alternates.parent().unwrap()).unwrap();
+    fs::write(&alternates, "# padding\n".repeat(8_000)).unwrap();
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains("larger than") && !output.contains("FIFO"),
+        "{output}"
+    );
+
+    let repo = Repo::new();
+    let root = repo.base.join("ws");
+    fs::create_dir_all(&root).unwrap();
+    fs::rename(repo.root.join(".git"), root.join("real")).unwrap();
+    fs::write(
+        root.join(".git"),
+        format!("gitdir: real\n{}", "#".repeat(70_000)),
+    )
+    .unwrap();
+    let output = dispatch_promptly(&root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains("larger than") && !output.contains("FIFO"),
+        "{output}"
+    );
+}
+
+/// Issue #461 (5): a chain of out-of-repository stores that list each other is refused at the
+/// first one, long before the clock.
+#[test]
+fn a_chain_of_outside_stores_is_refused_at_once() {
+    let repo = Repo::new();
+    let stores: Vec<PathBuf> = (0..300).map(|n| repo.base.join(format!("s{n}"))).collect();
+    let listing: String = stores
+        .iter()
+        .map(|s| format!("{}\n", s.display()))
+        .collect();
+    for store in &stores {
+        fs::create_dir_all(store.join("info")).unwrap();
+        fs::write(store.join("info/alternates"), &listing).unwrap();
+    }
+    let alternates = repo.root.join(".git/objects/info/alternates");
+    fs::create_dir_all(alternates.parent().unwrap()).unwrap();
+    fs::write(&alternates, &listing).unwrap();
+    let started = std::time::Instant::now();
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(output.contains("borrows objects"), "{output}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 /// Issue #359 (review 3): a reflog under `logs/` that is a symlink into another repository
 /// is refused like a link in `refs/` or `info/`, however deep it sits.
 #[test]

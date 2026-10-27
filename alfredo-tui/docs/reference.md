@@ -1738,7 +1738,16 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   workspace's own repository is read. The control files git reads (`gitdir`,
   `objects/info/alternates`) must be regular files: a FIFO, device or link there is refused
   at once, never waited on, and links under `logs/` are refused like those under `refs/` and
-  `info/`.
+  `info/`. Before git runs, a FIFO, socket, device or link in the top level of the git
+  directory and common directory, or anywhere under `refs`, `info`, `logs` or an object
+  store, is refused too (git's `fsmonitor--daemon.ipc` socket in a git directory is
+  allowed), as is a
+  workspace with no `.git`, no `HEAD` or no `objects/` and `refs/` (git would read the root
+  as a bare repository). The gitfile (`gitdir: ` prefix, only trailing CR/LF dropped) and
+  alternates lines (quoted or whitespace-padded lines are refused) are read as git reads
+  them. This start-up check is a best-effort fast path; the 15 s limit is the backstop for
+  anything it does not foresee (for example a FIFO in other subdirectories such as
+  `rebase-merge/`, `sequencer/` or `modules/`, or behind an `include.path`). That newer git opens the alternates file at start-up was inferred from CI.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to. Results are also budgeted to the room left. With
   `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt
