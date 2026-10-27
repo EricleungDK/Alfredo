@@ -1705,13 +1705,22 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 - **Secret files.** One list, used by every chat tool (`read_file`, `grep`, `list_files`,
   `write_file`, `edit_file`, `git_diff`, `git_commit`), by `@path` mentions and by planner
   context. Matching ignores case and applies to every path component:
-  `.git`, `.ssh`, `.gnupg`, `.aws` and `.kube` directories (everything under them);
-  `.env*` and `*.env` (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`,
-  `.git-credentials`; names starting `id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa`
-  (keys and their `.pub` copies); `credentials*.json`; `secrets.y*ml` (starts `secrets.y`, ends `ml`);
-  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars` and
-  `*.tfvars.json`. Names that only look similar stay readable, for example
-  `environment.rs`, `keys.md`, `credentials.md`, `secrets.md` and `ssh_client.rs`.
+  `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.azure` and `.password-store` directories
+  (everything under them); `.config/gh` (everything under it); `.env*` and `*.env`
+  (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+  `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
+  `kubeconfig.yaml`, `kubeconfig.yml` and `application_default_credentials.json`;
+  `.docker/config.json`, `.cargo/credentials`,
+  `.cargo/credentials.toml` and `.gem/credentials` (only these files in those
+  directories); names starting `id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa`
+  (keys and their `.pub` copies); `credentials*.json`, `service-account*.json` and
+  `client_secret*.json`; `secrets.y*ml` (starts `secrets.y`, ends `ml`);
+  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars`,
+  `*.tfvars.json`, `*.tfstate`, `*.tfstate.backup` and timestamped `*.tfstate.*.backup`,
+  `*.p8`, `*.ppk` and `*.gpg`. Names that
+  only look similar stay readable, for example `environment.rs`, `keys.md`,
+  `credentials.md`, `secrets.md`, `ssh_client.rs`, `terraform.md`, `.docker/daemon.json`
+  and `.cargo/config.toml`.
   Limits: the list matches names only; file content is never scanned. Git's rename and
   copy detection finds a secret's copy or rename within git's similarity threshold, in
   git_diff and in git_commit (staged files, and unstaged files that the commit adds, are
