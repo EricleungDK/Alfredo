@@ -149,6 +149,32 @@ fn finished_line(state: RunState, status: &Status, reason: &str) -> String {
     )
 }
 
+/// The command-history 80% warning, said once. Measuring a history is not free, so it
+/// is looked at again only when a conversation gained or lost a command.
+#[derive(Default)]
+struct HistoryWatch {
+    warned: bool,
+    lengths: Vec<usize>,
+    /// How many times the histories were measured (for tests).
+    measured: usize,
+}
+impl HistoryWatch {
+    fn poll(&mut self, sessions: &[alfredo_tui::model::Session]) -> Option<String> {
+        if self.warned {
+            return None;
+        }
+        let lengths: Vec<usize> = sessions.iter().map(|s| s.commands().len()).collect();
+        if lengths == self.lengths {
+            return None;
+        }
+        self.lengths = lengths;
+        self.measured += 1;
+        let warning = sessions.iter().find_map(|s| s.command_history_warning())?;
+        self.warned = true;
+        Some(warning)
+    }
+}
+
 /// Status for a run whose saved state is unreadable.
 fn stopped_status(goal: &str) -> Status {
     Status {
@@ -314,8 +340,7 @@ pub fn run(options: Options) -> Result<i32, String> {
     let (mut last_refresh, mut last_save) = (Instant::now(), Instant::now());
     let mut stopping: Option<Instant> = None;
     let mut reason = String::new();
-    let mut history_warned = false;
-    let mut history_lengths: Vec<usize> = Vec::new();
+    let mut history = HistoryWatch::default();
     // A runtime failure after launch still ends with the JSON result.
     let mut fatal: Option<String> = None;
     loop {
@@ -345,27 +370,8 @@ pub fn run(options: Options) -> Result<i32, String> {
         for line in progress.lines(&status, &outcomes) {
             say(&line);
         }
-        // The warning needs the sessions' command lists measured, so look again only
-        // when one of them gained or lost a command.
-        if !history_warned {
-            let lengths: Vec<usize> = work
-                .app
-                .sessions
-                .iter()
-                .map(|s| s.commands().len())
-                .collect();
-            if lengths != history_lengths {
-                if let Some(warning) = work
-                    .app
-                    .sessions
-                    .iter()
-                    .find_map(|s| s.command_history_warning())
-                {
-                    say(&warning);
-                    history_warned = true;
-                }
-                history_lengths = lengths;
-            }
+        if let Some(warning) = history.poll(&work.app.sessions) {
+            say(&warning);
         }
         let drained = work.tasks.workers.is_empty() && !work.tasks.writing;
         let end = if let Some(since) = stopping {
@@ -1006,6 +1012,58 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_history_warning_fires_once_and_is_not_remeasured_while_counts_hold() {
+        use alfredo_tui::tasks::Request;
+        let mut app = alfredo_tui::model::App::new("fixture".into());
+        let mut watch = HistoryWatch::default();
+        let (mut said, mut changes) = (Vec::new(), 0);
+        for number in 0..500 {
+            let polls = if number == 0 { 1 } else { 3 };
+            for _ in 0..polls {
+                said.extend(watch.poll(&app.sessions));
+            }
+            if watch.warned {
+                break;
+            }
+            changes += 1;
+            assert_eq!(watch.measured, changes, "one measurement per change");
+            app.sessions[0]
+                .submit_command(
+                    "/task Live".into(),
+                    Intent::Task {
+                        request: Request {
+                            correlation: format!("watch-{number}"),
+                            expected_revision: 0,
+                            action: alfredo_tui::tasks::Action::Propose {
+                                title: "Proposed command task".into(),
+                                model: "fixture".into(),
+                                dependencies: vec![],
+                            },
+                        },
+                    },
+                )
+                .unwrap();
+        }
+        assert!(watch.warned, "the history crossed 80%");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("80%") && said[0].contains("/clear"),
+            "{said:?}"
+        );
+        let measured = watch.measured;
+        // More commands, and repeated polls: nothing more is said or measured.
+        let mut again = app.sessions[0].commands()[0].intent.clone();
+        if let Intent::Task { request } = &mut again {
+            request.correlation = "after".into();
+        }
+        app.sessions[0]
+            .submit_command("/task Live".into(), again)
+            .unwrap();
+        assert_eq!(watch.poll(&app.sessions), None);
+        assert_eq!(watch.measured, measured);
+    }
 
     fn status(state: RunState, done: usize) -> Status {
         Status {
