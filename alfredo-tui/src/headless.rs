@@ -64,6 +64,8 @@ pub struct Options<'a> {
     /// `--model` was given on the command line: it wins over the conversation's saved model.
     pub model_explicit: bool,
     pub goal: String,
+    /// `--resume`: continue the mission's paused run instead of planning `goal`.
+    pub resume: bool,
     pub max_repairs: u32,
 }
 
@@ -225,6 +227,19 @@ fn preflight(runtime: &Runtime, provider: &Ollama, model: &str) -> Result<(), St
         .map_err(|failure| alfredo_tui::doctor::model_check_message(model, &failure))
 }
 
+/// Why `--go` will not plan over a paused run, and the ways forward.
+fn paused_refusal(run: &Status) -> String {
+    format!(
+        "--go refused: this mission has a paused run: “{}” ({}/{} accepted). Nothing was planned. \
+         Continue it with --resume --headless. To start a different goal instead, pass \
+         --conversation NAME (a new name has no paused run; the paused one stays resumable under \
+         its own conversation) or use /go GOAL in the terminal, which replaces it",
+        stderr_line(&run.goal),
+        run.done,
+        run.total
+    )
+}
+
 /// Run the goal to its end. `Err` is a setup error; otherwise the exit code.
 pub fn run(options: Options) -> Result<i32, String> {
     let Options {
@@ -235,10 +250,11 @@ pub fn run(options: Options) -> Result<i32, String> {
         conversation,
         model,
         model_explicit,
-        goal,
+        mut goal,
+        resume,
         max_repairs,
     } = options;
-    if alfredo_tui::wayfinder::entry_mode(&goal).is_some() {
+    if !resume && alfredo_tui::wayfinder::entry_mode(&goal).is_some() {
         return Err("Wayfinder goals need the interactive terminal; state a coding goal".into());
     }
     let choice = runtime
@@ -257,14 +273,39 @@ pub fn run(options: Options) -> Result<i32, String> {
     }
     let mut work = Workstation::launch(runtime, &state_dir, request, &model, provider)?;
     work.tasks.refresh(runtime);
+    // A paused run is never silently forked (issue #280): `--go` refuses, `--resume` continues.
+    let paused = work.autopilot.paused_run(&work.tasks);
+    match (&paused, resume) {
+        (Some(run), false) => return Err(paused_refusal(run)),
+        (Some(run), true) if alfredo_tui::wayfinder::entry_mode(&run.goal).is_some() => {
+            return Err("Wayfinder goals need the interactive terminal; /resume the paused run there".into())
+        }
+        (None, true) => {
+            return Err("--resume: nothing to resume; this mission has no paused run (--go GOAL --headless starts one)".into())
+        }
+        _ => {}
+    }
     let model = run_model(&work, model, model_explicit);
     if !model_explicit {
         preflight(runtime, &checker, &model)?;
     }
     say(format!("model {model}"));
-    work.autopilot
-        .start(&goal, &model, max_repairs, &work.tasks)
-        .map_err(|error| format!("--go refused: {error}"))?;
+    if let Some(run) = paused {
+        goal = run.goal;
+        work.autopilot
+            .resume(&work.tasks)
+            .map_err(|error| format!("--resume refused: {error}"))?;
+        say(format!(
+            "resuming “{}” ({}/{} accepted)",
+            stderr_line(&goal),
+            run.done,
+            run.total
+        ));
+    } else {
+        work.autopilot
+            .start(&goal, &model, max_repairs, &work.tasks)
+            .map_err(|error| format!("--go refused: {error}"))?;
+    }
     work.tasks.set_visible(true);
     catch_signals();
 

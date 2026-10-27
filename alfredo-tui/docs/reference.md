@@ -222,10 +222,32 @@ printed on stderr and `failed` carries `{id:null,title:"autopilot",reason}` next
 failed tasks (additive: a plain pause with only the generic pause text keeps `failed:[]`). The same
 reason is autopilot's notice, so `/autopilot` and the saved state show it too. After the JSON,
 an `--on-finish` hook is awaited (see Completion hook). SIGINT and SIGTERM stop the run as `/stop` does: workers are cancelled,
-the state is kept paused and `/resume` in the TUI continues it. A second signal during the drain reports at once; a runtime error after launch
+the state is kept paused and `/resume` in the TUI or `--resume --headless` continues it. A second signal during the drain reports at once; a runtime error after launch
 stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
 refused (exit 2) because headless has no scope flow. Not covered yet: a
-goal from stdin, streaming output and a headless resume.
+goal from stdin and streaming output.
+
+### Paused runs: `--resume --headless`
+
+A run left paused (SIGINT/SIGTERM, `/stop`, an autopilot self-pause, or a restart of
+Alfredo) belongs to its conversation. `alfredo-tui --resume --headless` continues the
+default mission's paused run exactly as `/resume` does (same approvals, task policies and
+checks; a finished plan is not replanned, but a run paused mid-planning plans again, as `/resume` does) and prints `resuming “GOAL” (1/2 accepted)` on stderr,
+then the usual progress lines, the same JSON object (`goal` is the paused run's goal)
+and the same exit codes. With no paused run (none, or one that already finished) it
+exits 2 with `--resume: nothing to resume` on stderr and nothing on stdout. `--resume`
+takes no `--go`, `--chat`, `--model` or `--max-repairs` (the run keeps its own model and repair budget) and needs `--headless`. A paused Wayfinder goal is refused (exit 2); `/resume` it in the terminal.
+
+`--go GOAL --headless` over a paused run no longer plans a second task family beside
+it: it exits 2 before any planner call or task-store change, with an error naming the
+paused goal and its progress (`“GOAL” (0/2 accepted)`) and `--resume --headless`. A retry
+of the same command therefore fails loudly instead of forking the plan.
+
+There is no command that deletes a paused run. To start a different goal anyway, give
+the headless run another conversation name, `--conversation NAME`: the paused run is kept
+per conversation, so a new name has no paused run, while the original stays resumable with
+`--resume --headless` (default conversation). Interactive `/go GOAL` also starts a new run
+over a paused one and replaces it without a warning (a follow-up); `/stop` only pauses.
 
 An explicit `--model NAME` (the flag; not `ALFREDO_MODEL` or the default) is the model
 for a headless `--go`, a headless `--chat` and `--doctor`, even when the conversation
@@ -968,7 +990,8 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Escape | Abort the selected client request and retain partial output; a new prompt or `/model NAME` is then accepted |
 | Ctrl+R | Explicitly retry a failed/cancelled turn, replacing its partial reply; only until a new prompt starts a turn |
 | PageUp / PageDown | Scroll transcript, task/group details or open evidence |
-| Ctrl+Q / Ctrl+C | Quit and restore the terminal |
+| Ctrl+Q | Quit and restore the terminal |
+| Ctrl+C | While a chat reply is running and no worker is: cancel the turn like Esc (partial reply and prompt draft kept, session stays open, Ctrl+R retries). Otherwise quit and restore the terminal like Ctrl+Q; the draft is saved on exit either way (issue #345) |
 
 If a task write is pending, quit once waits for its receipt; pressing quit again
 exits with an unknown save outcome. Read-only refresh does not block quit. Reopen

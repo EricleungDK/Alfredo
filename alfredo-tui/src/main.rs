@@ -25,8 +25,12 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
         // Scripted runs report setup and usage errors as 2, like --doctor.
-        let headless = std::env::args()
-            .any(|arg| matches!(arg.as_str(), "--headless" | "--chat" | "--approve"));
+        let headless = std::env::args().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--headless" | "--chat" | "--approve" | "--resume"
+            )
+        });
         std::process::exit(if headless { 2 } else { 1 });
     }
 }
@@ -70,6 +74,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut qualification_inspection = None;
     let mut qualification_repetitions = None;
     let mut go_goal: Option<String> = None;
+    let mut resume = false;
+    let mut max_repairs_explicit = false;
     let mut headless = false;
     let mut chat_prompt: Option<String> = None;
     let mut approve: Option<headless::Policy> = None;
@@ -100,6 +106,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 go_goal = Some(goal);
             }
             "--headless" => headless = true,
+            "--resume" => resume = true,
             "--chat" => {
                 let prompt = args.next().ok_or("--chat needs a PROMPT")?;
                 if prompt.trim().is_empty() {
@@ -115,6 +122,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )?)
             }
             "--max-repairs" => {
+                max_repairs_explicit = true;
                 max_repairs = args
                     .next()
                     .and_then(|value| value.parse::<u32>().ok())
@@ -221,6 +229,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
         }
     }
+    if resume && (go_goal.is_some() || chat_prompt.is_some()) {
+        return Err("--resume cannot be combined with --go or --chat".into());
+    }
+    if resume && (model_explicit || max_repairs_explicit) {
+        return Err("--resume continues the paused run with its own model and repair budget; omit --model and --max-repairs".into());
+    }
+    if resume && !headless {
+        return Err(
+            "--resume needs --headless (in the terminal, /resume continues a paused run)".into(),
+        );
+    }
     if go_goal.is_some() && chat_prompt.is_some() {
         return Err("Choose either --go or --chat".into());
     }
@@ -231,7 +250,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--approve applies only to --chat PROMPT --headless".into());
     }
     if headless
-        && ((go_goal.is_none() && chat_prompt.is_none()) || select || mission.is_some() || doctor)
+        && ((go_goal.is_none() && chat_prompt.is_none() && !resume)
+            || select
+            || mission.is_some()
+            || doctor)
     {
         return Err("--headless needs --go GOAL or --chat PROMPT and opens the repository's default mission; omit --select, --mission, --new-mission and --doctor".into());
     }
@@ -364,6 +386,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model,
             model_explicit,
             goal: go_goal.unwrap_or_default(),
+            resume,
             max_repairs,
         })?;
         std::process::exit(code);
@@ -1358,6 +1381,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                        // Issue #345: Ctrl+C during a running chat turn stops it like Esc (draft
+                        // and session kept); idle, or with workers running, it quits as before.
+                        KeyCode::Char('c')
+                            if ctrl
+                                && work.tasks.workers.is_empty()
+                                && work.app.sessions[index].status.active() =>
+                        {
+                            cancel_chat_turn(
+                                &mut work.app,
+                                index,
+                                &mut jobs,
+                                &mut approval_replies,
+                            );
+                        }
                         KeyCode::Char('q' | 'c') if ctrl => {
                             work.tasks.disable_dispatch();
                             if !work.tasks.workers.is_empty() {
@@ -1504,24 +1541,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, true);
                         }
                         KeyCode::Esc => {
-                            // A pending action is denied (logged as cancelled) and the turn ends.
-                            if let Some(request) = approval_replies.remove(&index) {
-                                request.cancel();
-                            }
-                            if let Some(job) = jobs[index].take() {
-                                job.abort();
-                            }
-                            let summarising = work.app.sessions[index].compacting();
-                            let held = !work.app.sessions[index].queued_messages().is_empty();
-                            work.app.sessions[index].cancel();
-                            if held {
-                                work.app.notice =
-                                    "Queued text is back in the prompt; nothing was sent".into();
-                            }
-                            if summarising {
-                                work.app.notice =
-                                    "Summary cancelled; your prompt is kept in the draft".into();
-                            }
+                            cancel_chat_turn(&mut work.app, index, &mut jobs, &mut approval_replies)
                         }
                         KeyCode::Char('r') if ctrl => {
                             if work.wayfinder.session_active(index) {
@@ -2584,6 +2604,34 @@ fn withdraw_pending_architect(
     true
 }
 
+/// Esc, and Ctrl+C during a running chat turn (issue #345): a pending action is denied
+/// (logged as cancelled), the request is aborted and the turn ends; the draft is kept.
+fn cancel_chat_turn(
+    app: &mut alfredo_tui::model::App,
+    index: usize,
+    jobs: &mut [Option<JoinHandle<()>>],
+    approval_replies: &mut std::collections::HashMap<
+        usize,
+        alfredo_tui::chat_tools::approval::Request,
+    >,
+) {
+    if let Some(request) = approval_replies.remove(&index) {
+        request.cancel();
+    }
+    if let Some(job) = jobs[index].take() {
+        job.abort();
+    }
+    let summarising = app.sessions[index].compacting();
+    let held = !app.sessions[index].queued_messages().is_empty();
+    app.sessions[index].cancel();
+    if held {
+        app.notice = "Queued text is back in the prompt; nothing was sent".into();
+    }
+    if summarising {
+        app.notice = "Summary cancelled; your prompt is kept in the draft".into();
+    }
+}
+
 /// `--help` text, one output line per entry. Keep one line per flag or command group so
 /// parallel changes that add a flag touch different lines instead of one long literal.
 const HELP_LINES: &[&str] = &[
@@ -2623,11 +2671,12 @@ const HELP_LINES: &[&str] = &[
     "/compact summarise older turns into a short note now (also automatic near the size limit)",
     "/allow list always-allow rules (a on an approval card adds one; never for push) · /allow clear [ID]",
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
-    "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",
+    "Enter send · Ctrl+N new · Tab switch · Esc or Ctrl+C (while replying) cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
     "Chat transcript: Home/End (empty prompt) or Ctrl+Home/Ctrl+End jump to the oldest/latest row; End resumes following new output. With text in the prompt, Home/End move the cursor.",
     "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
     "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals): read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {model, state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
+    "--resume --headless continues the mission's paused run (left by SIGINT/SIGTERM, /stop or a restart) with the same stderr lines, JSON result and exit codes as --go; exit 2 with nothing on stdout when there is no paused run. --go GOAL --headless over a paused run exits 2 naming the paused goal and progress and plans nothing; start a different goal with --conversation NAME (a new name has no paused run) or /go GOAL in the terminal.",
     "--model NAME: in the terminal it is the model for new conversations (a restored conversation keeps its saved model). With --headless (--go or --chat) and --doctor an explicit --model is the model for that run even when the conversation has a saved one: it is checked against the installed list first (exit 2 names it), never saved, and echoed as \"model\" in the JSON and on one stderr line. Without --model (or with only ALFREDO_MODEL) the conversation's saved model applies.",
     "",
     "--doctor checks startup prerequisites without entering terminal mode or running inference.",
