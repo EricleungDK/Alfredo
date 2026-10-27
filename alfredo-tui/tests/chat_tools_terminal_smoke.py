@@ -392,6 +392,11 @@ class ChatTools(unittest.TestCase):
         # card scrolled its header off and refused y forever); n still denies.
         fcntl.ioctl(self.terminal.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
         self.terminal.process.send_signal(signal.SIGWINCH)
+        # Keys typed while the resize is still being handled are lost (CI hit this: the
+        # prompt stayed empty and the card never came). Wait for the 80-column frame to be
+        # drawn, then let the input reader settle before typing.
+        self.terminal.wait_for_width(80)
+        time.sleep(0.5)
         self.assertGreater(len(LONG), 880)
         self.terminal.write(b'long command\r')
         self.terminal.wait_for('Approve run_command')
