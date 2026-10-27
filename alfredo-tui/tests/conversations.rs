@@ -2038,6 +2038,191 @@ fn a_duplicate_correlation_is_refused_at_the_budget_as_under_it() {
     assert!(full.sessions[0].commands().len() <= before.len());
 }
 
+/// Fill the history with settled commands, then evict the oldest by admitting one more.
+fn evict_oldest_settled(app: &mut App, tag: &str) {
+    use alfredo_tui::console_command::CommandState;
+    fill_settled_until_full(app, tag);
+    let id = app.sessions[0]
+        .submit_command(
+            "/task Evictor".into(),
+            command_intent(&format!("{tag}-evictor")),
+        )
+        .unwrap();
+    app.sessions[0].set_command_state(
+        &id,
+        CommandState::Refused {
+            reason: "settled".into(),
+        },
+    );
+}
+
+#[test]
+fn an_evicted_commands_correlation_and_id_stay_refused_and_survive_a_save() {
+    use alfredo_tui::console_command::CommandState;
+    let mut app = App::new("fixture".into());
+    let original = app.sessions[0]
+        .submit_command("/scope one".into(), scope_intent("dup", "one"))
+        .unwrap();
+    app.sessions[0].set_command_state(
+        &original,
+        CommandState::Refused {
+            reason: "settled".into(),
+        },
+    );
+    let planned = |prompt: &str| alfredo_tui::command_intent::Intent::Planner {
+        request: alfredo_tui::planner_command::Request {
+            correlation: "plan-dup".into(),
+            operation: alfredo_tui::planner_command::Operation::Generate {
+                prompt: prompt.into(),
+                model: "fixture".into(),
+                revision: 0,
+                base_sha256: None,
+            },
+        },
+    };
+    let plan = app.sessions[0]
+        .submit_command("/plan one".into(), planned("one"))
+        .unwrap();
+    app.sessions[0].set_command_state(
+        &plan,
+        CommandState::Refused {
+            reason: "settled".into(),
+        },
+    );
+    evict_oldest_settled(&mut app, "retire");
+    evict_oldest_settled(&mut app, "retire-again");
+    assert!(
+        app.sessions[0].commands().iter().all(|c| c.id != original),
+        "the original was evicted"
+    );
+    let before = app.sessions[0].commands().to_vec();
+    let duplicate = |app: &mut App| {
+        let plan_error = app.sessions[0]
+            .submit_command("/plan two".into(), planned("two"))
+            .unwrap_err();
+        assert!(plan_error.contains("correlation"), "{plan_error}");
+        (
+            app.sessions[0]
+                .submit_command("/scope two".into(), scope_intent("dup", "two"))
+                .unwrap_err(),
+            app.sessions[0]
+                .submit_command("/scope one".into(), scope_intent("dup", "one"))
+                .unwrap_err(),
+        )
+    };
+    let (other_intent, same_intent) = duplicate(&mut app);
+    assert!(other_intent.contains("correlation"), "{other_intent}");
+    assert!(same_intent.contains("original"), "{same_intent}");
+    assert_eq!(
+        app.sessions[0].commands(),
+        before,
+        "a refusal changes nothing"
+    );
+    // The retired set is part of the saved conversation.
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    let mut restored = store.load().unwrap().unwrap().restore();
+    assert_eq!(duplicate(&mut restored), (other_intent, same_intent));
+    // A fresh correlation is still admitted.
+    restored.sessions[0]
+        .submit_command("/scope three".into(), scope_intent("fresh", "three"))
+        .unwrap();
+}
+
+#[test]
+fn the_retired_set_is_bounded_optional_and_validated_on_load() {
+    use alfredo_tui::console_command::CommandState;
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("fixture".into());
+    // Nothing evicted: the field is absent, as in every file saved before it existed.
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    let text = fs::read_to_string(fixture.file()).unwrap();
+    assert!(!text.contains("retired_commands"), "{text}");
+    assert!(store.load().unwrap().is_some());
+    fill_settled_until_full(&mut app, "bound");
+    for number in 0..1100 {
+        let id = app.sessions[0]
+            .submit_command(
+                "/task More".into(),
+                command_intent(&format!("more-{number}")),
+            )
+            .unwrap();
+        app.sessions[0].set_command_state(
+            &id,
+            CommandState::Refused {
+                reason: "settled".into(),
+            },
+        );
+    }
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    let mut saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture.file()).unwrap()).unwrap();
+    let retired = saved["sessions"][0]
+        .get("retired_commands")
+        .and_then(|value| value.as_array())
+        .map_or(0, Vec::len);
+    assert_eq!(retired, 1024, "bounded, oldest forgotten first");
+    assert!(store.load().unwrap().is_some());
+    let entries = saved["sessions"][0]["retired_commands"]
+        .as_array_mut()
+        .unwrap();
+    entries.push("one-too-many".into());
+    fs::write(fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    assert!(store.load().is_err(), "over the bound");
+    let entries = saved["sessions"][0]["retired_commands"]
+        .as_array_mut()
+        .unwrap();
+    entries.truncate(1023);
+    entries.push("".into());
+    fs::write(fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    assert!(store.load().is_err(), "an empty entry");
+}
+
+#[test]
+fn a_structure_refusal_names_its_cause_not_capacity() {
+    use alfredo_tui::{
+        assessment::{Decision, FailureKind, Outcome},
+        tasks::{Action, Request},
+    };
+    let mut app = App::new("fixture".into());
+    app.sessions[0]
+        .submit_command("/scope one".into(), scope_intent("dup", "one"))
+        .unwrap();
+    let duplicate = app.sessions[0]
+        .submit_command("/scope two".into(), scope_intent("dup", "two"))
+        .unwrap_err();
+    assert!(
+        duplicate.contains("correlation") && !duplicate.contains("capacity"),
+        "{duplicate}"
+    );
+    let orphan = app.sessions[0]
+        .submit_automatic_command(
+            "Automatic Architect draft".into(),
+            architect_draft(Request {
+                correlation: "missing-source".into(),
+                expected_revision: 5,
+                action: Action::ReviewArchitecture {
+                    task: 2,
+                    decision: Decision {
+                        failure: Some(FailureKind::Architecture),
+                        risk: None,
+                        outcome: Outcome::Rejected,
+                        reason: "Repeated architecture failure".into(),
+                        criteria: vec![],
+                        limitations: vec![],
+                    },
+                },
+            }),
+        )
+        .unwrap_err();
+    assert!(
+        orphan.contains("parent") && !orphan.contains("capacity"),
+        "{orphan}"
+    );
+}
+
 #[test]
 fn a_full_history_of_live_commands_still_refuses_with_the_capacity_error() {
     let mut app = App::new("fixture".into());
@@ -2346,6 +2531,33 @@ fn the_history_warning_joins_the_go_acknowledgement_instead_of_replacing_it() {
 }
 
 #[test]
+fn the_history_warning_joins_a_stale_notice_once_on_the_autopilot_path() {
+    // record_autopilot_command calls append_history_warning after each recorded command;
+    // an earlier notice stays (as for /go) and the warning appears exactly once.
+    let mut app = App::new("fixture".into());
+    app.notice = "Earlier notice".into();
+    let mut number = 0;
+    while app.sessions[0].command_history_warning().is_none() {
+        app.sessions[0]
+            .submit_command(
+                "/task Live".into(),
+                command_intent(&format!("auto-{number}")),
+            )
+            .unwrap();
+        app.append_history_warning(0);
+        number += 1;
+    }
+    app.append_history_warning(0);
+    app.append_history_warning(0);
+    assert_eq!(app.notice.matches("80% full").count(), 1, "{}", app.notice);
+    assert!(
+        app.notice.starts_with("Earlier notice · "),
+        "{}",
+        app.notice
+    );
+}
+
+#[test]
 fn command_order_and_anchor_order_must_match_saved_chronology() {
     let fixture = Fixture::new();
     let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
@@ -2593,6 +2805,113 @@ fn planner_schema12_preserves_v11_and_restores_only_exact_saved_draft_origin() {
     old_outcome.schema_version = 11;
     assert!(store.save(&old_outcome).is_err());
     assert_eq!(store.load().unwrap().unwrap(), terminal_snapshot);
+}
+
+/// A conversation whose only planner command is the saved draft's origin, in `state`.
+fn draft_origin_snapshot(
+    state: impl Fn(&alfredo_tui::planner::SavedDraft) -> alfredo_tui::console_command::CommandState,
+) -> (Snapshot, String) {
+    use alfredo_tui::{
+        command_intent::Intent,
+        planner_command::{Operation, Request},
+    };
+    let mut app = App::new("fixture".into());
+    let request = Request {
+        correlation: "planner-origin".into(),
+        operation: Operation::Generate {
+            prompt: "Implement calculation".into(),
+            model: "fixture".into(),
+            revision: 0,
+            base_sha256: None,
+        },
+    };
+    let id = app.sessions[0]
+        .submit_command(
+            "/plan Implement calculation".into(),
+            Intent::Planner {
+                request: request.clone(),
+            },
+        )
+        .unwrap();
+    let mut draft = saved_plan();
+    draft.origin = Some(request);
+    app.sessions[0].set_command_state(&id, state(&draft));
+    let mut snapshot = Snapshot::capture(&app, "default");
+    snapshot.plan_draft = Some(draft);
+    (snapshot, id)
+}
+
+#[test]
+fn a_draft_origin_that_could_be_evicted_is_not_a_valid_saved_state() {
+    use alfredo_tui::{
+        console_command::CommandState,
+        planner_command::Outcome::{self, Generated},
+    };
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    // Every state the eviction scan would take is refused as the origin of a saved
+    // draft; the states it keeps (Generated, live) and the one restore recovers are not.
+    let evictable: [fn(&alfredo_tui::planner::SavedDraft) -> CommandState; 3] = [
+        |_| CommandState::Refused {
+            reason: "settled".into(),
+        },
+        |_| CommandState::Planner {
+            outcome: Outcome::Stopped,
+        },
+        |_| CommandState::Planner {
+            outcome: Outcome::failed("failed"),
+        },
+    ];
+    for state in evictable {
+        let (snapshot, _) = draft_origin_snapshot(state);
+        let error = store.save(&snapshot).unwrap_err();
+        assert!(error.contains("origin"), "{error}");
+    }
+    let keep: [fn(&alfredo_tui::planner::SavedDraft) -> CommandState; 4] = [
+        |draft: &alfredo_tui::planner::SavedDraft| CommandState::Planner {
+            outcome: Generated {
+                draft_sha256: draft.digest().unwrap(),
+                tasks: 1,
+            },
+        },
+        |_| CommandState::Pending,
+        |_| CommandState::Submitted,
+        |_| CommandState::Unknown {
+            reason: "restored".into(),
+        },
+    ];
+    for state in keep {
+        let (snapshot, _) = draft_origin_snapshot(state);
+        store.save(&snapshot).unwrap();
+    }
+}
+
+#[test]
+fn eviction_never_takes_the_generated_command_a_saved_draft_names() {
+    use alfredo_tui::{console_command::CommandState, planner_command::Outcome::Generated};
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let (snapshot, id) = draft_origin_snapshot(|draft| CommandState::Planner {
+        outcome: Generated {
+            draft_sha256: draft.digest().unwrap(),
+            tasks: 1,
+        },
+    });
+    let draft = snapshot.plan_draft.clone();
+    let mut app = snapshot.restore();
+    fill_settled_to_budget(&mut app, "origin");
+    for number in 0..40 {
+        app.sessions[0]
+            .submit_command(
+                "/task New".into(),
+                command_intent(&format!("origin-new-{number}")),
+            )
+            .unwrap();
+    }
+    assert!(app.sessions[0].commands().iter().any(|c| c.id == id));
+    let mut again = Snapshot::capture(&app, "default");
+    again.plan_draft = draft;
+    store.save(&again).unwrap();
 }
 
 #[test]

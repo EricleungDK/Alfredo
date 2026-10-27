@@ -110,16 +110,27 @@ impl Snapshot {
                 {
                     return Err("Planner draft origin requires its saved command and conversation schema v12".into());
                 }
-                if let Some(crate::console_command::ConsoleCommand {
-                    state:
-                        crate::console_command::CommandState::Planner {
+                // Only a generated, live or recoverable (Unknown) command may be the
+                // origin: any other state is one history eviction could drop, which
+                // would make this draft unsaveable.
+                if let Some(command) = owner {
+                    use crate::console_command::CommandState;
+                    match &command.state {
+                        CommandState::Planner {
                             outcome: outcome @ crate::planner_command::Outcome::Generated { .. },
-                        },
-                    ..
-                }) = owner
-                {
-                    if draft.outcome_for(origin).as_ref() != Some(outcome) {
-                        return Err("Planner draft and originating result disagree".into());
+                        } => {
+                            if draft.outcome_for(origin).as_ref() != Some(outcome) {
+                                return Err("Planner draft and originating result disagree".into());
+                            }
+                        }
+                        CommandState::Pending
+                        | CommandState::Submitted
+                        | CommandState::Unknown { .. } => {}
+                        _ => {
+                            return Err(
+                                "Planner draft origin command is neither generated nor live".into(),
+                            );
+                        }
                     }
                 }
             }
