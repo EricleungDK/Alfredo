@@ -395,7 +395,8 @@ class ChatTools(unittest.TestCase):
         # chat is tool-free and says so; /scope-clear restores the tools.
         self.terminal.write(b'plan a migration of the whole system\r')
         self.terminal.wait_for('Scope is not agreed yet')
-        self.terminal.wait_for('tools off')
+        # Wait for the whole footer: a partial redraw can stop at "tools off he".
+        self.terminal.wait_for('tools off here · /scope-clear gives them back')
         self.assertIn('/scope-clear', self.terminal.screen())
         self.assertEqual(len(self.fixture.chats()), 0)
         self.terminal.write(b'please just do it\r')
