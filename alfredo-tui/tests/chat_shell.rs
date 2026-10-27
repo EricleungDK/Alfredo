@@ -655,6 +655,8 @@ fn a_running_command_shows_its_status_and_that_esc_stops_it() {
     session.apply(attempt, Update::Admitted);
     let shown = Instant::now();
     assert!(session.await_approval(attempt, card, shown));
+    // Stands in for a draw that showed the whole card (issue #303).
+    session.set_approval_whole(true);
     session.approval_visible(true, shown);
     let armed = shown + approval::ARM + Duration::from_millis(1);
     assert_eq!(session.answer_approval('y', armed), Some(Decision::Approve));

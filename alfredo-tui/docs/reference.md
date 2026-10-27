@@ -1733,6 +1733,13 @@ Approval (ADR 0004); there is no skip-approval mode.
   diff is cut to the rows that fit (`[N more diff lines]`) so the header, arguments and
   key line stay on screen; the 0.5 s delay below starts only once the header rows are
   drawn, and PageUp that scrolls them out of view disarms `y`/`n` until they return.
+  `y` and `a` also need the whole card on screen: header, arguments, every `$` line of a
+  `run_command` and the key line, with rows counted in display columns. A command or path
+  too long to show whole on the current terminal makes the card deny-only (issue #303): the
+  header is shortened with `…`, the key line reads `n deny · Esc cancels the turn (deny) ·
+  y is off: the whole card does not fit here, enlarge the terminal or press n`, and `y`/`a`
+  are refused with that advice while `n` still denies. Enlarging the terminal re-evaluates
+  the card; on a terminal so short that the header cannot be drawn, only Esc answers.
 - **Waiting on you.** While a card is pending the chat's side-pane row and its frame title
   read `approve?` (amber `●`, no spinner) instead of `thinking`, and the timing line says
   `waiting for approval`. The turn clock leaves out the time the card waited, so the

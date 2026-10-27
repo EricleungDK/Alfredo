@@ -266,6 +266,8 @@ fn pending(card: Card) -> Session {
     session.apply(attempt, Update::Admitted);
     let now = Instant::now();
     assert!(session.await_approval(attempt, card, now));
+    // Stands in for a draw that showed the whole card (issue #303).
+    session.set_approval_whole(true);
     session.approval_visible(true, now);
     session
 }

@@ -95,6 +95,22 @@ class Pty:
             self.test.assertIsNone(self.process.poll(), self.output.decode(errors='replace'))
         self.test.fail(f'Missing {text!r}:\n{self.screen()}')
 
+    def wait_for_width(self, width, timeout=10):
+        """Wait until the drawn frame is exactly `width` columns wide (after a resize)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            rows = [line.rstrip() for line in self.screen().split('\n')]
+            if any(line.startswith('┌') and len(line) == width for line in rows) and not any(
+                    len(line) > width for line in rows):
+                return
+            if select.select([self.master], [], [], 0.05)[0]:
+                chunk = os.read(self.master, 65536)
+                self.output.extend(chunk)
+                if b'\x1b[6n' in chunk:
+                    os.write(self.master, b'\x1b[1;1R')
+            self.test.assertIsNone(self.process.poll(), self.output.decode(errors='replace'))
+        self.test.fail(f'Never drew a {width}-column frame:\n{self.screen()}')
+
     def wait_gone(self, text, timeout=10):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
