@@ -1731,7 +1731,8 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   copied from them. Git runs only in the workspace itself (`GIT_CEILING_DIRECTORIES`),
   a call is stopped after 15 s, and when the repository config defines filter drivers,
   includes, a partial clone (`extensions.partialclone`, `remote.*.promisor`), a remote's
-  `uploadpack` or `receivepack` program, `core.sshcommand` or `core.gitproxy`, `git_status`
+  `uploadpack` or `receivepack` program, `core.sshcommand`, `core.gitproxy` or a
+  `protocol.allow` / `protocol.<name>.allow` setting, `git_status`
   and working-tree or staged diffs are refused (they would run the repository's clean
   filters, or lazy-fetch through its transport); the refusal names the keys. Host git runs
   with lazy fetch and every transport disabled (`GIT_NO_LAZY_FETCH`, `protocol.allow=never`),
@@ -1949,7 +1950,8 @@ credentials). Each call pauses for Approval like a file edit.
   already-up-to-date merge or push, a detached HEAD for commit, merge and push, and
   repositories whose config defines filter drivers, includes, `core.worktree`, a partial
   clone (`extensions.partialclone`, `remote.*.promisor`), a remote's `uploadpack` or
-  `receivepack` program, `core.sshcommand` or `core.gitproxy`.
+  `receivepack` program, `core.sshcommand`, `core.gitproxy` or a `protocol.allow` /
+  `protocol.<name>.allow` setting.
 - **Changed since the preview.** On approval HEAD, the current branch, local and
   remote-tracking refs, the index, working-tree status, the remote URLs and the
   repository config must match the preview; otherwise nothing runs and the model gets

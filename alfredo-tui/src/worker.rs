@@ -870,12 +870,18 @@ pub(crate) fn config_needs_qualification(config: &str) -> bool {
 /// `key=value`, but a subsection may hold `=` (`[remote "a=b"]`), so every `=` split is
 /// tried: a key that hides behind one still qualifies (fails closed).
 pub(crate) fn qualification_key(config: &str) -> Option<&str> {
-    config.lines().find_map(|line| {
-        line.match_indices('=')
-            .map(|(index, _)| &line[..index])
-            .chain(std::iter::once(line))
-            .find(|key| is_qualification_key(key))
-    })
+    // `config --list` also shows Alfredo's own command-line `protocol.allow=never`
+    // (LOCAL_ONLY_GIT_ARGS). A repository line with that exact text denies every transport
+    // too, so skipping it cannot hide an override (#467 review round 2).
+    config
+        .lines()
+        .filter(|line| *line != "protocol.allow=never")
+        .find_map(|line| {
+            line.match_indices('=')
+                .map(|(index, _)| &line[..index])
+                .chain(std::iter::once(line))
+                .find(|key| is_qualification_key(key))
+        })
 }
 
 /// Keys that make git run a repository-chosen program or follow another file: filter
@@ -893,6 +899,9 @@ fn is_qualification_key(key: &str) -> bool {
             && [".promisor", ".uploadpack", ".receivepack"]
                 .iter()
                 .any(|suffix| key.ends_with(suffix)))
+        // `protocol.allow` and `protocol.<name>.allow`: a per-protocol setting overrides the
+        // command-line `protocol.allow=never` (#467 review).
+        || (key.starts_with("protocol.") && key.ends_with(".allow"))
 }
 
 /// The `dirty` count recorded when uncommitted changes could not be checked
@@ -3685,5 +3694,10 @@ mod host_git_tests {
             assert!(super::config_needs_qualification(config), "{config:?}");
         }
         assert!(!super::config_needs_qualification("protocol.version=2\n"));
+        // Alfredo's own command-line override is listed by `config --list`; it is not a
+        // repository setting.
+        assert!(!super::config_needs_qualification(
+            "protocol.allow=never\nremote.origin.url=/x\n"
+        ));
     }
 }

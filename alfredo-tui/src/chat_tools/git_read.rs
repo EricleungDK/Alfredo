@@ -333,11 +333,15 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 /// matching key names, so a large config cannot push one out of the output the way it cuts
 /// a full `config --list` (#308). `remote\..+` spans subsections that hold `=`, as
 /// `qualification_key` does.
-const FILTER_KEYS_ARGS: [&str; 4] = [
+/// `--show-scope` labels each line, so the command-line overrides of the hardened environment
+/// (`protocol.allow=never`, which matches the `protocol.allow` key) are skipped: they are
+/// Alfredo's own settings, not the repository's (#467 review round 2).
+const FILTER_KEYS_ARGS: [&str; 5] = [
     "config",
+    "--show-scope",
     "--name-only",
     "--get-regexp",
-    "^(filter|include|includeif)\\.|^core\\.(worktree|sshcommand|gitproxy)$|^extensions\\.partialclone$|^remote\\..+\\.(promisor|uploadpack|receivepack)$",
+    "^(filter|include|includeif)\\.|^core\\.(worktree|sshcommand|gitproxy)$|^extensions\\.partialclone$|^remote\\..+\\.(promisor|uploadpack|receivepack)$|^protocol\\.(allow|.+\\.allow)$",
 ];
 
 /// Most bytes of matching key names read; a listing past it is refused.
@@ -363,7 +367,15 @@ fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), 
         // Every listed key is a qualifying key, so any output refuses; the first three are named.
         Some(status) if status.success() => {
             let listing = String::from_utf8_lossy(&out);
-            let keys: Vec<&str> = listing.lines().collect();
+            // Each line is `scope<TAB>key`; command-scope lines are Alfredo's own overrides.
+            let keys: Vec<&str> = listing
+                .lines()
+                .filter_map(|line| match line.split_once('\t') {
+                    Some(("command", _)) => None,
+                    Some((_, key)) => Some(key),
+                    None => Some(line),
+                })
+                .collect();
             if keys.is_empty() {
                 return Ok(());
             }
@@ -1601,6 +1613,7 @@ mod tests {
         let error = refuse_filters(&root).unwrap_err();
         assert!(error.contains("protocol.file.allow"), "{error}");
         let version = scratch_repo("protocol-version", "[protocol]\n\tversion = 2\n");
-        assert!(refuse_filters(&version).is_ok());
+        let verdict = refuse_filters(&version);
+        assert!(verdict.is_ok(), "protocol.version refused: {verdict:?}");
     }
 }
