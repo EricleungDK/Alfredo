@@ -3747,6 +3747,27 @@ mod host_git_tests {
         assert_ne!(super::UNCHECKED_TIMED_OUT, super::UNCHECKED_FAILED);
     }
 
+    /// Review round 3 (#470): a `git status` that exits non-zero (here a corrupt index) gave
+    /// no count, so the start recorded no warning for a modified tracked file. It is a
+    /// check that did not finish, and must read as not checked, never as clean.
+    #[test]
+    fn uncommitted_changes_reports_a_failed_status_as_not_checked() {
+        let root = unique_root("corrupt-index");
+        fixture_git(&root, &["init", "-q"]);
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        fixture_git(&root, &["add", "a.txt"]);
+        fixture_git(&root, &["commit", "-qm", "i"]);
+        fs::write(root.join("a.txt"), "two\n").unwrap();
+        fs::write(root.join(".git/index"), b"junk").unwrap();
+        let changes = uncommitted_changes(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            changes.map(|(count, _)| count),
+            Some(super::UNCHECKED_FAILED),
+            "a failed status must not read as clean or as a count"
+        );
+    }
+
     /// Review round 2 (#467): a partial clone whose missing blob would make git lazy-fetch
     /// through the repository's uploadpack program, which appends `RAN` to the returned
     /// marker. Returns (workspace, marker).
