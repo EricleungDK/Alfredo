@@ -774,11 +774,11 @@ fn a_linked_worktree_with_a_relative_back_reference_still_reads() {
         ],
     );
     // The entry sits at <repo>/.git/worktrees/wt; from there the workspace is ../../../../wt.
-    fs::write(
-        repo.root.join(".git/worktrees/wt/gitdir"),
-        "../../../../wt/.git\r\n",
-    )
-    .unwrap();
+    // Rename over `gitdir`: truncating it in place would leave a prunable entry.
+    let gitdir = repo.root.join(".git/worktrees/wt/gitdir");
+    let staged = gitdir.with_file_name("gitdir.new");
+    fs::write(&staged, "../../../../wt/.git\r\n").unwrap();
+    fs::rename(&staged, &gitdir).unwrap();
     let log = chat_tools::dispatch(
         &wt,
         &ToolCall {
