@@ -177,12 +177,26 @@ impl WorkerFormat {
 const FILE_START: &str = "=== FILE: ";
 const FILE_START_END: &str = " ===";
 const FILE_END: &str = "=== END FILE ===";
+const EDIT_START: &str = "=== EDIT: ";
+const EDIT_END: &str = "=== END EDIT ===";
+const SEARCH_MARKER: &str = "<<<<<<< SEARCH";
+const DIVIDER_MARKER: &str = "=======";
+const REPLACE_MARKER: &str = ">>>>>>> REPLACE";
 
 /// Path of a `=== FILE: path ===` marker line starting at column 0.
 fn file_marker(line: &str) -> Option<&str> {
+    block_marker(line, FILE_START)
+}
+
+/// Path of a `=== EDIT: path ===` marker line starting at column 0.
+fn edit_marker(line: &str) -> Option<&str> {
+    block_marker(line, EDIT_START)
+}
+
+fn block_marker<'a>(line: &'a str, start: &str) -> Option<&'a str> {
     let path = line
         .trim_end()
-        .strip_prefix(FILE_START)?
+        .strip_prefix(start)?
         .strip_suffix(FILE_START_END)?
         .trim();
     (!path.is_empty()).then_some(path)
@@ -226,26 +240,116 @@ fn block_content(lines: &[&str]) -> String {
     }
 }
 
-/// Parse a worker answer: FILE blocks, or a legacy JSON file plan. File content
-/// containing a line equal to a marker is not representable and is refused.
-pub fn parse_answer(answer: &str) -> Result<FilePlan> {
+/// One `=== EDIT: path ===` block: SEARCH/REPLACE pairs applied in order to the
+/// approved file's current content (issue #366).
+#[derive(Debug)]
+pub struct EditBlock {
+    pub path: String,
+    /// (SEARCH, REPLACE) texts, each line newline-terminated.
+    pub pairs: Vec<(String, String)>,
+}
+
+struct Parsed {
+    files: Vec<FileEdit>,
+    edits: Vec<EditBlock>,
+}
+
+enum Open<'a> {
+    File(&'a str, Vec<&'a str>),
+    Edit(&'a str, Vec<&'a str>),
+}
+
+/// SEARCH/REPLACE pairs of the lines inside one EDIT block.
+fn edit_pairs(path: &str, lines: &[&str]) -> Result<Vec<(String, String)>> {
+    #[derive(PartialEq)]
+    enum State {
+        Between,
+        Search,
+        Replace,
+    }
+    let text = |lines: &[&str]| {
+        lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>()
+    };
+    let shown = shown_path(path);
+    let (mut pairs, mut state) = (Vec::new(), State::Between);
+    let (mut search, mut replace): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
+    for line in lines {
+        let marker = line.trim_end();
+        let number = pairs.len() + 1;
+        match state {
+            State::Between if marker == SEARCH_MARKER => state = State::Search,
+            State::Between if marker.is_empty() => {}
+            State::Between => {
+                return Err(format!(
+                    "EDIT block for {shown} has unexpected text outside a {SEARCH_MARKER} pair"
+                ))
+            }
+            State::Search if marker == DIVIDER_MARKER => state = State::Replace,
+            State::Search if marker == SEARCH_MARKER || marker == REPLACE_MARKER => {
+                return Err(format!(
+                    "EDIT block for {shown} pair {number} has a marker line before {DIVIDER_MARKER}"
+                ))
+            }
+            State::Search => search.push(line),
+            State::Replace if marker == REPLACE_MARKER => {
+                pairs.push((text(&search), text(&replace)));
+                search.clear();
+                replace.clear();
+                state = State::Between;
+            }
+            State::Replace if marker == SEARCH_MARKER || marker == DIVIDER_MARKER => {
+                return Err(format!(
+                    "EDIT block for {shown} pair {number} has a marker line before {REPLACE_MARKER}"
+                ))
+            }
+            State::Replace => replace.push(line),
+        }
+    }
+    match state {
+        State::Between if pairs.is_empty() => Err(format!(
+            "EDIT block for {shown} has no SEARCH/REPLACE pairs"
+        )),
+        State::Between => Ok(pairs),
+        State::Search => Err(format!(
+            "EDIT block for {shown} pair {} ends before {DIVIDER_MARKER}",
+            pairs.len() + 1
+        )),
+        State::Replace => Err(format!(
+            "EDIT block for {shown} pair {} ends before {REPLACE_MARKER}",
+            pairs.len() + 1
+        )),
+    }
+}
+
+/// Parse a worker answer into FILE and EDIT blocks, or a legacy JSON file plan.
+/// Content containing a line equal to a marker is not representable and is refused.
+fn parse_blocks(answer: &str) -> Result<Parsed> {
     let trimmed = answer.trim();
     if trimmed.starts_with('{') {
         if let Ok(plan) = serde_json::from_str::<FilePlan>(trimmed) {
-            return Ok(plan);
+            return Ok(Parsed {
+                files: plan.files,
+                edits: Vec::new(),
+            });
         }
     }
     let text = answer.replace("\r\n", "\n");
     let mut files = Vec::new();
-    let mut open: Option<(&str, Vec<&str>)> = None;
+    let mut edits = Vec::new();
+    let mut open: Option<Open> = None;
     for line in text.split('\n') {
         match &mut open {
             None => {
                 if let Some(path) = file_marker(line) {
-                    open = Some((path, Vec::new()));
+                    open = Some(Open::File(path, Vec::new()));
+                } else if let Some(path) = edit_marker(line) {
+                    open = Some(Open::Edit(path, Vec::new()));
                 }
             }
-            Some((path, lines)) => {
+            Some(Open::File(path, lines)) => {
                 if end_marker(line) {
                     files.push(FileEdit {
                         path: path.to_string(),
@@ -261,19 +365,156 @@ pub fn parse_answer(answer: &str) -> Result<FilePlan> {
                     lines.push(line);
                 }
             }
+            Some(Open::Edit(path, lines)) => {
+                if line.trim_end() == EDIT_END {
+                    edits.push(EditBlock {
+                        path: path.to_string(),
+                        pairs: edit_pairs(path, lines)?,
+                    });
+                    open = None;
+                } else if file_marker(line).is_some()
+                    || edit_marker(line).is_some()
+                    || end_marker(line)
+                {
+                    return Err(format!(
+                        "EDIT block for {} contains a marker line before {EDIT_END}; edit text cannot contain marker lines",
+                        shown_path(path)
+                    ));
+                } else {
+                    lines.push(line);
+                }
+            }
         }
     }
-    if let Some((path, _)) = open {
-        return Err(format!(
-            "Model output ended inside FILE block for {} (truncated)",
-            shown_path(path)
-        ));
+    match open {
+        Some(Open::File(path, _)) => {
+            return Err(format!(
+                "Model output ended inside FILE block for {} (truncated)",
+                shown_path(path)
+            ))
+        }
+        Some(Open::Edit(path, _)) => {
+            return Err(format!(
+                "Model output ended inside EDIT block for {} (truncated)",
+                shown_path(path)
+            ))
+        }
+        None => {}
     }
-    if files.is_empty() {
+    if files.is_empty() && edits.is_empty() {
         return Err(if trimmed.starts_with('{') {
             "Worker did not return a valid file plan; no files applied".into()
         } else {
             "Model returned no FILE blocks".into()
+        });
+    }
+    Ok(Parsed { files, edits })
+}
+
+/// Parse a worker answer: FILE blocks, or a legacy JSON file plan. EDIT blocks need
+/// the approved files' content: use [`resolve_answer`] for those.
+pub fn parse_answer(answer: &str) -> Result<FilePlan> {
+    let parsed = parse_blocks(answer)?;
+    if !parsed.edits.is_empty() {
+        return Err("EDIT blocks need the approved files' content; resolve them first".into());
+    }
+    Ok(FilePlan {
+        files: parsed.files,
+    })
+}
+
+/// Occurrences of `needle` in `haystack`, overlapping ones included.
+fn occurrences(haystack: &str, needle: &str) -> usize {
+    let (mut count, mut from) = (0, 0);
+    while let Some(at) = haystack[from..].find(needle) {
+        count += 1;
+        from += at
+            + haystack[from + at..]
+                .chars()
+                .next()
+                .map_or(1, char::len_utf8);
+    }
+    count
+}
+
+/// Apply `block`'s pairs, in order, to `current`. Each SEARCH must match exactly
+/// once in the content so far; any failing pair fails the whole block.
+fn apply_edit(block: &EditBlock, current: &str) -> Result<String> {
+    let shown = shown_path(&block.path);
+    let mut content = current.replace("\r\n", "\n");
+    for (index, (search, replace)) in block.pairs.iter().enumerate() {
+        let number = index + 1;
+        if search.is_empty() {
+            return Err(format!(
+                "EDIT for {shown} pair {number} has an empty SEARCH"
+            ));
+        }
+        let excerpt: String = crate::dashboard::single_line(search.lines().next().unwrap_or(""))
+            .chars()
+            .take(60)
+            .collect();
+        match occurrences(&content, search) {
+            1 => content = content.replacen(search.as_str(), replace, 1),
+            0 => {
+                return Err(format!(
+                    "EDIT for {shown} pair {number}: SEARCH text not found in the current file (\"{excerpt}\"); copy it exactly from the file, including indentation"
+                ))
+            }
+            many => {
+                return Err(format!(
+                    "EDIT for {shown} pair {number}: SEARCH text matches {many} times (\"{excerpt}\"); add neighbouring lines so it matches exactly once"
+                ))
+            }
+        }
+    }
+    Ok(content)
+}
+
+/// The answer's file plan, EDIT blocks converted to the equivalent whole-file
+/// edits so `validate_plan` and every later path check apply to them unchanged.
+/// `current` gives the approved file's baseline text (`None` for a new file); it
+/// is asked only for approved paths. Without EDIT blocks this is `parse_answer_for`.
+pub fn resolve_answer(
+    answer: &str,
+    policy: &WorkPolicy,
+    current: &dyn Fn(&str) -> Option<String>,
+) -> Result<FilePlan> {
+    let Ok(Parsed { mut files, edits }) = parse_blocks(answer) else {
+        return parse_answer_for(answer, policy);
+    };
+    if edits.is_empty() {
+        return parse_answer_for(answer, policy);
+    }
+    let mut named = BTreeSet::new();
+    for block in &edits {
+        let shown = shown_path(&block.path);
+        if files.iter().any(|file| file.path == block.path) {
+            return Err(format!(
+                "Returned {shown} as both a FILE and an EDIT block; use one block per file"
+            ));
+        }
+        if !named.insert(&block.path) {
+            return Err(format!(
+                "Returned EDIT blocks for {shown} more than once; put all its pairs in one block"
+            ));
+        }
+    }
+    for block in &edits {
+        let content = if policy.files.contains(&block.path) {
+            let base = current(&block.path).ok_or_else(|| {
+                format!(
+                    "EDIT for {} but the file does not exist yet; create it with a FILE block",
+                    shown_path(&block.path)
+                )
+            })?;
+            apply_edit(block, &base)?
+        } else {
+            // Not approved: never read. validate_plan refuses it as for a FILE block.
+            String::new()
+        };
+        files.push(FileEdit {
+            path: block.path.clone(),
+            content,
         });
     }
     Ok(FilePlan { files })
@@ -288,8 +529,10 @@ pub fn parse_answer_for(answer: &str, policy: &WorkPolicy) -> Result<FilePlan> {
     };
     // Only a fence-only answer: never rescue a FILE-block or JSON attempt that failed.
     let text = answer.replace("\r\n", "\n");
-    let attempted =
-        answer.trim().starts_with('{') || text.split('\n').any(|l| file_marker(l).is_some());
+    let attempted = answer.trim().starts_with('{')
+        || text
+            .split('\n')
+            .any(|l| file_marker(l).is_some() || edit_marker(l).is_some());
     if let ([path], Some(content), false) =
         (policy.files.as_slice(), single_fence(answer), attempted)
     {
@@ -344,6 +587,32 @@ pub fn render_blocks(plan: &FilePlan) -> String {
         .collect()
 }
 
+/// The previous answer as blocks for a fresh repair: EDIT blocks stay EDIT blocks
+/// (they apply to the baseline, which a repair starts from again).
+fn prior_blocks(answer: &str, policy: Option<&WorkPolicy>) -> Option<String> {
+    if let Ok(Parsed { files, edits }) = parse_blocks(answer) {
+        if !edits.is_empty() {
+            let mut text = render_blocks(&FilePlan { files });
+            for edit in &edits {
+                text.push_str(&format!("{EDIT_START}{}{FILE_START_END}\n", edit.path));
+                for (search, replace) in &edit.pairs {
+                    text.push_str(&format!(
+                        "{SEARCH_MARKER}\n{search}{DIVIDER_MARKER}\n{replace}{REPLACE_MARKER}\n"
+                    ));
+                }
+                text.push_str(EDIT_END);
+                text.push('\n');
+            }
+            return Some(text);
+        }
+    }
+    match policy {
+        Some(policy) => parse_answer_for(answer, policy).ok(),
+        None => parse_answer(answer).ok(),
+    }
+    .map(|plan| render_blocks(&plan))
+}
+
 /// A complete markdown fence line: three backticks and an optional info string.
 fn fence_line(line: &str) -> bool {
     line.trim()
@@ -371,7 +640,10 @@ pub fn display_output(text: &str) -> String {
         if let Some(path) = file_marker(line) {
             shown.push_str(&format!("▸ {path}\n"));
             (in_block, seen, wrapped, depth) = (true, false, false, 0);
-        } else if end_marker(line) {
+        } else if let Some(path) = edit_marker(line) {
+            shown.push_str(&format!("▸ {path} (edit)\n"));
+            (in_block, seen, wrapped, depth) = (true, false, false, 0);
+        } else if end_marker(line) || line.trim_end() == EDIT_END {
             in_block = false;
         } else if (!complete && (line.starts_with("===") || partial_fence(line)))
             || (fence_line(line)
@@ -1289,11 +1561,15 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
     if hit {
         section.push_str(&format!("The previous attempt's output hit the {}-token limit before the file plan was complete; this request allows {num_predict} tokens. Return only files that must change, without commentary.\n", limit.unwrap_or(4096)));
     }
-    let truncated = detail
-        .strip_prefix("Model output ended inside FILE block for ")
-        .and_then(|rest| rest.strip_suffix(" (truncated)"));
-    if let Some(path) = truncated {
-        section.push_str(&format!("The previous response was truncated inside the FILE block for {path} before its {FILE_END} line. Return every changed file completely, each block ending with {FILE_END}.\n"));
+    let truncated = [("FILE", FILE_END), ("EDIT", EDIT_END)]
+        .into_iter()
+        .find_map(|(kind, end)| {
+            let rest =
+                detail.strip_prefix(&format!("Model output ended inside {kind} block for "))?;
+            Some((kind, end, rest.strip_suffix(" (truncated)")?))
+        });
+    if let Some((kind, end, path)) = truncated {
+        section.push_str(&format!("The previous response was truncated inside the {kind} block for {path} before its {end} line. Return every changed file completely, each block ending with {end}.\n"));
     }
     let output = parent
         .as_ref()
@@ -1316,11 +1592,7 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
     let prior_files = parent
         .as_ref()
         .and_then(|p| crate::agent::retained_answer(store, p))
-        .and_then(|answer| match task.policy.as_ref() {
-            Some(policy) => parse_answer_for(&answer, policy).ok(),
-            None => parse_answer(&answer).ok(),
-        })
-        .map(|plan| render_blocks(&plan));
+        .and_then(|answer| prior_blocks(&answer, task.policy.as_ref()));
     // A cancelled run (a steer) failed nothing: no failing section.
     let cancelled = parent
         .as_ref()
@@ -1926,6 +2198,8 @@ async fn perform(
         notes.append_to_prompt(&mut notes_block);
     }
     let mut context = String::new();
+    // Baseline text of each existing approved file, for EDIT blocks to apply to.
+    let mut baselines = std::collections::HashMap::new();
     for path in &policy.files {
         let file = safe_file(worktree, path)?;
         let content = if file.exists() {
@@ -1952,6 +2226,9 @@ async fn perform(
             "(new file)".into()
         };
         context.push_str(&format!("\nFILE {path}\n{content}\n"));
+        if file.exists() {
+            baselines.insert(path.clone(), content);
+        }
         if context.len() > SOURCE_CONTEXT {
             evidence.failure_code = Some(FILE_TOO_LARGE.into());
             return Err(context_too_large(context.len()));
@@ -2018,7 +2295,7 @@ async fn perform(
     }
     let schema = serde_json::json!({"type":"object","required":["files"],"additionalProperties":false,"properties":{"files":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","required":["path","content"],"additionalProperties":false,"properties":{"path":{"type":"string","enum":policy.files},"content":{"type":"string"}}}}}});
     let answer_rules = match format {
-        WorkerFormat::Blocks => format!("Return each changed file as one FILE block, exactly:\n{FILE_START}<path>{FILE_START_END}\n<complete file content, verbatim>\n{FILE_END}\nOne block per changed file with its complete new content; <path> is one of the allowed files. Write file content exactly as it belongs on disk: no JSON, no escaping, no markdown fences. File content cannot contain a line equal to a marker line. Text outside FILE blocks is ignored."),
+        WorkerFormat::Blocks => format!("Return each changed file as one FILE block, exactly:\n{FILE_START}<path>{FILE_START_END}\n<complete file content, verbatim>\n{FILE_END}\nOne block per changed file with its complete new content; <path> is one of the allowed files. Write file content exactly as it belongs on disk: no JSON, no escaping, no markdown fences. File content cannot contain a line equal to a marker line. Text outside blocks is ignored.\nFor a small change to an existing large file, return an EDIT block instead of the whole file:\n{EDIT_START}<path>{FILE_START_END}\n{SEARCH_MARKER}\n<exact old lines>\n{DIVIDER_MARKER}\n<new lines>\n{REPLACE_MARKER}\n{EDIT_END}\nEach SEARCH is copied verbatim from the file shown below, is never empty and must match the file exactly once (add neighbouring lines to make it unique); several pairs are applied in order, and if any pair fails nothing is applied. Use one block per file, FILE or EDIT, never both; EDIT cannot create a file."),
         WorkerFormat::Json => format!("Return complete replacement text for changed files matching this JSON schema: {schema}\nDo not use markdown fences."),
     };
     // Repairs lead with what still fails, ahead of policy and long evidence.
@@ -2031,7 +2308,7 @@ async fn perform(
     if format == WorkerFormat::Blocks {
         // Restated after long context: a live fresh repair answered with a bare fence.
         prompt.push_str(&format!(
-            "\nAnswer only with FILE blocks, one per changed file, each ending with {FILE_END}\n"
+            "\nAnswer only with FILE blocks, one per changed file, each ending with {FILE_END}, or with EDIT blocks for small changes to large files, each ending with {EDIT_END}\n"
         ));
     }
     observer.request(&prompt);
@@ -2162,7 +2439,7 @@ async fn perform(
         .and_then(|_| response_file.sync_all())
         .map_err(|e| e.to_string())?;
     observer.stage("Validating model plan");
-    let plan = parse_answer_for(&answer, policy)?;
+    let plan = resolve_answer(&answer, policy, &|path| baselines.get(path).cloned())?;
     validate_plan(&plan, policy)?;
     for edit in &plan.files {
         safe_file(worktree, &edit.path)?;
