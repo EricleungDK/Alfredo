@@ -614,6 +614,17 @@ mod visible_tests {
         assert!(hidden('\u{FEFF}') && !hidden('é'));
     }
 
+    /// Issue #468: every C0/C1 control except newline and tab shows as a code point instead
+    /// of being dropped, so the card never shows other text than the bytes hold.
+    #[test]
+    fn every_c0_and_c1_control_shows_as_a_code_point() {
+        assert_eq!(
+            safe_visible("a\x01b\x1bc\x7fd\u{85}e\x07f\rg"),
+            "a<U+0001>b<U+001B>c<U+007F>d<U+0085>e<U+0007>f<U+000D>g"
+        );
+        assert_eq!(safe_visible("a\n\tb"), "a\n\tb");
+    }
+
     /// Issue #468: a lone CR shows as a code point; a Default_Ignorable character the
     /// planner and notes do not reject still shows on the card; emoji keep their text.
     #[test]
