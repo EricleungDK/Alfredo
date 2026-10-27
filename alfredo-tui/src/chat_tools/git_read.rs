@@ -1381,6 +1381,22 @@ mod tests {
         let _ = fs::remove_dir_all(common.parent().unwrap());
     }
 
+    /// Issue #461 (review): `commondir` is read as git reads it, with only a trailing CR/LF
+    /// dropped, so a padded value does not resolve.
+    #[test]
+    fn a_padded_commondir_is_not_trimmed() {
+        let root = scratch_repo("commondir-461", "");
+        let clock = || Clock::start(Duration::from_secs(5));
+        fs::write(root.join(".git/commondir"), ".\r\n").unwrap();
+        refuse_special_start_up_files(&root, clock()).unwrap();
+        fs::write(root.join(".git/commondir"), ". \n").unwrap();
+        assert_eq!(
+            refuse_special_start_up_files(&root, clock()).unwrap_err(),
+            OUTSIDE
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// Issue #449: a directory that vanishes or cannot be read mid-walk (a background
     /// `git gc` pruning loose objects) refuses with its own reason, not the time limit's;
     /// a spent budget still refuses with the time limit.

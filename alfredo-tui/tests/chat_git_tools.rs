@@ -969,6 +969,75 @@ fn a_special_file_in_a_linked_worktrees_entry_is_refused_before_git_runs() {
     }
 }
 
+/// Issue #461 (review): git's own fsmonitor daemon leaves a socket `fsmonitor--daemon.ipc` in
+/// the git directory; Alfredo's git runs with `core.fsmonitor=false`, so a valid repository
+/// with that socket is read. Only that exact socket is exempt: a FIFO of that name, or a
+/// socket anywhere else, is refused.
+#[test]
+fn the_fsmonitor_daemon_socket_is_accepted_but_no_other_special_file() {
+    let repo = Repo::new();
+    let socket = repo.root.join(".git/fsmonitor--daemon.ipc");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    for tool in ["git_status", "git_log"] {
+        let output = dispatch_promptly(&repo.root, tool);
+        assert!(!output.starts_with("error:"), "{tool}: {output}");
+    }
+    let wt = repo.base.join("wt");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt-branch",
+            wt.to_str().unwrap(),
+        ],
+    );
+    let entry_socket = repo.root.join(".git/worktrees/wt/fsmonitor--daemon.ipc");
+    let _entry_listener = std::os::unix::net::UnixListener::bind(&entry_socket).unwrap();
+    let output = dispatch_promptly(&wt, "git_status");
+    assert!(!output.starts_with("error:"), "{output}");
+
+    let repo = Repo::new();
+    mkfifo(&repo.root.join(".git/fsmonitor--daemon.ipc"));
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains("fsmonitor--daemon.ipc"),
+        "{output}"
+    );
+
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".git/info")).unwrap();
+    let _elsewhere =
+        std::os::unix::net::UnixListener::bind(repo.root.join(".git/info/fsmonitor--daemon.ipc"))
+            .unwrap();
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains("socket"),
+        "{output}"
+    );
+}
+
+/// Issue #461 (review): when git falls back to the workspace root as a bare repository, a
+/// FIFO root `commondir` or `config` blocks it just like `HEAD`.
+#[test]
+fn a_bare_root_fallback_with_a_fifo_commondir_or_config_is_refused() {
+    for file in ["commondir", "config"] {
+        let repo = Repo::new();
+        fs::write(repo.root.join(".git/HEAD"), "garbage\n").unwrap();
+        fs::create_dir_all(repo.root.join("objects")).unwrap();
+        fs::create_dir_all(repo.root.join("refs")).unwrap();
+        fs::write(repo.root.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        mkfifo(&repo.root.join(file));
+        let output = dispatch_promptly(&repo.root, "git_status");
+        assert!(
+            output.starts_with("error:") && output.contains(file),
+            "{file}: {output}"
+        );
+    }
+}
+
 /// Issue #461 (6): an oversize gitfile or alternates file says it is too large, not that it
 /// is a FIFO, device or link.
 #[test]
