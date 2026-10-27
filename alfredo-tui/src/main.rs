@@ -1729,7 +1729,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             } else {
                                 work.app.sessions[index].remember_submission();
-                                match work.app.sessions[index].clear_conversation() {
+                                let draft = work.tasks.planner.checkpoint();
+                                match work.app.sessions[index].clear_conversation(
+                                    draft.as_ref().and_then(|d| d.origin.as_ref()),
+                                ) {
                                     Ok(()) => {
                                         if let Some(job) = jobs[index].take() {
                                             job.abort();
