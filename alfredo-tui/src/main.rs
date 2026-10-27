@@ -1358,6 +1358,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                        // Issue #345: Ctrl+C during a running chat turn stops it like Esc (draft
+                        // and session kept); idle, or with workers running, it quits as before.
+                        KeyCode::Char('c')
+                            if ctrl
+                                && work.tasks.workers.is_empty()
+                                && work.app.sessions[index].status.active() =>
+                        {
+                            cancel_chat_turn(
+                                &mut work.app,
+                                index,
+                                &mut jobs,
+                                &mut approval_replies,
+                            );
+                        }
                         KeyCode::Char('q' | 'c') if ctrl => {
                             work.tasks.disable_dispatch();
                             if !work.tasks.workers.is_empty() {
@@ -1504,24 +1518,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, true);
                         }
                         KeyCode::Esc => {
-                            // A pending action is denied (logged as cancelled) and the turn ends.
-                            if let Some(request) = approval_replies.remove(&index) {
-                                request.cancel();
-                            }
-                            if let Some(job) = jobs[index].take() {
-                                job.abort();
-                            }
-                            let summarising = work.app.sessions[index].compacting();
-                            let held = !work.app.sessions[index].queued_messages().is_empty();
-                            work.app.sessions[index].cancel();
-                            if held {
-                                work.app.notice =
-                                    "Queued text is back in the prompt; nothing was sent".into();
-                            }
-                            if summarising {
-                                work.app.notice =
-                                    "Summary cancelled; your prompt is kept in the draft".into();
-                            }
+                            cancel_chat_turn(&mut work.app, index, &mut jobs, &mut approval_replies)
                         }
                         KeyCode::Char('r') if ctrl => {
                             if work.wayfinder.session_active(index) {
@@ -2584,6 +2581,34 @@ fn withdraw_pending_architect(
     true
 }
 
+/// Esc, and Ctrl+C during a running chat turn (issue #345): a pending action is denied
+/// (logged as cancelled), the request is aborted and the turn ends; the draft is kept.
+fn cancel_chat_turn(
+    app: &mut alfredo_tui::model::App,
+    index: usize,
+    jobs: &mut [Option<JoinHandle<()>>],
+    approval_replies: &mut std::collections::HashMap<
+        usize,
+        alfredo_tui::chat_tools::approval::Request,
+    >,
+) {
+    if let Some(request) = approval_replies.remove(&index) {
+        request.cancel();
+    }
+    if let Some(job) = jobs[index].take() {
+        job.abort();
+    }
+    let summarising = app.sessions[index].compacting();
+    let held = !app.sessions[index].queued_messages().is_empty();
+    app.sessions[index].cancel();
+    if held {
+        app.notice = "Queued text is back in the prompt; nothing was sent".into();
+    }
+    if summarising {
+        app.notice = "Summary cancelled; your prompt is kept in the draft".into();
+    }
+}
+
 /// `--help` text, one output line per entry. Keep one line per flag or command group so
 /// parallel changes that add a flag touch different lines instead of one long literal.
 const HELP_LINES: &[&str] = &[
@@ -2623,7 +2648,7 @@ const HELP_LINES: &[&str] = &[
     "/compact summarise older turns into a short note now (also automatic near the size limit)",
     "/allow list always-allow rules (a on an approval card adds one; never for push) · /allow clear [ID]",
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
-    "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",
+    "Enter send · Ctrl+N new · Tab switch · Esc or Ctrl+C (while replying) cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
     "Chat transcript: Home/End (empty prompt) or Ctrl+Home/Ctrl+End jump to the oldest/latest row; End resumes following new output. With text in the prompt, Home/End move the cursor.",
     "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
