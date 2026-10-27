@@ -2915,6 +2915,31 @@ fn eviction_never_takes_the_generated_command_a_saved_draft_names() {
 }
 
 #[test]
+fn clearing_a_conversation_never_leaves_a_plan_draft_without_its_origin() {
+    use alfredo_tui::{console_command::CommandState, planner_command::Outcome::Generated};
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let (snapshot, id) = draft_origin_snapshot(|draft| CommandState::Planner {
+        outcome: Generated {
+            draft_sha256: draft.digest().unwrap(),
+            tasks: 1,
+        },
+    });
+    let draft = snapshot.plan_draft.clone();
+    store.save(&snapshot).unwrap();
+    let mut app = snapshot.restore();
+    // Whatever /clear decides, the next autosave of the still-pending draft must work.
+    if let Err(message) = app.sessions[0].clear_conversation() {
+        assert!(message.contains("plan draft"), "{message}");
+        assert!(app.sessions[0].commands().iter().any(|c| c.id == id));
+    }
+    let mut again = Snapshot::capture(&app, "default");
+    again.plan_draft = draft;
+    store.save(&again).unwrap();
+    assert_eq!(store.load().unwrap().unwrap(), again);
+}
+
+#[test]
 fn controller_schema13_preserves_v12_and_never_reactivates_restored_control() {
     use alfredo_tui::{
         command_intent::Intent,
