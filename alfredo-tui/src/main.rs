@@ -676,8 +676,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 work.app.notice = format!("Wayfinder scope receipt verified · revision {revision} · /scope to inspect");
                             }
-                            // Say so while the discussion is tool-free (issue #334).
-                            if !tools_back {
+                            // Say so while the discussion is tool-free (issue #334); a
+                            // verified-receipt notice (not eligible) stays as it is.
+                            if eligible && !tools_back {
                                 work.app.notice = alfredo_tui::wayfinder::TOOLS_OFF_NOTICE.into();
                             }
                         } else if eligible {
