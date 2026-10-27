@@ -1373,7 +1373,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 None if answer != 'n'
                                     && !work.app.sessions[index].approval_whole() =>
                                 {
-                                    work.app.notice = "The whole card is not on screen (a command too long to show is deny-only): enlarge the terminal or press n".into()
+                                    work.app.notice = "The whole card is not on screen, so y and a are off: enlarge the terminal or press n".into()
                                 }
                                 None => {
                                     work.app.notice =

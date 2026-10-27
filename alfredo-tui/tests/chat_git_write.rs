@@ -341,6 +341,104 @@ fn commit_with_nothing_to_commit_is_refused_before_asking() {
     assert!(error.contains("message"), "{error}");
 }
 
+/// Issue #269: a commit or merge file list is shown whole or the call is refused. The
+/// cap is 40 listed lines: 40 passes, 41 is refused before the index, HEAD or tree move.
+fn add_files(repo: &Repo, count: usize) {
+    for index in 0..count {
+        fs::write(repo.root.join(format!("f{index:03}.txt")), "u\n").unwrap();
+    }
+    git(&repo.root, &["add", "."]);
+}
+
+#[test]
+fn commit_listing_of_exactly_40_files_is_shown_whole() {
+    let repo = Repo::new();
+    add_files(&repo, 40);
+    let card = repo
+        .card("git_commit", json!({"message": "forty"}))
+        .unwrap();
+    assert!(!card.preview.contains("more"), "{}", card.preview);
+    assert!(card.preview.contains("f039.txt"), "{}", card.preview);
+    approval::apply(&repo.root, &card).unwrap();
+    assert!(git(&repo.root, &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+fn commit_listing_of_41_files_is_refused_and_nothing_moves() {
+    let repo = Repo::new();
+    add_files(&repo, 41);
+    let (head, index) = (repo.head(), git(&repo.root, &["ls-files", "-s"]));
+    let status = git(&repo.root, &["status", "--porcelain"]);
+    let error = repo
+        .card("git_commit", json!({"message": "x"}))
+        .unwrap_err();
+    assert!(error.contains("41") && error.contains("40-line"), "{error}");
+    assert!(error.contains("fewer files"), "{error}");
+    // Named files hit the same cap; so does the apply path.
+    let names: Vec<String> = (0..41).map(|i| format!("f{i:03}.txt")).collect();
+    git(&repo.root, &["reset", "-q"]);
+    let error = repo
+        .card("git_commit", json!({"message": "x", "files": names}))
+        .unwrap_err();
+    assert!(error.contains("40-line"), "{error}");
+    git(&repo.root, &["add", "."]);
+    let error = repo
+        .approve("git_commit", json!({"message": "x"}))
+        .unwrap_err();
+    assert!(error.contains("40-line"), "{error}");
+    assert_eq!(repo.head(), head);
+    assert_eq!(git(&repo.root, &["ls-files", "-s"]), index);
+    assert_eq!(git(&repo.root, &["status", "--porcelain"]), status);
+}
+
+#[test]
+fn a_secret_in_an_over_cap_commit_is_still_refused_as_a_secret() {
+    let repo = Repo::new();
+    add_files(&repo, 45);
+    fs::write(repo.root.join(".env"), "KEY=1\n").unwrap();
+    git(&repo.root, &["add", "-f", ".env"]);
+    let error = repo
+        .card("git_commit", json!({"message": "x"}))
+        .unwrap_err();
+    assert!(!error.contains("40-line"), "{error}");
+}
+
+/// A branch `wide` that adds `count` files, merged from `main`.
+fn wide_branch(repo: &Repo, count: usize) {
+    git(&repo.root, &["checkout", "-q", "-b", "wide"]);
+    add_files(repo, count);
+    git(&repo.root, &["commit", "-q", "-m", "wide"]);
+    git(&repo.root, &["checkout", "-q", "main"]);
+}
+
+#[test]
+fn merge_file_list_of_exactly_40_lines_is_shown_whole_and_41_is_refused() {
+    // `--stat` is one line per file plus a summary line: 39 files = 40 lines.
+    let repo = Repo::new();
+    wide_branch(&repo, 39);
+    let card = repo.card("git_merge", json!({"source": "wide"})).unwrap();
+    assert!(!card.preview.contains("more"), "{}", card.preview);
+    assert!(card.preview.contains("f038.txt"), "{}", card.preview);
+    approval::apply(&repo.root, &card).unwrap();
+    assert!(repo.root.join("f038.txt").exists());
+
+    let repo = Repo::new();
+    wide_branch(&repo, 40);
+    let head = repo.head();
+    let error = repo
+        .card("git_merge", json!({"source": "wide"}))
+        .unwrap_err();
+    assert!(error.contains("41") && error.contains("40-line"), "{error}");
+    let error = repo
+        .approve("git_merge", json!({"source": "wide"}))
+        .unwrap_err();
+    assert!(error.contains("40-line"), "{error}");
+    assert_eq!(repo.head(), head);
+    assert!(!repo.root.join("f000.txt").exists());
+    assert!(git(&repo.root, &["status", "--porcelain"]).is_empty());
+    assert!(!repo.root.join(".git/MERGE_HEAD").exists());
+}
+
 #[test]
 fn commit_hooks_do_not_run() {
     let repo = Repo::new();
@@ -658,6 +756,169 @@ fn rendered(card: Card) -> String {
         .iter()
         .map(|cell| cell.symbol())
         .collect()
+}
+
+/// Draws `card` pending at `width`x`height`, waits out the arm delay and tries `y`, `a`
+/// then `n`: (y, a, n, whole).
+fn probe_card(
+    card: Card,
+    width: u16,
+    height: u16,
+) -> (Option<Decision>, Option<Decision>, Option<Decision>, bool) {
+    let mut app = App::new("m".into());
+    let session = &mut app.sessions[0];
+    session.insert("go");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.await_approval(attempt, card, Instant::now()));
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    let start = Instant::now();
+    for now in [start, start + approval::ARM * 2] {
+        terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+        let session = &mut app.sessions[0];
+        let drawn = session.approval_header_drawn();
+        session.approval_visible(drawn, now);
+    }
+    let at = start + approval::ARM * 3;
+    let session = &mut app.sessions[0];
+    let whole = session.approval_whole();
+    let y = session.answer_approval('y', at);
+    let a = session.answer_approval('a', at);
+    let n = session.answer_approval('n', at);
+    (y, a, n, whole)
+}
+
+/// Issue #269: a commit message so long that the file list is pushed off screen makes
+/// the card deny-only: the owner never approves a list they could not see.
+#[test]
+fn a_commit_card_with_a_huge_message_is_deny_only_and_commits_nothing() {
+    let repo = Repo::new();
+    add_files(&repo, 3);
+    let head = repo.head();
+    // The message cap is 4096 bytes: one long line, or 2000 one-letter lines.
+    let long_line = "m".repeat(4000);
+    let many_lines = "a\n".repeat(2000);
+    for message in [long_line, many_lines] {
+        let card = repo
+            .card("git_commit", json!({"message": message}))
+            .unwrap();
+        for (w, h) in [(80, 24), (100, 24), (80, 40)] {
+            let (y, a, n, whole) = probe_card(card.clone(), w, h);
+            assert!(!whole, "{w}x{h}");
+            assert_eq!((y, a), (None, None), "{w}x{h}");
+            assert_eq!(n, Some(Decision::Deny), "{w}x{h}");
+        }
+        assert_eq!(repo.head(), head, "nothing was committed");
+    }
+}
+
+/// Issue #269: a commit card that fits whole on screen still arms.
+#[test]
+fn a_commit_card_that_fits_still_arms() {
+    let repo = Repo::new();
+    add_files(&repo, 3);
+    let card = repo
+        .card("git_commit", json!({"message": "small"}))
+        .unwrap();
+    let (y, _, _, whole) = probe_card(card, 80, 24);
+    assert!(whole);
+    assert_eq!(y, Some(Decision::Approve));
+}
+
+/// Issue #269: `git diff --stat` shortens a long path to `.../ci.yml`, hiding which
+/// directory a merged file lands in. The merge card lists the whole path, and a card
+/// whose wrapped rows do not fit is deny-only.
+#[test]
+fn a_merge_card_shows_a_deep_long_path_whole_and_is_deny_only_when_it_cannot_fit() {
+    let repo = Repo::new();
+    let dir = ["configuration-directory-segment"; 12].join("/");
+    let path = format!("{dir}/ci.yml");
+    git(&repo.root, &["checkout", "-q", "-b", "alfredo/deep"]);
+    fs::create_dir_all(repo.root.join(&dir)).unwrap();
+    fs::write(repo.root.join(&path), "on: push\n").unwrap();
+    git(&repo.root, &["add", "."]);
+    git(&repo.root, &["commit", "-q", "-m", "deep file"]);
+    git(&repo.root, &["checkout", "-q", "main"]);
+    let head = repo.head();
+    let card = repo
+        .card("git_merge", json!({"source": "alfredo/deep"}))
+        .unwrap();
+    assert!(card.preview.contains(&path), "{}", card.preview);
+    assert!(!card.preview.contains(".../"), "{}", card.preview);
+    let (y, _, _, whole) = probe_card(card.clone(), 120, 40);
+    assert!(whole);
+    assert_eq!(y, Some(Decision::Approve));
+    // A path wider than the terminal wraps; when the wrapped card does not fit, y is off.
+    let (y, a, n, whole) = probe_card(card, 40, 24);
+    assert!(!whole);
+    assert_eq!((y, a), (None, None));
+    assert_eq!(n, Some(Decision::Deny));
+    assert_eq!(repo.head(), head, "nothing was merged");
+}
+
+/// Commits `files` (path, content) on a branch `name` off main and returns to main.
+fn branch_with_paths(repo: &Repo, name: &str, files: &[String]) {
+    git(&repo.root, &["checkout", "-q", "-b", name]);
+    for file in files {
+        let target = repo.root.join(file);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, "x\n").unwrap();
+    }
+    git(&repo.root, &["add", "."]);
+    git(&repo.root, &["commit", "-q", "-m", "paths"]);
+    git(&repo.root, &["checkout", "-q", "main"]);
+}
+
+/// Issue #269 (round 3): a file list git prints past the read limit was cut silently, so
+/// the payload files after the long lines never reached the card.
+#[test]
+fn a_merge_file_list_past_the_read_limit_never_hides_the_files_after_it() {
+    let repo = Repo::new();
+    let part = format!("a{}", "\u{301}".repeat(124));
+    let deep = vec![part; 14].join("/");
+    let mut files: Vec<String> = (0..12).map(|i| format!("{i:02}{deep}/f")).collect();
+    files.push("zz/.github/workflows/ci.yml".into());
+    files.push("zz-payload.sh".into());
+    branch_with_paths(&repo, "alfredo/long", &files);
+    let head = repo.head();
+    match repo.card("git_merge", json!({"source": "alfredo/long"})) {
+        Err(_) => {}
+        Ok(card) => {
+            assert!(card.preview.contains("zz-payload.sh"), "payload hidden");
+            assert!(card.preview.contains("zz/.github/workflows/ci.yml"));
+            let (y, a, _, whole) = probe_card(card, 80, 24);
+            assert!(!whole);
+            assert_eq!((y, a), (None, None));
+        }
+    }
+    assert_eq!(repo.head(), head);
+}
+
+/// Issue #269 (round 3): git also shortens a name to `.../` when control bytes widen it.
+#[test]
+fn a_merge_path_full_of_control_bytes_keeps_its_directory_on_the_card() {
+    let repo = Repo::new();
+    let part = "\u{1}".repeat(250);
+    let path = format!(".github/workflows/{part}/{part}/{part}/{part}");
+    branch_with_paths(&repo, "alfredo/ctl", &[path]);
+    let head = repo.head();
+    {
+        let card = repo
+            .card("git_merge", json!({"source": "alfredo/ctl"}))
+            .unwrap();
+        assert!(
+            card.preview.contains(".github/workflows/"),
+            "{}",
+            card.preview
+        );
+        assert!(!card.preview.contains(".../"), "{}", card.preview);
+        assert!(
+            !card.preview.contains('\u{1}'),
+            "raw control byte on the card"
+        );
+    }
+    assert_eq!(repo.head(), head);
 }
 
 #[test]
@@ -1133,20 +1394,45 @@ fn repository_merge_drivers_and_gpg_programs_are_refused() {
 }
 
 #[test]
-fn large_listings_are_marked_and_fingerprinted_in_full() {
+fn large_listings_are_refused_rather_than_cut() {
     let repo = Repo::new();
     let long = "x".repeat(60);
     for index in 0..1500 {
         fs::write(repo.root.join(format!("{long}{index:05}.txt")), "u\n").unwrap();
     }
     git(&repo.root, &["add", "."]);
-    let card = repo.card("git_commit", json!({"message": "many"})).unwrap();
-    assert!(card.preview.contains("more"), "{}", card.preview);
-    assert!(card.summary.contains("1500 files"), "{}", card.summary);
-    // A change past the first 32 KiB of status still counts.
+    let error = repo
+        .card("git_commit", json!({"message": "many"}))
+        .unwrap_err();
+    assert!(
+        error.contains("1500") && error.contains("40-line"),
+        "{error}"
+    );
+}
+
+/// Coverage kept from the old large-listing test (issue #269 made a long listing a
+/// refusal): a change late in a huge `status` still invalidates an approved git card.
+/// Passes on main and on the branch.
+#[test]
+fn a_change_late_in_a_huge_status_still_invalidates_the_approval() {
+    let repo = Repo::new();
+    let long = "x".repeat(60);
+    for index in 0..1500 {
+        fs::write(repo.root.join(format!("{long}{index:05}.txt")), "u\n").unwrap();
+    }
+    fs::write(repo.root.join("one.txt"), "one\n").unwrap();
+    let card = repo
+        .card(
+            "git_commit",
+            json!({"message": "one", "files": ["one.txt"]}),
+        )
+        .unwrap();
+    // Past the first 32 KiB of status.
     fs::write(repo.root.join("zzzz-late.txt"), "late\n").unwrap();
+    let head = repo.head();
     let error = approval::apply(&repo.root, &card).unwrap_err();
     assert!(error.contains("changed"), "{error}");
+    assert_eq!(repo.head(), head);
 }
 
 #[test]

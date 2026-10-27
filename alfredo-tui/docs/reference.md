@@ -1750,18 +1750,41 @@ Approval (ADR 0004); there is no skip-approval mode.
 - **Read-only files.** `write_file` and `edit_file` refuse an existing file without the owner write bit (for example `chmod 444`) with `<path> is read-only; …`, before any approval card is raised and again before the write, and leave the file unchanged.
 
 - **Card.** The transcript shows `? Approve edit_file · edit README.md`, the arguments,
-  and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads
+  and a line diff (`-` old, `+` new). The prompt title reads
   `Approval pending · y approve · n deny · Esc cancels the turn`. On a short terminal the
   diff is cut to the rows that fit (`[N more diff lines]`) so the header, arguments and
   key line stay on screen; the 0.5 s delay below starts only once the header rows are
   drawn, and PageUp that scrolls them out of view disarms `y`/`n` until they return.
-  `y` and `a` also need the whole card on screen: header, arguments, every `$` line of a
-  `run_command` and the key line, with rows counted in display columns. A command or path
-  too long to show whole on the current terminal makes the card deny-only (issue #303): the
-  header is shortened with `…`, the key line reads `n deny · Esc cancels the turn (deny) ·
+  `y` and `a` also need the whole card on screen, for every kind of card (file edits,
+  `git_commit`, `git_switch`, `git_merge`, `git_push`, `run_command`): the header, every
+  line of the preview (diff lines, commit message, file and commit lists, every `$` line of
+  a `run_command`) and the key line, with rows counted in display columns. If any preview
+  line is cut to `[N more diff lines]`, or the header or a path is too long to show whole
+  on the current terminal, the card is deny-only (issues #303, #269): the header is
+  shortened with `…`, the key line reads `n deny · Esc cancels the turn (deny) ·
   y is off: the whole card does not fit here, enlarge the terminal or press n`, and `y`/`a`
-  are refused with that advice while `n` still denies. Enlarging the terminal re-evaluates
-  the card; on a terminal so short that the header cannot be drawn, only Esc answers.
+  are refused with that advice while `n` still denies. This holds for a single very long
+  line (a one-line 1 MiB write, a 4000-character commit message) as much as for many
+  lines. The `args` line is a two-row excerpt of the raw arguments and is not part of this
+  test; the preview is what the owner approves. Enlarging the terminal re-evaluates the
+  card; on a terminal so short that the header cannot be drawn, only Esc answers.
+- **Over-cap changes are refused, not cut (issue #269).** A card never hides lines the
+  owner is asked to approve. `write_file` and `edit_file` are refused when the card's
+  diff would pass 80 lines, counted as every line of the diff text: the `@@` header, the
+  `-` and `+` lines, a line-ending note (`final newline added`, `line endings CRLF → LF`)
+  and the `new directories:` line. Exactly 80 passes; 81 is refused with
+  `the change's diff is 81 lines, over the 80-line approval card limit; nothing was written. Split it …`
+  before any card is shown, again at apply, and the file (and any directory) is left
+  untouched. `git_commit` (file listing) and `git_merge` (one `path | +added -deleted` row per file, built from `git diff --numstat -z` so
+  no name is shortened to `.../name`, control characters shown as `\xNN`, plus a count row;
+  a listing git printed past the read limit is refused, never cut) are refused the same way above 40 lines, with the index,
+  HEAD and working tree untouched. Secret, protected-path and read-only refusals are
+  checked first and still win. The caps bound the line count only. Whether the card then
+  fits the terminal is a separate check: a card whose lines do not all fit the rows
+  (including one very long line) is shown cut with `[N more diff lines]` and is deny-only,
+  as above, so a cut card can never be approved. A `git_merge` card lists at most 20
+  commits and ends the list with `[N more]` giving the count of the rest; that count is
+  not a cap on what the merge brings in.
 - **Waiting on you.** While a card is pending the chat's side-pane row and its frame title
   read `approve?` (amber `●`, no spinner) instead of `thinking`, and the timing line says
   `waiting for approval`. The turn clock leaves out the time the card waited, so the

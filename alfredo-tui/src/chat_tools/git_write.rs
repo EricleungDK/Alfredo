@@ -35,7 +35,7 @@ const MAX_LISTED: usize = 20;
 const LOCAL_DEADLINE: Duration = Duration::from_secs(120);
 /// Largest git output read in full (fingerprints, card listings); more is refused.
 const FULL: usize = 64 << 20;
-/// Lines of a file listing shown on a card.
+/// Most lines of a file listing a card shows; a longer one is refused (issue #269).
 const MAX_CARD_LINES: usize = 40;
 /// Longest a push may run (network, credential helpers).
 const PUSH_DEADLINE: Duration = Duration::from_secs(120);
@@ -456,7 +456,7 @@ impl CommitPlan {
                 } else {
                     ""
                 },
-                indent(&cut(&self.listing, MAX_CARD_LINES))
+                indent(&self.listing)
             ),
             CardKind::Git,
         )
@@ -506,6 +506,11 @@ fn plan_commit(root: &Path, arguments: &Value) -> Result<CommitPlan, String> {
             "nothing to commit: the named files have no changes".into()
         });
     }
+    refuse_long_list(
+        "commit",
+        listing.lines().count(),
+        "commit fewer files at a time (pass files, or git add fewer)",
+    )?;
     Ok(CommitPlan {
         branch,
         message,
@@ -850,37 +855,87 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
         ],
     )?;
     let three = format!("HEAD...{source}");
-    let files = git_read::git(
+    // `--numstat -z` names every path whole (`--stat` shortens a long or control-byte
+    // name to `.../`), and `full` refuses a listing git printed past the read limit
+    // rather than trusting its first bytes (issue #269).
+    let raw = full(
         root,
         &[
             "diff",
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
-            "--stat",
+            "--no-renames",
+            "--numstat",
+            "-z",
             "--end-of-options",
             &three,
             "--",
         ],
+    )?;
+    let files = merge_file_list(&raw);
+    refuse_long_list(
+        "merge file list",
+        files.lines().count(),
+        "merge a smaller branch, or land the work in smaller pieces",
     )?;
     Ok(MergePlan {
         source,
         target: current,
         count,
         commits: commits.trim_end().to_string(),
-        files: cut(files.trim_end(), 40),
+        files,
     })
 }
 
-/// At most `lines` lines of `text`, with a marker.
-fn cut(text: &str, lines: usize) -> String {
-    let total = text.lines().count();
-    let mut kept: Vec<&str> = text.lines().take(lines).collect();
-    let more = format!("[{} more lines]", total.saturating_sub(lines));
-    if total > lines {
-        kept.push(&more);
+/// One row per changed file, `path | +added -deleted`, and a count row. Names are shown
+/// whole with control and invisible characters escaped, so a card row is what the path is.
+fn merge_file_list(raw: &str) -> String {
+    let mut rows = Vec::new();
+    for entry in raw.split('\0').filter(|entry| !entry.is_empty()) {
+        let mut parts = entry.splitn(3, '\t');
+        let (added, deleted, path) = (
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or(""),
+        );
+        let counts = if added == "-" {
+            "binary".to_string()
+        } else {
+            format!("+{added} -{deleted}")
+        };
+        rows.push(format!("{} | {counts}", visible_name(path)));
     }
-    kept.join("\n")
+    let count = rows.len();
+    rows.push(format!(
+        "{count} file{} changed",
+        if count == 1 { "" } else { "s" }
+    ));
+    rows.join("\n")
+}
+
+/// A path with control characters written as `\xNN` and invisible ones as `<U+XXXX>`.
+fn visible_name(path: &str) -> String {
+    path.chars()
+        .map(|c| {
+            if c.is_control() {
+                format!("\\x{:02x}", c as u32)
+            } else {
+                crate::dashboard::safe_visible(&c.to_string())
+            }
+        })
+        .collect()
+}
+
+/// Refuses a card list over [`MAX_CARD_LINES`]: the owner would approve lines the card
+/// cannot show. Runs while planning, so before any card and again at apply.
+fn refuse_long_list(what: &str, lines: usize, advice: &str) -> Result<(), String> {
+    if lines > MAX_CARD_LINES {
+        return Err(format!(
+            "the {what} is {lines} lines, over the {MAX_CARD_LINES}-line approval card limit; nothing was changed. {advice}"
+        ));
+    }
+    Ok(())
 }
 
 /// The `merge` tool: one budget for the whole call (issue #359).
