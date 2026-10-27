@@ -693,6 +693,8 @@ pub(crate) fn verified_git_dir_within(
     let root = root
         .canonicalize()
         .map_err(|_| "Coding Workspace is not available".to_string())?;
+    // Before git runs at all: git opens these files itself while it locates the repository.
+    refuse_special_start_up_files(&root, clock)?;
     let mut command = hardened_command(&root)?;
     if matches!(config, Config::Owner) {
         owner_config(&mut command);
@@ -824,6 +826,89 @@ fn object_stores_within(common_dir: &Path, clock: Clock) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Refuses a FIFO, device, socket, directory or link where git opens a file while it locates
+/// the repository, before any git process starts (issue #458). `git rev-parse` blocks
+/// reading `HEAD`, `config` and `commondir` when one is a FIFO, and newer git (2.56 on CI)
+/// also opens `objects/info/alternates` (and each store's own) at start-up, so a check made
+/// after that git call came too late: the call ran into its 15 s limit instead of refusing.
+/// Types only, except `.git` (a gitfile) and the alternates files, which are read to learn
+/// where git goes next. A missing file is fine; so is a layout this cannot follow: the
+/// full verification after git runs still decides. Charged to `clock`.
+fn refuse_special_start_up_files(root: &Path, clock: Clock) -> Result<(), String> {
+    let dot_git = root.join(".git");
+    let git_dir = match fs::symlink_metadata(&dot_git) {
+        Ok(meta) if meta.is_file() => {
+            let text = read_control_file(&dot_git, clock, &special(".git"))?.unwrap_or_default();
+            let Some(target) = text.lines().next().and_then(|l| l.strip_prefix("gitdir:")) else {
+                return Ok(());
+            };
+            root.join(target.trim())
+        }
+        Ok(_) => dot_git,
+        Err(_) => return Ok(()),
+    };
+    let Ok(git_dir) = git_dir.canonicalize() else {
+        return Ok(());
+    };
+    let mut common_dir = git_dir.clone();
+    for name in ["HEAD", "config", "commondir"] {
+        ordinary_or_missing(&git_dir.join(name), clock, name)?;
+    }
+    if let Some(text) = read_control_file(&git_dir.join("commondir"), clock, &special("commondir"))?
+    {
+        match git_dir.join(text.trim()).canonicalize() {
+            Ok(common) => common_dir = common,
+            Err(_) => return Ok(()),
+        }
+    }
+    if common_dir != git_dir {
+        ordinary_or_missing(&common_dir.join("config"), clock, "config")?;
+    }
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut pending = vec![common_dir.join("objects")];
+    while let Some(store) = pending.pop() {
+        if !seen.insert(store.clone()) {
+            continue;
+        }
+        if clock.left().is_zero() {
+            return Err(UNCHECKED.to_string());
+        }
+        let Some(text) = read_control_file(
+            &store.join("info/alternates"),
+            clock,
+            &special("alternates"),
+        )?
+        else {
+            continue;
+        };
+        for line in text.lines().map(str::trim) {
+            if !line.is_empty() && !line.starts_with('#') {
+                if let Ok(next) = store.join(line).canonicalize() {
+                    pending.push(next);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn special(name: &str) -> String {
+    format!("the workspace's repository has a {name} that is not an ordinary file (a FIFO, device or link); git tools refuse")
+}
+
+/// `Ok` for an ordinary file or a missing one, the refusal naming `name` for anything else.
+/// Looks at the type only: the file is not opened (it may be large, like a config).
+fn ordinary_or_missing(path: &Path, clock: Clock, name: &str) -> Result<(), String> {
+    if clock.left().is_zero() {
+        return Err(UNCHECKED.to_string());
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) | Err(_) => Err(special(name)),
+    }
 }
 
 /// Most bytes of a control file git reads here (`gitdir`, `info/alternates`).
@@ -1182,6 +1267,56 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("stopped"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Issue #458: the start-up check refuses a FIFO where git opens a file, without running
+    /// git (newer git opens `objects/info/alternates` while it locates the repository), and
+    /// leaves an ordinary repository and a large config alone.
+    #[test]
+    fn a_start_up_fifo_is_refused_without_running_git() {
+        let mkfifo = |path: &Path| {
+            let _ = fs::remove_file(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+        };
+        let root = scratch_repo("start-up", "");
+        let clock = || Clock::start(Duration::from_secs(5));
+        let big = "# padding\n".repeat(20_000);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(".git/config"))
+            .unwrap()
+            .write_all(big.as_bytes())
+            .unwrap();
+        refuse_special_start_up_files(&root, clock()).unwrap();
+        for name in ["HEAD", "config", "commondir", "objects/info/alternates"] {
+            let path = root.join(".git").join(name);
+            let kept = fs::read(&path).ok();
+            mkfifo(&path);
+            let started = Instant::now();
+            let error = refuse_special_start_up_files(&root, clock()).unwrap_err();
+            assert!(
+                error.contains(name.rsplit('/').next().unwrap()),
+                "{name}: {error}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(2), "{name}");
+            fs::remove_file(&path).unwrap();
+            if let Some(kept) = kept {
+                fs::write(&path, kept).unwrap();
+            }
+        }
+        // A store reached through alternates has its own alternates file git opens.
+        let second = root.join(".git/second/objects");
+        mkfifo(&second.join("info/alternates"));
+        fs::create_dir_all(root.join(".git/objects/info")).unwrap();
+        fs::write(
+            root.join(".git/objects/info/alternates"),
+            format!("{}\n", second.display()),
+        )
+        .unwrap();
+        let error = refuse_special_start_up_files(&root, clock()).unwrap_err();
+        assert!(error.contains("alternates"), "{error}");
         let _ = fs::remove_dir_all(&root);
     }
 

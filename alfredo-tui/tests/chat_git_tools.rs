@@ -648,6 +648,83 @@ fn an_alternates_fifo_refuses_promptly_and_never_hangs() {
     }
 }
 
+/// Issue #458: git itself reads `HEAD`, `config`, `commondir` and (newer git, at start-up)
+/// `objects/info/alternates` before any tool check could run, and a FIFO there blocks that
+/// read until the call's 15 s limit. The files are type-checked first, so each refuses
+/// at once (well inside the 10 s wait), with an error that names the file.
+#[test]
+fn a_fifo_for_a_file_git_reads_at_start_up_refuses_before_git_runs() {
+    for file in ["HEAD", "config", "commondir", "objects/info/alternates"] {
+        let repo = Repo::new();
+        let path = repo.root.join(".git").join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _ = fs::remove_file(&path);
+        mkfifo(&path);
+        let name = file.rsplit('/').next().unwrap();
+        for (tool, arguments) in [("git_status", json!({})), ("git_log", json!({}))] {
+            let started = std::time::Instant::now();
+            let output = dispatch_within(&repo.root, tool, arguments);
+            assert!(output.starts_with("error:"), "{file} {tool}: {output}");
+            assert!(
+                output.contains(name) && !output.contains("took longer"),
+                "{file} {tool} must refuse the FIFO, not wait for git: {output}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{file} {tool} took {:?}",
+                started.elapsed()
+            );
+        }
+    }
+}
+
+/// Issue #458: the same holds for a store reached through `info/alternates` (git opens each
+/// store's own alternates), and for a linked worktree's entry files.
+#[test]
+fn a_fifo_in_a_chained_store_or_a_worktree_entry_refuses_before_git_runs() {
+    let repo = Repo::new();
+    let second = repo.base.join("second-store");
+    fs::create_dir_all(second.join("info")).unwrap();
+    mkfifo(&second.join("info/alternates"));
+    let alternates = repo.root.join(".git/objects/info/alternates");
+    fs::create_dir_all(alternates.parent().unwrap()).unwrap();
+    fs::write(&alternates, format!("{}\n", second.display())).unwrap();
+    let output = dispatch_within(&repo.root, "git_log", json!({}));
+    assert!(
+        output.starts_with("error:") && !output.contains("took longer"),
+        "{output}"
+    );
+
+    let repo = Repo::new();
+    let wt = repo.base.join("wt");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt-branch",
+            wt.to_str().unwrap(),
+        ],
+    );
+    for file in ["HEAD", "commondir"] {
+        let path = repo.root.join(".git/worktrees/wt").join(file);
+        let original = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        mkfifo(&path);
+        let started = std::time::Instant::now();
+        let output = dispatch_within(&wt, "git_log", json!({}));
+        assert!(
+            output.starts_with("error:") && !output.contains("took longer"),
+            "{file}: {output}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5), "{file}");
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, original).unwrap();
+    }
+}
+
 /// Issue #359 (review 3): a linked worktree whose `gitdir` back-reference is a FIFO would
 /// block the read of that back-reference forever. The tool refuses at once instead.
 #[test]
