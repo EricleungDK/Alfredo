@@ -1306,6 +1306,58 @@ fn a_write_file_card_with_a_very_long_path_is_deny_only_and_writes_nothing() {
     }
 }
 
+fn write_file_session(root: &Path, content: &str) -> Session {
+    let card = approval::card(
+        root,
+        &call("write_file", json!({"path": "big.txt", "content": content})),
+    )
+    .unwrap();
+    let mut session = Session::new("m".into());
+    session.insert("write it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.await_approval(attempt, card, Instant::now()));
+    session
+}
+
+/// Issue #269: a diff under the 80-line cap whose one line is far taller than the
+/// terminal is cut by the viewport, so `y` and `a` approve nothing; nothing is written.
+#[test]
+fn a_write_file_card_with_one_huge_line_is_deny_only_and_writes_nothing() {
+    let huge = format!("{}\n", "x".repeat(200_000));
+    // A line of wide characters, and many wrapped lines under the cap, cut the same way.
+    let wide = format!("{}\n", "漢".repeat(50_000));
+    let wrapped: String = (0..70)
+        .map(|i| format!("{i} {}\n", "w".repeat(150)))
+        .collect();
+    for content in [huge, wide, wrapped] {
+        for (w, h) in [(80, 24), (100, 24), (80, 40)] {
+            let root = workspace("hugeline");
+            let probe = probe_session(write_file_session(&root, &content), w, h);
+            let text = &probe.text;
+            assert!(text.contains("Approve write_file"), "{w}x{h}: {text}");
+            assert!(text.contains("press n"), "{w}x{h}: {text}");
+            assert!(probe.header && !probe.whole, "{w}x{h}: {text}");
+            assert_eq!(probe.y, None, "{w}x{h}: {text}");
+            assert_eq!(probe.a, None, "{w}x{h}: {text}");
+            assert_eq!(probe.n, Some(Decision::Deny), "{w}x{h}: {text}");
+            assert!(!root.join("big.txt").exists(), "{w}x{h}: wrote the file");
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+}
+
+/// Issue #269: a write_file card that fits whole on screen still arms.
+#[test]
+fn a_write_file_card_that_fits_still_arms() {
+    let root = workspace("fits");
+    let probe = probe_session(write_file_session(&root, "one\ntwo\n"), 80, 24);
+    assert!(probe.whole && probe.header, "{}", probe.text);
+    assert_eq!(probe.y, Some(Decision::Approve), "{}", probe.text);
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #303: what a draw said about the previous card never carries to a new one.
 #[test]
 fn a_new_card_is_not_answerable_by_y_until_it_is_drawn() {

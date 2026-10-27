@@ -1941,8 +1941,10 @@ fn approval_card_build(
             crate::transcript_cache::line_height(line, width.min(usize::from(u16::MAX)) as u16)
         })
         .sum();
-    let command_whole = !matches!(card.kind, CardKind::Shell { .. }) || shown == preview.len();
-    (lines, head, !deny_only && total <= rows && command_whole)
+    // Every preview line of every card kind (diff, commit message, file list, `$`
+    // lines) must be drawn; a cut preview never arms `y` (issues #303, #269).
+    let preview_whole = shown == preview.len();
+    (lines, head, !deny_only && total <= rows && preview_whole)
 }
 
 #[cfg(test)]
@@ -2023,12 +2025,7 @@ mod tests {
                     .sum();
                 assert!(total <= rows, "{name} {width}x{rows}: {total} rows");
                 assert!(head <= 2, "{name}: header and args come first");
-                assert!(
-                    whole,
-                    "{name} {width}x{rows}: diffs may be cut and still arm"
-                );
                 let last = lines.last().unwrap().to_string();
-                assert!(last.contains("y approve"), "{name}: key line is last");
                 let drawn = lines
                     .iter()
                     .filter(|l| l.to_string().starts_with("  +"))
@@ -2043,6 +2040,10 @@ mod tests {
                     })
                     .unwrap_or(0);
                 assert_eq!(drawn + hidden, 30, "{name} {width}x{rows}: all counted");
+                // A cut diff never arms (issue #269); a diff drawn whole does.
+                assert_eq!(whole, hidden == 0, "{name} {width}x{rows}");
+                let key = if whole { "y approve" } else { "n deny" };
+                assert!(last.contains(key), "{name}: key line is last");
             }
         }
     }
@@ -2157,6 +2158,31 @@ mod tests {
         };
         let (lines, _, whole) = approval_card_lines(&short, 80, 12);
         assert!(whole && height_of(&lines, 80) <= 12);
+    }
+
+    /// Issue #269: every card kind arms only when every preview line is drawn.
+    #[test]
+    fn every_card_kind_is_whole_only_when_its_whole_preview_is_drawn() {
+        use crate::chat_tools::approval::{Card, CardKind};
+        for kind in [CardKind::Edit, CardKind::Git, CardKind::Push] {
+            let card = |preview: String| Card {
+                tool: "t".into(),
+                arguments: serde_json::json!({}),
+                kind,
+                summary: "s".into(),
+                preview,
+                fingerprint: String::new(),
+            };
+            let small = card("one\ntwo".into());
+            let (_, _, whole) = approval_card_lines(&small, 80, 24);
+            assert!(whole, "{kind:?}: a card that fits arms");
+            for preview in ["x".repeat(100_000), "a\n".repeat(60), "漢".repeat(5000)] {
+                let (lines, _, whole) = approval_card_lines(&card(preview), 80, 24);
+                assert!(!whole, "{kind:?}: a cut preview never arms");
+                assert!(height_of(&lines, 80) <= 24, "{kind:?}");
+                assert!(lines.last().unwrap().to_string().contains("n deny"));
+            }
+        }
     }
 
     #[test]

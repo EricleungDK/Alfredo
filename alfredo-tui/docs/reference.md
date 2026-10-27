@@ -1732,13 +1732,19 @@ Approval (ADR 0004); there is no skip-approval mode.
   diff is cut to the rows that fit (`[N more diff lines]`) so the header, arguments and
   key line stay on screen; the 0.5 s delay below starts only once the header rows are
   drawn, and PageUp that scrolls them out of view disarms `y`/`n` until they return.
-  `y` and `a` also need the whole card on screen: header, arguments, every `$` line of a
-  `run_command` and the key line, with rows counted in display columns. A command or path
-  too long to show whole on the current terminal makes the card deny-only (issue #303): the
-  header is shortened with `…`, the key line reads `n deny · Esc cancels the turn (deny) ·
+  `y` and `a` also need the whole card on screen, for every kind of card (file edits,
+  `git_commit`, `git_switch`, `git_merge`, `git_push`, `run_command`): the header, every
+  line of the preview (diff lines, commit message, file and commit lists, every `$` line of
+  a `run_command`) and the key line, with rows counted in display columns. If any preview
+  line is cut to `[N more diff lines]`, or the header or a path is too long to show whole
+  on the current terminal, the card is deny-only (issues #303, #269): the header is
+  shortened with `…`, the key line reads `n deny · Esc cancels the turn (deny) ·
   y is off: the whole card does not fit here, enlarge the terminal or press n`, and `y`/`a`
-  are refused with that advice while `n` still denies. Enlarging the terminal re-evaluates
-  the card; on a terminal so short that the header cannot be drawn, only Esc answers.
+  are refused with that advice while `n` still denies. This holds for a single very long
+  line (a one-line 1 MiB write, a 4000-character commit message) as much as for many
+  lines. The `args` line is a two-row excerpt of the raw arguments and is not part of this
+  test; the preview is what the owner approves. Enlarging the terminal re-evaluates the
+  card; on a terminal so short that the header cannot be drawn, only Esc answers.
 - **Over-cap changes are refused, not cut (issue #269).** A card never hides lines the
   owner is asked to approve. `write_file` and `edit_file` are refused when the card's
   diff would pass 80 lines, counted as every line of the diff text: the `@@` header, the
@@ -1749,8 +1755,12 @@ Approval (ADR 0004); there is no skip-approval mode.
   untouched. `git_commit` (file listing) and `git_merge` (`--stat` listing, one line per
   file plus the summary line) are refused the same way above 40 lines, with the index,
   HEAD and working tree untouched. Secret, protected-path and read-only refusals are
-  checked first and still win. On a terminal too short for a whole card the display cuts
-  the diff to the rows that fit (`[N more diff lines]`, below); that is viewport cutting.
+  checked first and still win. The caps bound the line count only. Whether the card then
+  fits the terminal is a separate check: a card whose lines do not all fit the rows
+  (including one very long line) is shown cut with `[N more diff lines]` and is deny-only,
+  as above, so a cut card can never be approved. A `git_merge` card lists at most 20
+  commits and ends the list with `[N more]` giving the count of the rest; that count is
+  not a cap on what the merge brings in.
 - **Waiting on you.** While a card is pending the chat's side-pane row and its frame title
   read `approve?` (amber `●`, no spinner) instead of `thinking`, and the timing line says
   `waiting for approval`. The turn clock leaves out the time the card waited, so the

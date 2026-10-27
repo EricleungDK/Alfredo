@@ -758,6 +758,74 @@ fn rendered(card: Card) -> String {
         .collect()
 }
 
+/// Draws `card` pending at `width`x`height`, waits out the arm delay and tries `y`, `a`
+/// then `n`: (y, a, n, whole).
+fn probe_card(
+    card: Card,
+    width: u16,
+    height: u16,
+) -> (Option<Decision>, Option<Decision>, Option<Decision>, bool) {
+    let mut app = App::new("m".into());
+    let session = &mut app.sessions[0];
+    session.insert("go");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.await_approval(attempt, card, Instant::now()));
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    let start = Instant::now();
+    for now in [start, start + approval::ARM * 2] {
+        terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+        let session = &mut app.sessions[0];
+        let drawn = session.approval_header_drawn();
+        session.approval_visible(drawn, now);
+    }
+    let at = start + approval::ARM * 3;
+    let session = &mut app.sessions[0];
+    let whole = session.approval_whole();
+    let y = session.answer_approval('y', at);
+    let a = session.answer_approval('a', at);
+    let n = session.answer_approval('n', at);
+    (y, a, n, whole)
+}
+
+/// Issue #269: a commit message so long that the file list is pushed off screen makes
+/// the card deny-only: the owner never approves a list they could not see.
+#[test]
+fn a_commit_card_with_a_huge_message_is_deny_only_and_commits_nothing() {
+    let repo = Repo::new();
+    add_files(&repo, 3);
+    let head = repo.head();
+    // The message cap is 4096 bytes: one long line, or 2000 one-letter lines.
+    let long_line = "m".repeat(4000);
+    let many_lines = "a\n".repeat(2000);
+    for message in [long_line, many_lines] {
+        let card = repo
+            .card("git_commit", json!({"message": message}))
+            .unwrap();
+        for (w, h) in [(80, 24), (100, 24), (80, 40)] {
+            let (y, a, n, whole) = probe_card(card.clone(), w, h);
+            assert!(!whole, "{w}x{h}");
+            assert_eq!((y, a), (None, None), "{w}x{h}");
+            assert_eq!(n, Some(Decision::Deny), "{w}x{h}");
+        }
+        assert_eq!(repo.head(), head, "nothing was committed");
+    }
+}
+
+/// Issue #269: a commit card that fits whole on screen still arms.
+#[test]
+fn a_commit_card_that_fits_still_arms() {
+    let repo = Repo::new();
+    add_files(&repo, 3);
+    let card = repo
+        .card("git_commit", json!({"message": "small"}))
+        .unwrap();
+    let (y, _, _, whole) = probe_card(card, 80, 24);
+    assert!(whole);
+    assert_eq!(y, Some(Decision::Approve));
+}
+
 #[test]
 fn git_and_push_cards_render_their_effect_and_push_is_distinct() {
     let repo = Repo::new().with_remote();
