@@ -1708,14 +1708,16 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.azure` and `.password-store` directories
   (everything under them); `.config/gh` (everything under it); `.env*` and `*.env`
   (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
-  `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig` and
-  `application_default_credentials.json`; `.docker/config.json`, `.cargo/credentials`,
+  `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
+  `kubeconfig.yaml`, `kubeconfig.yml` and `application_default_credentials.json`;
+  `.docker/config.json`, `.cargo/credentials`,
   `.cargo/credentials.toml` and `.gem/credentials` (only these files in those
   directories); names starting `id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa`
   (keys and their `.pub` copies); `credentials*.json`, `service-account*.json` and
   `client_secret*.json`; `secrets.y*ml` (starts `secrets.y`, ends `ml`);
   `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars`,
-  `*.tfvars.json`, `*.tfstate`, `*.tfstate.backup`, `*.p8`, `*.ppk` and `*.gpg`. Names that
+  `*.tfvars.json`, `*.tfstate`, `*.tfstate.backup` and timestamped `*.tfstate.*.backup`,
+  `*.p8`, `*.ppk` and `*.gpg`. Names that
   only look similar stay readable, for example `environment.rs`, `keys.md`,
   `credentials.md`, `secrets.md`, `ssh_client.rs`, `terraform.md`, `.docker/daemon.json`
   and `.cargo/config.toml`.

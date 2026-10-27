@@ -51,13 +51,16 @@ pub(crate) fn path_valid(path: &str) -> bool {
 ///   and `.cargo/config.toml` stay readable.
 /// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
 ///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
-///   `application_default_credentials.json`, `secrets.y*ml` (starts `secrets.y`, ends `ml`).
+///   `kubeconfig.yaml`, `kubeconfig.yml`, `application_default_credentials.json`,
+///   `secrets.y*ml` (starts `secrets.y`, ends `ml`).
 /// - Name prefixes: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa` (private keys and
 ///   their `.pub`/backup siblings; a name that merely starts so is refused too),
 ///   `credentials` with a `.json` ending (`credentials*.json`), `service-account` and
 ///   `client_secret` with a `.json` ending (`service-account*.json`, `client_secret*.json`).
 /// - Suffixes: `.pem`, `.key`, `.p12`, `.pfx`, `.env`, `.keystore`, `.jks`, `.tfvars`,
 ///   `.tfvars.json`, `.tfstate`, `.tfstate.backup`, `.p8`, `.ppk`, `.gpg`.
+/// - Timestamped Terraform backups: a name containing `.tfstate.` and ending `.backup`
+///   (`terraform.tfstate.1700000000.backup`).
 ///
 /// Bare `credentials` and `secrets.*` names other than the two above stay readable.
 /// Directory-scoped rules look at the component directly above the name, so a nested
@@ -89,11 +92,14 @@ pub(crate) fn secret(path: &str) -> bool {
                 | ".boto"
                 | ".dockercfg"
                 | "kubeconfig"
+                | "kubeconfig.yaml"
+                | "kubeconfig.yml"
                 | "application_default_credentials.json"
         ) || (parent == Some(".config") && part == "gh")
             || (parent == Some(".docker") && part == "config.json")
             || (parent == Some(".cargo") && matches!(part, "credentials" | "credentials.toml"))
             || (parent == Some(".gem") && part == "credentials")
+            || (part.contains(".tfstate.") && part.ends_with(".backup"))
             || part.starts_with(".env")
             || (part.starts_with("secrets.y") && part.ends_with("ml"))
             || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
