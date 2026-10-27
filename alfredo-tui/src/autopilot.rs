@@ -1264,6 +1264,15 @@ impl Autopilot {
         }
     }
 
+    /// The unfinished run this conversation holds paused (restored after a restart or
+    /// stopped), if any: what `--resume` continues and `--go` must not plan over.
+    pub fn paused_run(&self, tasks: &TaskControl) -> Option<Status> {
+        self.saved
+            .as_ref()
+            .filter(|saved| saved.active() && saved.paused)?;
+        self.status(tasks)
+    }
+
     pub fn status(&self, tasks: &TaskControl) -> Option<Status> {
         let saved = self.saved.as_ref()?;
         let mut state = match saved.phase {
