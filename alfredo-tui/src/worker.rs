@@ -816,11 +816,18 @@ struct GitRan {
     stdout: Vec<u8>,
 }
 
-/// One synchronous host git call, bounded by the running call's budget (#470): git is
-/// stopped at the deadline, so a repository that blocks git (a FIFO where git reads a
-/// file) cannot hang the caller. `Err` when git gave no answer: it did not start, was
-/// stopped, or its output was cut.
-fn git_blocking(workspace: &Path, args: &[&str]) -> Result<GitRan> {
+/// Why a synchronous host git call gave no answer (#470 review): its deadline passed, or it
+/// did not run to its end for another reason (it did not start, its output was too large,
+/// or the call was cancelled).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoAnswer {
+    TimedOut,
+    Failed,
+}
+
+/// The command for one synchronous host git call in `workspace`: the hardened environment,
+/// no lazy fetch and no transport (#467).
+fn blocking_command(workspace: &Path, args: &[&str]) -> std::process::Command {
     let mut command = std::process::Command::new("/usr/bin/git");
     command
         .env_clear()
@@ -835,15 +842,35 @@ fn git_blocking(workspace: &Path, args: &[&str]) -> Result<GitRan> {
         .arg("-C")
         .arg(workspace)
         .args(args);
+    command
+}
+
+/// One synchronous host git call, bounded by the running call's budget (#470): git is
+/// stopped at the deadline, so a repository that blocks git (a FIFO where git reads a
+/// file) cannot hang the caller. `Err` says why git gave no answer.
+fn git_blocking(workspace: &Path, args: &[&str]) -> std::result::Result<GitRan, NoAnswer> {
     let clock = git_read::call_clock();
-    match git_read::run_bounded(command, BLOCKING_OUTPUT_LIMIT, clock.left())? {
-        (Some(status), stdout, _) => Ok(GitRan {
+    match git_read::run_bounded(
+        blocking_command(workspace, args),
+        BLOCKING_OUTPUT_LIMIT,
+        clock.left(),
+    ) {
+        Ok((Some(status), stdout, _)) => Ok(GitRan {
             success: status.success(),
             stdout,
         }),
-        (None, _, _) => Err(format!(
-            "git output is larger than {BLOCKING_OUTPUT_LIMIT} bytes"
-        )),
+        Ok((None, _, _)) => Err(NoAnswer::Failed),
+        // run_bounded draws on this budget, so a spent budget is the deadline.
+        Err(_) if clock.left().is_zero() => Err(NoAnswer::TimedOut),
+        Err(_) => Err(NoAnswer::Failed),
+    }
+}
+
+/// The `dirty` marker for a check that gave no answer.
+fn unchecked_marker(stop: NoAnswer) -> u32 {
+    match stop {
+        NoAnswer::TimedOut => UNCHECKED_TIMED_OUT,
+        NoAnswer::Failed => UNCHECKED_FAILED,
     }
 }
 
@@ -912,6 +939,10 @@ pub(crate) const UNCHECKED_CHANGES: u32 = u32::MAX;
 /// within its deadline (#470). Also a marker, not a real count.
 pub(crate) const UNCHECKED_TIMED_OUT: u32 = u32::MAX - 1;
 
+/// The `dirty` count recorded when git could not run its check to its end for another
+/// reason (did not start, output too large, cancelled). Also a marker (#470 review).
+pub(crate) const UNCHECKED_FAILED: u32 = u32::MAX - 2;
+
 /// Number of uncommitted changes (tracked modifications and untracked,
 /// non-ignored files) and the short HEAD they are not based on. Read-only
 /// (`GIT_OPTIONAL_LOCKS=0`; no index refresh is written). `None` when the
@@ -929,7 +960,7 @@ fn uncommitted_changes_within(workspace: &Path) -> Option<(u32, String)> {
     let head = match git_blocking(workspace, &["rev-parse", "--short=7", "HEAD"]) {
         Ok(ran) if ran.success => String::from_utf8_lossy(&ran.stdout).trim().to_string(),
         Ok(_) => return None,
-        Err(_) => return Some((UNCHECKED_TIMED_OUT, "unknown".into())),
+        Err(stop) => return Some((unchecked_marker(stop), "unknown".into())),
     };
     // Listing the config executes nothing. An unreadable listing is treated
     // as unqualified: the status call below would not be trustworthy either.
@@ -938,7 +969,7 @@ fn uncommitted_changes_within(workspace: &Path) -> Option<(u32, String)> {
             !config_needs_qualification(&String::from_utf8_lossy(&config.stdout))
         }
         Ok(_) => false,
-        Err(_) => return Some((UNCHECKED_TIMED_OUT, head)),
+        Err(stop) => return Some((unchecked_marker(stop), head)),
     };
     if !qualified {
         return Some((UNCHECKED_CHANGES, head));
@@ -949,13 +980,13 @@ fn uncommitted_changes_within(workspace: &Path) -> Option<(u32, String)> {
     ) {
         Ok(status) if status.success => status,
         Ok(_) => return None,
-        Err(_) => return Some((UNCHECKED_TIMED_OUT, head)),
+        Err(stop) => return Some((unchecked_marker(stop), head)),
     };
     let count = String::from_utf8_lossy(&status.stdout)
         .lines()
         .filter(|line| !line.trim().is_empty())
         .count();
-    Some((u32::try_from(count).unwrap_or(UNCHECKED_CHANGES - 1), head))
+    Some((u32::try_from(count).unwrap_or(UNCHECKED_FAILED - 1), head))
 }
 
 /// Whether `workspace` has a commit at HEAD (blocking; one quick local git call).
@@ -3699,5 +3730,20 @@ mod host_git_tests {
         assert!(!super::config_needs_qualification(
             "protocol.allow=never\nremote.origin.url=/x\n"
         ));
+    }
+
+    /// Review round 2 (#470): a timeout keeps its own marker, any other failure gets
+    /// another, and neither can pass for a clean or a counted tree.
+    #[test]
+    fn no_answer_markers_name_the_timeout_apart_from_other_failures() {
+        assert_eq!(
+            super::unchecked_marker(super::NoAnswer::TimedOut),
+            super::UNCHECKED_TIMED_OUT
+        );
+        assert_eq!(
+            super::unchecked_marker(super::NoAnswer::Failed),
+            super::UNCHECKED_FAILED
+        );
+        assert_ne!(super::UNCHECKED_TIMED_OUT, super::UNCHECKED_FAILED);
     }
 }

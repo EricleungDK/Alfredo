@@ -143,6 +143,11 @@ impl Saved {
                 "uncommitted changes not checked: git did not answer within {seconds} s (the repository may block git) · workers see HEAD {head}"
             ));
         }
+        if *count == crate::worker::UNCHECKED_FAILED {
+            return Some(format!(
+                "uncommitted changes not checked: git could not finish the check (it did not start, its output was too large, or it was cancelled) · workers see HEAD {head}"
+            ));
+        }
         let (noun, verb) = if *count == 1 {
             ("change", "is")
         } else {
