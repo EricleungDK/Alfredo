@@ -979,7 +979,9 @@ fn uncommitted_changes_within(workspace: &Path) -> Option<(u32, String)> {
         &["status", "--porcelain", "--untracked-files=all"],
     ) {
         Ok(status) if status.success => status,
-        Ok(_) => return None,
+        // git ran but could not report (a corrupt index, for example): the tree is not
+        // checked, which is not the same as having no commit (#470 review round 3).
+        Ok(_) => return Some((UNCHECKED_FAILED, head)),
         Err(stop) => return Some((unchecked_marker(stop), head)),
     };
     let count = String::from_utf8_lossy(&status.stdout)
