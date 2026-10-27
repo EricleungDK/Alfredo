@@ -4,6 +4,7 @@
 //! (refs starting with `-` are refused, `--end-of-options` and `--` separate them).
 use super::{excluded, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
+use std::os::unix::fs::FileTypeExt;
 use std::{
     cell::Cell,
     collections::HashSet,
@@ -776,7 +777,11 @@ fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), S
                 return Err(LINKED.to_string());
             }
             // A FIFO, socket or device blocks any git process that opens it (issue #461).
-            if !kind.is_file() && !kind.is_dir() {
+            // The one exception: git's fsmonitor daemon socket directly in a git directory
+            // (opening a socket fails, it cannot block; Alfredo's git runs without fsmonitor).
+            let daemon =
+                !recursive && kind.is_socket() && entry.file_name() == "fsmonitor--daemon.ipc";
+            if !kind.is_file() && !kind.is_dir() && !daemon {
                 return Err(special(&entry.file_name().to_string_lossy()));
             }
             if recursive && kind.is_dir() {
@@ -897,7 +902,7 @@ fn refuse_special_start_up_files(root: &Path, clock: Clock) -> Result<(), String
     if let Some(text) = read_control_file(&git_dir.join("commondir"), clock, &special("commondir"))?
     {
         common_dir = git_dir
-            .join(text.trim())
+            .join(text.trim_end_matches(['\r', '\n']))
             .canonicalize()
             .map_err(|_| outside())?;
     }
@@ -909,12 +914,22 @@ fn refuse_special_start_up_files(root: &Path, clock: Clock) -> Result<(), String
     }
     // git falls back to the root as a bare repository when it rejects this one; its HEAD
     // may be a FIFO.
-    ordinary_or_missing(&root.join("HEAD"), clock, "HEAD")?;
+    for name in ["HEAD", "commondir", "config"] {
+        ordinary_or_missing(&root.join(name), clock, name)?;
+    }
+    // Walk only a directory that is the workspace's own or a worktree entry; the full
+    // verification after git decides the rest.
+    let own = root.join(".git").canonicalize().ok();
+    if own.as_deref() != Some(git_dir.as_path())
+        && git_dir.parent() != Some(common_dir.join("worktrees").as_path())
+    {
+        return Err(outside());
+    }
     walk_repository(&git_dir, &common_dir, clock)
 }
 
 fn special(name: &str) -> String {
-    format!("the workspace's repository has a {name} that is not an ordinary file (a FIFO, device or link); git tools refuse")
+    format!("the workspace's repository has a {name} that is not an ordinary file (a FIFO, socket, device or link); git tools refuse")
 }
 
 /// `Ok` for an ordinary file or a missing one, the refusal naming `name` for anything else.
