@@ -150,7 +150,7 @@ You can also start unattended: `alfredo-tui --model qwen2.5-coder:14b --go "GOAL
 For scripts and CI, add `--headless`: it runs without a terminal, prints progress lines
 on stderr and ends with one JSON object on stdout
 (`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage}`);
-SIGINT/SIGTERM cancel workers like `/stop`. Exit 2 means setup failed (Ollama down, model
+SIGINT/SIGTERM cancel workers like `/stop`; `--resume --headless` continues a paused run. Exit 2 means setup failed (Ollama down, model
 not installed) with the reason on stderr; with `--on-finish`, headless waits for the hook
 (10 s limit) after printing the JSON and reports a failed hook on stderr.
 Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
@@ -196,7 +196,8 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | Ctrl+Left / Ctrl+Right (Alt+B / Alt+F) | Move one word left / right |
 | Ctrl+K | Delete from the cursor to the end of the prompt |
 | Ctrl+W / Ctrl+U | Delete word / clear prompt |
-| Ctrl+Q / Ctrl+C | Quit (cancels workers and waits for their results) |
+| Ctrl+Q | Quit (cancels workers and waits for their results) |
+| Ctrl+C | While a chat reply is running (and no worker is): cancel it like Esc, keeping the prompt draft and the session. Otherwise quit like Ctrl+Q |
 
 ## What Alfredo leaves behind
 
@@ -232,6 +233,7 @@ to save; their diff is kept in the run's evidence. See
 | `--go GOAL` | off | Start autopilot on launch |
 | `--headless` | off | With `--go GOAL`: no terminal needed. One stderr line per autopilot state change, then one JSON object on stdout. Exit 0 all accepted, 1 partial/failed/interrupted, 2 setup or usage error (including Ollama unreachable or model missing); waits for and reports an `--on-finish` hook |
 | `--chat PROMPT` | – | With `--headless`: run one Chat Agent turn (tools, approvals) without a terminal and print one JSON result. Mutating calls are denied unless `--approve` allows them |
+| `--resume` | – | Only with `--headless`: continue the mission's paused run (as `/resume` does) with the same stderr lines, JSON and exit codes as `--go`; exit 2 when there is nothing to resume. `--go GOAL --headless` over a paused run exits 2 naming it and plans nothing; use `--conversation NAME` for a separate run |
 | `--approve workspace-edits` | deny all | Only with `--chat … --headless`: approve `edit_file`/`write_file` inside the repository, deny everything else (outcomes logged to `chat-approvals.jsonl`). Interactive chat always asks |
 | `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |
 | `--on-finish PROGRAM` | off (env `ALFREDO_ON_FINISH`) | Absolute path to your own executable, run when an autopilot run ends `done`, `partial` or `failed` (see [reference](alfredo-tui/docs/reference.md#completion-hook)) |
