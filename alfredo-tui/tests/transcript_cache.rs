@@ -456,3 +456,25 @@ fn streaming_a_token_rebuilds_only_the_last_message() {
     assert_eq!(resized.builds, after.builds);
     assert_eq!(resized.height_passes, after.height_passes + 36);
 }
+
+/// Issue #436: tag characters, zero-width marks and line/paragraph separators in a reply
+/// show as `<U+XXXX>` in prose and inside fenced code, as the approval card shows them.
+#[test]
+fn invisible_code_points_in_replies_show_as_code_points() {
+    let prose = "ok\u{E0041}\u{E0042}\u{2028}done \u{200B}x **bold\u{200B}** `t\u{E0041}`";
+    let fenced = "```\ncode\u{E0041}\u{200B}\u{2028}end\n```";
+    let app = chat(&[("user", "x"), (BODY, &format!("{prose}\n{fenced}"))]);
+    let buffer = draw_buffer(&app, 80, 30);
+    for row in rows(&buffer) {
+        for symbol in row {
+            assert!(
+                !symbol.chars().any(|c| matches!(c, '\u{E0041}' | '\u{E0042}' | '\u{200B}' | '\u{2028}')),
+                "raw symbol {symbol:?} in the buffer"
+            );
+        }
+    }
+    let text = row_text(&buffer).join("\n");
+    assert!(text.contains("ok<U+E0041><U+E0042><U+2028>done"), "{text}");
+    assert!(text.contains("code<U+E0041><U+200B><U+2028>end"), "{text}");
+    assert!(text.contains("<U+200B>x"), "{text}");
+}
