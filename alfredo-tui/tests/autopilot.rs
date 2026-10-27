@@ -69,8 +69,20 @@ impl Fixture {
     fn status(&self) -> String {
         git(&self.workspace, &["status", "--porcelain"])
     }
+    /// The mission state directory. `conversation_directory` takes the store lock
+    /// with a 250 ms deadline, so while workers hold it on a loaded runner a bare
+    /// `unwrap` flaked (#442); retry the busy refusal for a bounded time instead.
     fn directory(&self) -> PathBuf {
-        self.store.conversation_directory().unwrap()
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match self.store.conversation_directory() {
+                Ok(directory) => return directory,
+                Err(error) if error.contains("busy") && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(20))
+                }
+                Err(error) => panic!("conversation directory: {error}"),
+            }
+        }
     }
 }
 impl Drop for Fixture {
@@ -3282,7 +3294,10 @@ fn follow_up_adopted_while_integrating_survives_a_restart_before_the_job_complet
 }
 
 fn peeked(fixture: &Fixture) -> Option<(&'static str, Option<(u32, u32)>)> {
-    let peek = autopilot::peek(&autopilot::state_path(&fixture.directory(), "default")).unwrap()?;
+    // A read-only peek polled from inside the drive loop: use the lock-free path so
+    // the poll never competes with the workers for the store lock (#442).
+    let directory = fixture.store.state_directory();
+    let peek = autopilot::peek(&autopilot::state_path(directory, "default")).unwrap()?;
     Some((peek.word, peek.counts))
 }
 
