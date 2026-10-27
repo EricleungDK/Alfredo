@@ -435,7 +435,15 @@ impl Session {
     /// `/clear`: start this conversation over. Tasks and their evidence live in the
     /// task store and are unaffected; the transcript, note, task receipts and command
     /// history shown in this conversation are dropped, and the model is kept.
-    pub fn clear_conversation(&mut self) -> Result<(), &'static str> {
+    ///
+    /// `plan_origin` is the origin of the pending plan draft, if any (issue #466). A
+    /// draft is saved with the command that generated it, so clearing the session
+    /// that holds that command would make every later save refuse. `/clear` is refused
+    /// instead, and nothing changes: the owner approves or discards the draft first.
+    pub fn clear_conversation(
+        &mut self,
+        plan_origin: Option<&crate::planner_command::Request>,
+    ) -> Result<(), &'static str> {
         if self.status.active() {
             return Err("Cancel (Esc) or wait for the current reply before /clear");
         }
@@ -450,6 +458,13 @@ impl Session {
             )
         }) {
             return Err("A command in this conversation is still being recorded; try /clear again in a moment");
+        }
+        if plan_origin.is_some_and(|origin| {
+            self.commands
+                .iter()
+                .any(|command| command.intent.planner_request() == Some(origin))
+        }) {
+            return Err("A plan draft from this conversation is still pending review; save (/plan-save) or cancel (/plan-cancel) it before /clear");
         }
         let mut fresh = Session::new(self.model.clone());
         // Late events from the old conversation carry smaller attempt numbers.
