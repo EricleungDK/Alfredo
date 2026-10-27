@@ -404,13 +404,16 @@ class ChatTools(unittest.TestCase):
         self.assertEqual(len(chats), 1)
         self.assertEqual(self.tool_names(chats[0]), [], 'a Wayfinder chat sends no tools')
         self.terminal.wait_for('tools off')
+        # A refused @path must not hide the tools-off footer (and vice versa).
+        self.terminal.write(b'@missing.txt please just do it\r')
+        self.terminal.wait_for('not attached · Wayfinder chat: tools off')
         self.terminal.write(b'/scope-clear\r')
         self.terminal.wait_for('chat tools are back')
         self.terminal.write(b'summarise README\r')
         self.terminal.wait_for('SUMMARY_FROM_TOOL')
         chats = self.fixture.chats()
-        self.assertIn('read_file', self.tool_names(chats[1]))
-        self.assertIn('propose_plan', self.tool_names(chats[1]))
+        self.assertIn('read_file', self.tool_names(chats[-1]))
+        self.assertIn('propose_plan', self.tool_names(chats[-1]))
 
     def test_a_proposal_prefills_the_prompt_and_starts_nothing(self):
         self.terminal.write(b'refactor everything\r')
