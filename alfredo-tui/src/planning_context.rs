@@ -563,6 +563,89 @@ mod tests {
         }
     }
 
+    /// Issue #471: credential files outside the first list (registry, Terraform,
+    /// cloud and vault tokens, service-account keys), in nested and case-varied forms.
+    #[test]
+    fn secret_covers_issue_471_credential_files() {
+        for path in [
+            ".pypirc",
+            "home/.PyPIRC",
+            ".htpasswd",
+            ".vault-token",
+            ".s3cfg",
+            ".boto",
+            ".dockercfg",
+            "kubeconfig",
+            "deploy/Kubeconfig",
+            "application_default_credentials.json",
+            "gcloud/application_default_credentials.json",
+            "service-account.json",
+            "keys/service-account-prod.json",
+            "client_secret.json",
+            "client_secret_123.json",
+            "AuthKey_X.p8",
+            "key.ppk",
+            "backup/x.gpg",
+            "terraform.tfstate",
+            "terraform.tfstate.backup",
+            "infra/prod.tfstate",
+            "Terraform.TFState",
+            ".docker/config.json",
+            "sub/.docker/config.json",
+            ".DOCKER/CONFIG.JSON",
+            ".cargo/credentials",
+            ".cargo/credentials.toml",
+            "sub/.cargo/Credentials.TOML",
+            ".gem/credentials",
+            ".config/gh/hosts.yml",
+            ".config/gh/config.yml",
+            "home/.config/gh/nested/x.txt",
+            ".azure/accessTokens.json",
+            ".azure/azureProfile.json",
+            ".password-store/x.gpg",
+            ".password-store/notes.txt",
+        ] {
+            assert!(secret(path), "{path} must be a secret");
+            assert!(excluded(path), "{path} must be excluded");
+        }
+    }
+
+    /// Issue #471 near misses: the directory-scoped rules only cover the named files
+    /// (`.docker/config.json`, `.cargo/credentials*`, `.gem/credentials`), and the name
+    /// rules need an exact name, suffix or `.json` ending.
+    #[test]
+    fn secret_leaves_issue_471_near_misses_alone() {
+        for path in [
+            "src/state.rs",
+            "terraform.md",
+            "docs/terraform.md",
+            "terraform.tfstate.md",
+            "config.json",
+            "docs/config.json",
+            ".docker/daemon.json",
+            ".docker/config.json.md",
+            "docs/.docker/readme.md",
+            ".cargo/config.toml",
+            ".cargo/config",
+            "src/key.rs",
+            "docs/kubeconfig.md",
+            "kubeconfig.md",
+            "service-account.md",
+            "client_secret.md",
+            "src/boto.rs",
+            "AuthKey_X.p8.md",
+            "docs/gpg.md",
+            ".gem/config",
+            ".config/ghost.md",
+            ".config/gh.md",
+            ".azure.md",
+            "docs/password-store.md",
+            "gcloud/config.json",
+        ] {
+            assert!(!secret(path), "{path} must stay readable");
+        }
+    }
+
     #[test]
     fn generated_trees_stay_excluded_and_unchanged() {
         assert!(excluded("node_modules/x.js"));

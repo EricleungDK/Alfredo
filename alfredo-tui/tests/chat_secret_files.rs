@@ -43,6 +43,9 @@ const SECRET_FILES: &[&str] = &[
     "config/secrets.yaml",
     "secrets.yaml.yml",
     "deploy/secrets.y-prod.yml",
+    "terraform.tfstate",
+    ".docker/config.json",
+    ".cargo/credentials.toml",
     "Prod.ENV",
     "CONFIG/.AWS/Credentials",
     "Id_RSA",
@@ -184,6 +187,106 @@ fn every_credential_file_is_refused_by_each_chat_tool() {
     }
     let everything = repo.run("grep", json!({"pattern": "SECRET-MARKER"}));
     assert_eq!(everything, "no matches");
+}
+
+/// Issue #471: common credential files that were not on the list (a registry token,
+/// a Terraform state, a cloud or vault token, a service-account key) are never read
+/// through `resolve`, so read_file, grep and list_files cannot return them.
+#[test]
+fn common_credential_files_are_excluded_from_read_tools() {
+    let root = std::env::temp_dir().join(format!("secret-gaps-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let names = [
+        ".pypirc",
+        ".docker/config.json",
+        ".cargo/credentials.toml",
+        ".cargo/credentials",
+        ".config/gh/hosts.yml",
+        "terraform.tfstate",
+        ".htpasswd",
+        ".vault-token",
+        "kubeconfig",
+        "AuthKey_X.p8",
+        "key.ppk",
+        ".s3cfg",
+        ".boto",
+        "service-account.json",
+        ".dockercfg",
+        ".gem/credentials",
+        ".azure/accessTokens.json",
+        ".password-store/x.gpg",
+        "client_secret.json",
+        "gcloud/application_default_credentials.json",
+    ];
+    let mut readable = vec![];
+    for n in names {
+        let p = root.join(n);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "SECRET\n").unwrap();
+        if alfredo_tui::chat_tools::resolve(&root, n).is_ok() {
+            readable.push(n);
+        }
+    }
+    assert!(readable.is_empty(), "readable credential files: {readable:?}");
+}
+
+/// Issue #471 negative guard: ordinary files whose names only look like the new
+/// credential patterns stay readable, so the wider list does not block normal work.
+#[test]
+fn ordinary_files_near_the_new_credential_names_stay_readable() {
+    let root = std::env::temp_dir().join(format!("secret-near-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let names = [
+        "config.json",
+        "credentials.md",
+        "README.md",
+        "src/state.rs",
+        ".docker/daemon.json",
+        ".cargo/config.toml",
+        "src/key.rs",
+        "docs/terraform.md",
+        "terraform.tfstate.md",
+        "docs/kubeconfig.md",
+        "service-account.md",
+        "src/boto.rs",
+        ".gem/config",
+        ".config/ghost.md",
+        "docs/.docker/readme.md",
+    ];
+    let mut blocked = vec![];
+    for n in names {
+        let p = root.join(n);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "plain\n").unwrap();
+        if alfredo_tui::chat_tools::resolve(&root, n).is_err() {
+            blocked.push(n);
+        }
+    }
+    assert!(blocked.is_empty(), "ordinary files refused: {blocked:?}");
+}
+
+/// Issue #471: git_commit refuses to commit the new credential names as well,
+/// whatever their directory (a nested `.cargo/credentials.toml`, a Terraform state).
+#[test]
+fn git_commit_refuses_the_issue_471_credential_files() {
+    let repo = Repo::plain();
+    for path in [
+        "terraform.tfstate",
+        "infra/prod.tfstate.backup",
+        ".docker/config.json",
+        "sub/.cargo/credentials.toml",
+    ] {
+        repo.write(path, "SECRET-471\n");
+        let error = repo
+            .card("git_commit", json!({"message": "add it", "files": [path]}))
+            .unwrap_err();
+        assert!(error.contains(path), "git_commit {path}: {error}");
+        assert!(error.contains("by hand"), "git_commit {path}: {error}");
+    }
 }
 
 /// Detection: the planner's named-file reader and planning context never carry
