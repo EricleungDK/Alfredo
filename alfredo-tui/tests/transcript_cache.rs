@@ -468,7 +468,9 @@ fn invisible_code_points_in_replies_show_as_code_points() {
     for row in rows(&buffer) {
         for symbol in row {
             assert!(
-                !symbol.chars().any(|c| matches!(c, '\u{E0041}' | '\u{E0042}' | '\u{200B}' | '\u{2028}')),
+                !symbol
+                    .chars()
+                    .any(|c| matches!(c, '\u{E0041}' | '\u{E0042}' | '\u{200B}' | '\u{2028}')),
                 "raw symbol {symbol:?} in the buffer"
             );
         }
@@ -477,4 +479,26 @@ fn invisible_code_points_in_replies_show_as_code_points() {
     assert!(text.contains("ok<U+E0041><U+E0042><U+2028>done"), "{text}");
     assert!(text.contains("code<U+E0041><U+200B><U+2028>end"), "{text}");
     assert!(text.contains("<U+200B>x"), "{text}");
+}
+
+/// Issue #436: a `<U+XXXX>` marker next to `**` keeps the flanking rules, so the markers
+/// still pair and the text between them is bold.
+#[test]
+fn hidden_characters_beside_bold_markers_keep_the_bold() {
+    for (line, shown, bold) in [
+        ("**bold\u{200B}** end", "bold<U+200B> end", "bold"),
+        ("\u{E0041}**bold**", "<U+E0041>bold", "bold"),
+        ("see **qz\u{2028}wq** end", "see qz<U+2028>wq end", "qz"),
+    ] {
+        let app = chat(&[("user", "x"), (BODY, line)]);
+        let buffer = draw_buffer(&app, 60, 12);
+        let text = row_text(&buffer).join("\n");
+        assert!(text.contains(shown), "{line:?} shows {text}");
+        assert!(!text.contains("**"), "{line:?} kept its markers: {text}");
+        let cell = cell_of(&buffer, bold);
+        assert!(
+            cell.modifier.contains(Modifier::BOLD),
+            "{line:?}: {bold:?} not bold"
+        );
+    }
 }

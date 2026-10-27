@@ -418,7 +418,7 @@ next character is not whitespace; it closes at the next exactly-two `**` whose p
 character is not whitespace. So `src/**/*.rs`, `2 ** 3`, `2**3`, `f(**kw, **o)` and
 `***both***` show every asterisk. An unclosed fence, `**` or backtick stays plain
 text (an open fence shows as an open code block while the reply streams). Your own messages are shown as typed.
-Control characters are dropped as before and bidi controls in a reply show as `<U+XXXX>`.
+Control characters are dropped as before, except a carriage return, which shows as `<U+000D>`; bidi controls, zero-width and tag characters, line separators and other invisible characters in a reply show as `<U+XXXX>`, as on the approval card (issues #400, #436).
 
 ## Establish scope in conversation
 
