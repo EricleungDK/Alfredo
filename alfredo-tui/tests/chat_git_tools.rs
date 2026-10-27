@@ -1053,6 +1053,112 @@ fn root_directories_named_like_git_files_do_not_refuse_a_valid_repository() {
     }
 }
 
+/// Issue #465 (1): a FIFO in a git-dir subdirectory git reads (`rebase-merge/head-name`,
+/// `sequencer/todo`, a submodule's `modules/*/HEAD`) is refused before git runs, not after
+/// git has stalled to its 15 s limit.
+#[test]
+fn a_fifo_in_a_git_dir_subdirectory_is_refused_before_git_runs() {
+    for file in [
+        "rebase-merge/head-name",
+        "sequencer/todo",
+        "rebase-apply/next",
+        "modules/sub/HEAD",
+    ] {
+        let repo = Repo::new();
+        let path = repo.root.join(".git").join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        mkfifo(&path);
+        let name = path.file_name().unwrap().to_str().unwrap();
+        for tool in ["git_status", "git_log"] {
+            let output = dispatch_promptly(&repo.root, tool);
+            assert!(
+                output.starts_with("error:") && output.contains(name),
+                "{file} {tool}: {output}"
+            );
+        }
+    }
+}
+
+/// Issue #465 (1): the same holds from a linked worktree, whose entry holds its own
+/// `rebase-merge/`.
+#[test]
+fn a_fifo_in_a_linked_worktrees_git_dir_subdirectory_is_refused() {
+    let repo = Repo::new();
+    let wt = repo.base.join("wt");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt-branch",
+            wt.to_str().unwrap(),
+        ],
+    );
+    let path = repo.root.join(".git/worktrees/wt/rebase-merge/head-name");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    mkfifo(&path);
+    let output = dispatch_promptly(&wt, "git_status");
+    assert!(
+        output.starts_with("error:") && output.contains("head-name"),
+        "{output}"
+    );
+}
+
+/// Issue #465 (1): ordinary files in those subdirectories, and git's fsmonitor socket at the
+/// top of the git directory, still read; a symlinked subdirectory is refused, not followed.
+#[test]
+fn ordinary_git_dir_subdirectories_are_accepted_and_linked_ones_refused() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".git/rebase-merge")).unwrap();
+    fs::write(
+        repo.root.join(".git/rebase-merge/head-name"),
+        "refs/heads/main\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.root.join(".git/sequencer")).unwrap();
+    fs::write(repo.root.join(".git/sequencer/todo"), "pick abc\n").unwrap();
+    let _listener =
+        std::os::unix::net::UnixListener::bind(repo.root.join(".git/fsmonitor--daemon.ipc"))
+            .unwrap();
+    for tool in ["git_status", "git_log"] {
+        let output = dispatch_promptly(&repo.root, tool);
+        assert!(!output.starts_with("error:"), "{tool}: {output}");
+    }
+    let repo = Repo::new();
+    let elsewhere = repo.base.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    mkfifo(&elsewhere.join("todo"));
+    std::os::unix::fs::symlink(&elsewhere, repo.root.join(".git/sequencer")).unwrap();
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(output.starts_with("error:"), "{output}");
+}
+
+/// Issue #465 (2): `git_log` refuses a config with `include.path` or `includeIf`, as
+/// `git_status` does, so an include target that is a FIFO never stalls git.
+#[test]
+fn git_log_refuses_a_config_include_before_git_runs() {
+    for section in [
+        "[include]\n\tpath = {}\n",
+        "[includeIf \"gitdir:/\"]\n\tpath = {}\n",
+    ] {
+        let repo = Repo::new();
+        let fifo = repo.base.join("included.fifo");
+        mkfifo(&fifo);
+        let mut config = fs::read_to_string(repo.root.join(".git/config")).unwrap();
+        config.push_str(&section.replace("{}", fifo.to_str().unwrap()));
+        fs::write(repo.root.join(".git/config"), config).unwrap();
+        for tool in ["git_log", "git_status"] {
+            let output = dispatch_promptly(&repo.root, tool);
+            assert!(
+                output.starts_with("error:") && output.contains("include"),
+                "{tool}: {output}"
+            );
+        }
+    }
+}
+
 /// Issue #461 (6): an oversize gitfile or alternates file says it is too large, not that it
 /// is a FIFO, device or link.
 #[test]
