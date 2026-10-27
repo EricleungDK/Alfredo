@@ -240,7 +240,12 @@ automatic parent (`Saved originating command is unavailable`). If only unevictab
 commands remain, the command is refused with `Command history capacity reached`. A saved
 conversation that is over budget is still refused as tampered, never trimmed.
 A duplicate request correlation is refused the same way whether or not the history is
-full: validity is checked before anything is evicted. Commands and task receipts carry
+full: validity is checked before anything is evicted, and the refusal names its cause
+(a repeated correlation, a missing parent), not capacity. The ids and correlations of the
+last 1024 evicted commands are kept in the conversation file, so an evicted command's
+correlation is still refused; older ones are forgotten and only the task and scope
+stores' own duplicate guards stop them. A saved planner draft's origin command must be
+generated, live or interrupted, so eviction can never take it. Commands and task receipts carry
 a lifetime number capped at 8192; when the next number would pass the cap they are
 renumbered from 1 in their existing order (a reader's place in the transcript moves
 with its command), so a long run of evictions never hits the cap. Command numbers

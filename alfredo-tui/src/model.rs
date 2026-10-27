@@ -16,6 +16,9 @@ const COMMAND_BUDGET_COUNT: usize = 512;
 const COMMAND_BUDGET_BYTES: usize = 512 * 1024;
 /// Largest console sequence a saved command or task receipt may carry.
 const MAX_CONSOLE_SEQUENCE: u64 = 8192;
+/// How many evicted commands' ids and correlations are remembered; older ones are
+/// forgotten, and the stores' own duplicate guards remain the backstop.
+const RETIRED_COMMANDS: usize = 1024;
 const CAPACITY: &str = "Command history capacity reached; start another conversation";
 /// Normalized command JSON plus 1 KiB reserved per command for terminal metadata.
 fn command_budget_use(commands: &[crate::console_command::ConsoleCommand]) -> usize {
@@ -36,6 +39,21 @@ fn budget_bytes(count: usize, sum: usize) -> usize {
     }
 }
 /// Each command's normalized JSON length plus its 1 KiB reservation, serialized once.
+/// What an evicted command keeps refused: its id first, then each correlation the
+/// structure rules keep unique among evictable commands (selection commands are never
+/// evicted).
+fn retirement_keys(command: &crate::console_command::ConsoleCommand) -> Vec<String> {
+    let mut keys = vec![format!("id:{}", command.id)];
+    let intent = &command.intent;
+    if let Some(request) = intent.scope_request() {
+        keys.push(format!("scope:{}", request.correlation));
+    }
+    if let Some(request) = intent.planner_request() {
+        keys.push(format!("planner:{}", request.correlation));
+    }
+    keys
+}
+
 fn command_sizes(commands: &[crate::console_command::ConsoleCommand]) -> Vec<usize> {
     commands
         .iter()
@@ -298,6 +316,10 @@ pub struct Session {
     task_receipts: Vec<TaskReceiptRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     commands: Vec<crate::console_command::ConsoleCommand>,
+    /// Ids and correlations of evicted commands (newest last, at most
+    /// `RETIRED_COMMANDS`), so an eviction does not make a repeat admissible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    retired_commands: Vec<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     sources: std::collections::BTreeMap<usize, ResponseSource>,
     /// User-message indices of cancelled or failed turns the user moved past with
@@ -414,6 +436,7 @@ impl Session {
             compacting: None,
             task_receipts: Vec::new(),
             commands: Vec::new(),
+            retired_commands: Vec::new(),
             sources: Default::default(),
             interrupted: Vec::new(),
             status: Status::Ready,
@@ -1709,12 +1732,23 @@ impl Session {
         if !command.valid(self.messages.len()) {
             return Err("Invalid command intent".into());
         }
+        let keys = retirement_keys(&command);
+        if self.retired_commands.contains(&keys[0]) {
+            return Err("Retry the original command entry".into());
+        }
+        if keys[1..]
+            .iter()
+            .any(|key| self.retired_commands.contains(key))
+        {
+            return Err("Command correlation was already used; submit a new command".into());
+        }
         self.commands.push(command);
         // Everything but capacity is judged on the full history, before any eviction, so
         // a duplicate correlation is refused at the budget exactly as under it.
         if !self.valid_command_structure(17) {
+            let refusal = self.structure_refusal();
             self.commands.pop();
-            return Err(CAPACITY.into());
+            return Err(refusal.into());
         }
         // Only a full budget evicts, and only settled commands; a refusal drops nothing.
         if !self.commands_within_budget() && !self.evict_settled_commands() {
@@ -1795,7 +1829,36 @@ impl Session {
         }
     }
     pub(crate) fn valid_commands(&self, schema: u32) -> bool {
-        self.valid_command_structure(schema) && self.commands_within_budget()
+        self.valid_command_structure(schema)
+            && self.commands_within_budget()
+            && self.retired_commands.len() <= RETIRED_COMMANDS
+            && self.retired_commands.iter().all(|key| {
+                !key.is_empty() && key.len() <= 512 && !key.chars().any(char::is_control)
+            })
+    }
+    /// Why the history just admitted to (its last command) breaks a structure rule.
+    fn structure_refusal(&self) -> &'static str {
+        let Some((last, earlier)) = self.commands.split_last() else {
+            return "Invalid command history";
+        };
+        let key_of = |command: &crate::console_command::ConsoleCommand| {
+            retirement_keys(command).split_off(1)
+        };
+        let keys = key_of(last);
+        if earlier
+            .iter()
+            .any(|other| key_of(other).iter().any(|k| keys.contains(k)))
+        {
+            "Command correlation is already in use; submit a new command"
+        } else if matches!(
+            last.intent,
+            crate::command_intent::Intent::ArchitectDraft { .. }
+                | crate::command_intent::Intent::DispatchRun { .. }
+        ) {
+            "Command parent is missing or not yet settled; nothing was recorded"
+        } else {
+            "Invalid command history; nothing was recorded"
+        }
     }
     /// Every command rule except the size budget.
     fn valid_command_structure(&self, schema: u32) -> bool {
@@ -2026,6 +2089,13 @@ impl Session {
             self.commands = before;
             return false;
         }
+        self.retired_commands.extend(
+            dropped
+                .iter()
+                .flat_map(|index| retirement_keys(&before[*index])),
+        );
+        let excess = self.retired_commands.len().saturating_sub(RETIRED_COMMANDS);
+        self.retired_commands.drain(..excess);
         // A reader anchored to an evicted command must not keep a dangling anchor.
         self.remap_reading_commands(|sequence| {
             (!sequences.contains(&sequence)).then_some(sequence)

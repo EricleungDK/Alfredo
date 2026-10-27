@@ -2069,13 +2069,38 @@ fn an_evicted_commands_correlation_and_id_stay_refused_and_survive_a_save() {
             reason: "settled".into(),
         },
     );
+    let planned = |prompt: &str| alfredo_tui::command_intent::Intent::Planner {
+        request: alfredo_tui::planner_command::Request {
+            correlation: "plan-dup".into(),
+            operation: alfredo_tui::planner_command::Operation::Generate {
+                prompt: prompt.into(),
+                model: "fixture".into(),
+                revision: 0,
+                base_sha256: None,
+            },
+        },
+    };
+    let plan = app.sessions[0]
+        .submit_command("/plan one".into(), planned("one"))
+        .unwrap();
+    app.sessions[0].set_command_state(
+        &plan,
+        CommandState::Refused {
+            reason: "settled".into(),
+        },
+    );
     evict_oldest_settled(&mut app, "retire");
+    evict_oldest_settled(&mut app, "retire-again");
     assert!(
         app.sessions[0].commands().iter().all(|c| c.id != original),
         "the original was evicted"
     );
     let before = app.sessions[0].commands().to_vec();
     let duplicate = |app: &mut App| {
+        let plan_error = app.sessions[0]
+            .submit_command("/plan two".into(), planned("two"))
+            .unwrap_err();
+        assert!(plan_error.contains("correlation"), "{plan_error}");
         (
             app.sessions[0]
                 .submit_command("/scope two".into(), scope_intent("dup", "two"))
@@ -2157,7 +2182,10 @@ fn the_retired_set_is_bounded_optional_and_validated_on_load() {
 
 #[test]
 fn a_structure_refusal_names_its_cause_not_capacity() {
-    use alfredo_tui::tasks::{Action, Request};
+    use alfredo_tui::{
+        assessment::{Decision, FailureKind, Outcome},
+        tasks::{Action, Request},
+    };
     let mut app = App::new("fixture".into());
     app.sessions[0]
         .submit_command("/scope one".into(), scope_intent("dup", "one"))
@@ -2175,7 +2203,17 @@ fn a_structure_refusal_names_its_cause_not_capacity() {
             architect_draft(Request {
                 correlation: "missing-source".into(),
                 expected_revision: 5,
-                action: Action::Approve { task: 2 },
+                action: Action::ReviewArchitecture {
+                    task: 2,
+                    decision: Decision {
+                        failure: Some(FailureKind::Architecture),
+                        risk: None,
+                        outcome: Outcome::Rejected,
+                        reason: "Repeated architecture failure".into(),
+                        criteria: vec![],
+                        limitations: vec![],
+                    },
+                },
             }),
         )
         .unwrap_err();
