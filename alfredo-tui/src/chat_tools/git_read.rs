@@ -1486,4 +1486,94 @@ mod tests {
         assert!(status.is_none());
         assert_eq!(out.len(), 4096);
     }
+
+    /// Issue #467: a partial clone whose missing blob makes git lazy-fetch through
+    /// `remote.origin.uploadpack`, a program the repository chose. The program appends `RAN`
+    /// to the returned marker when it runs, then fails. Returns (workspace, marker).
+    fn partial_clone_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("alfredo-partial-{pid}-{name}"));
+        let marker = std::env::temp_dir().join(format!("alfredo-partial-{pid}-{name}.ran"));
+        let script = std::env::temp_dir().join(format!("alfredo-partial-{pid}-{name}.sh"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_file(&marker);
+        fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&root)
+                .args(["-c", "user.name=T", "-c", "user.email=t@e"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "i"]);
+        let blob = Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "HEAD:a.txt"])
+            .output()
+            .unwrap()
+            .stdout;
+        let blob = String::from_utf8(blob).unwrap().trim().to_string();
+        fs::remove_file(root.join(".git/objects").join(&blob[..2]).join(&blob[2..])).unwrap();
+        fs::write(root.join("a.txt"), "two\n").unwrap();
+        fs::write(
+            &script,
+            format!("#!/bin/sh\necho RAN >> '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let url = root.display().to_string();
+        let uploadpack = script.display().to_string();
+        git(&["config", "core.repositoryformatversion", "1"]);
+        git(&["config", "extensions.partialclone", "origin"]);
+        git(&["config", "remote.origin.url", &url]);
+        git(&["config", "remote.origin.promisor", "true"]);
+        git(&["config", "remote.origin.uploadpack", &uploadpack]);
+        (root, marker)
+    }
+
+    /// The chat git_diff tool, on a partial clone with a missing blob (#467), never runs
+    /// the repository's uploadpack program.
+    #[test]
+    fn git_diff_never_runs_a_partial_clone_uploadpack_program() {
+        let (root, marker) = partial_clone_fixture("diff-tool");
+        let _ = git_diff(&root, &json!({}));
+        assert!(
+            !marker.exists(),
+            "git_diff ran the repository's uploadpack program"
+        );
+    }
+
+    /// The hardened git environment alone (no config gate) never lazy-fetches through the
+    /// partial clone's uploadpack program (#467).
+    #[test]
+    fn hardened_git_diff_never_runs_a_partial_clone_uploadpack_program() {
+        let (root, marker) = partial_clone_fixture("diff-env");
+        let clock = Clock::start(DEADLINE);
+        let command =
+            git_command_within(&root, &["diff", "--stat", "--patch", "--", "."], clock).unwrap();
+        let _ = run_bounded(command, 1 << 20, DEADLINE);
+        assert!(
+            !marker.exists(),
+            "hardened git ran the repository's uploadpack program"
+        );
+    }
+
+    /// The read-tier config gate refuses a partial clone and names the offending key (#467).
+    #[test]
+    fn refuse_filters_refuses_and_names_partial_clone_and_transport_keys() {
+        let (root, marker) = partial_clone_fixture("refuse-names");
+        let error = refuse_filters(&root).unwrap_err();
+        assert!(error.contains("remote.origin.uploadpack"), "{error}");
+        assert!(!marker.exists());
+    }
 }

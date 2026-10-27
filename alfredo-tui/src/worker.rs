@@ -3517,4 +3517,90 @@ mod host_git_tests {
         assert!(refusal.contains("gitlink at \"bad\u{fffd}\""), "{refusal}");
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// Issue #467: the worker's `git worktree add` on a partial clone whose missing blob
+    /// would make git lazy-fetch through the repository's own uploadpack program never runs
+    /// that program on the host.
+    #[test]
+    fn host_side_worktree_add_never_runs_partial_clone_uploadpack() {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("alfredo-host-partial-{pid}"));
+        let out = std::env::temp_dir().join(format!("alfredo-host-partial-{pid}-wt"));
+        let marker = std::env::temp_dir().join(format!("alfredo-host-partial-{pid}.ran"));
+        let script = std::env::temp_dir().join(format!("alfredo-host-partial-{pid}.sh"));
+        for path in [&root, &out] {
+            let _ = fs::remove_dir_all(path);
+        }
+        let _ = fs::remove_file(&marker);
+        fs::create_dir_all(&root).unwrap();
+        fixture_git(&root, &["init", "-q"]);
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        fixture_git(&root, &["add", "a.txt"]);
+        fixture_git(&root, &["commit", "-qm", "i"]);
+        let blob = fixture_output(&root, &["rev-parse", "HEAD:a.txt"]);
+        let blob = blob.trim();
+        fs::remove_file(root.join(".git/objects").join(&blob[..2]).join(&blob[2..])).unwrap();
+        fs::write(root.join("a.txt"), "two\n").unwrap();
+        fs::write(
+            &script,
+            format!("#!/bin/sh\necho RAN >> '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let url = root.display().to_string();
+        let uploadpack = script.display().to_string();
+        fixture_git(&root, &["config", "core.repositoryformatversion", "1"]);
+        fixture_git(&root, &["config", "extensions.partialclone", "origin"]);
+        fixture_git(&root, &["config", "remote.origin.url", &url]);
+        fixture_git(&root, &["config", "remote.origin.promisor", "true"]);
+        fixture_git(&root, &["config", "remote.origin.uploadpack", &uploadpack]);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _ = runtime.block_on(async {
+            super::host_git_command(
+                &root,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    out.to_str().unwrap(),
+                    "HEAD",
+                ],
+            )
+            .output()
+            .await
+        });
+        assert!(
+            !marker.exists(),
+            "host-side worktree add ran the repository's uploadpack program"
+        );
+        for path in [&root, &out] {
+            let _ = fs::remove_dir_all(path);
+        }
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_file(&script);
+    }
+
+    /// Issue #467: the config gate qualifies partial-clone, promisor, transport and ssh/proxy
+    /// keys, including a subsection that hides `=` in its name.
+    #[test]
+    fn partial_clone_and_transport_config_needs_qualification() {
+        for config in [
+            "extensions.partialclone=origin\n",
+            "remote.origin.promisor=true\n",
+            "remote.origin.uploadpack=/x\n",
+            "remote.origin.receivepack=/x\n",
+            "core.sshcommand=/x\n",
+            "core.gitproxy=/x\n",
+            "remote.evil=x.uploadpack=/x\n",
+        ] {
+            assert!(super::config_needs_qualification(config), "{config:?}");
+        }
+        assert!(!super::config_needs_qualification(
+            "remote.origin.url=/x\nremote.origin.fetch=+refs/*:refs/*\n"
+        ));
+    }
 }
