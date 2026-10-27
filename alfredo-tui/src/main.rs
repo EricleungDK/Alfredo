@@ -2103,7 +2103,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 work.tasks.set_visible(false);
                                             }
                                             work.app.notice.clear();
-                                            warn_command_history(&mut work.app, origin);
+                                            work.app.append_history_warning(origin);
                                             if origin != index {
                                                 work.app.notice = format!(
                                                     "Retry remains linked to Session {}",
@@ -2479,16 +2479,6 @@ fn submit_autopilot(
     true
 }
 
-/// Name `/clear` in the footer once a conversation's command history is 80% full.
-fn warn_command_history(app: &mut alfredo_tui::model::App, session: usize) {
-    if let Some(warning) = app.sessions[session].command_history_warning() {
-        // The /go acknowledgement already carries it: keep both.
-        if !app.notice.contains(&warning) {
-            app.notice = warning;
-        }
-    }
-}
-
 /// Record autopilot's command in conversation `origin`. A command that cannot be
 /// recorded pauses autopilot with the error as its own notice, so the status panel,
 /// the saved state and headless output all name the reason, not just the footer.
@@ -2500,7 +2490,7 @@ fn record_autopilot_command(
 ) {
     match work.app.sessions[origin].submit_autopilot_command(submission.text, submission.intent) {
         Ok(id) => {
-            warn_command_history(&mut work.app, origin);
+            work.app.append_history_warning(origin);
             *pending = Some((origin, id));
         }
         Err(error) => {
@@ -2531,7 +2521,7 @@ fn submit_owner(work: &mut Workstation, pending: &mut Option<(usize, String)>) -
     };
     match work.app.sessions[origin].submit_autopilot_command(submission.text, submission.intent) {
         Ok(id) => {
-            warn_command_history(&mut work.app, origin);
+            work.app.append_history_warning(origin);
             *pending = Some((origin, id));
         }
         Err(error) => work.app.notice = format!("Instruction step not recorded: {error}"),
