@@ -51,13 +51,15 @@ class HeadlessSmoke(unittest.TestCase):
                               timeout=10, capture_output=True, text=True).stdout.strip()
 
     def start(self, *extra, goal=GOAL):
-        args = [str(self.binary), '--model', 'fixture', '--endpoint', self.fixture.endpoint,
+        # --resume rejects an explicit --model, so resume runs get the model from the environment.
+        model = [] if '--resume' in extra else ['--model', 'fixture']
+        args = [str(self.binary), *model, '--endpoint', self.fixture.endpoint,
                 '--workspace', str(self.workspace), '--state-dir', str(self.state)]
         if goal is not None:
             args += ['--go', goal]
         return subprocess.Popen([*args, *extra], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, cwd=self.workspace,
-                                env=dict(os.environ, ALFREDO_STATE_DIR=str(self.state)))
+                                env=dict(os.environ, ALFREDO_STATE_DIR=str(self.state), ALFREDO_MODEL='fixture'))
 
     def run_headless(self, *extra, goal=GOAL, timeout=90):
         process = self.start(*extra, goal=goal)
@@ -329,9 +331,21 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.result(out)['goal'], GOAL)
 
+    def test_resume_of_a_paused_wayfinder_goal_is_refused(self):
+        self.pause_run()
+        saved = next(self.state.glob('**/autopilot-*.json'))
+        saved.write_text(saved.read_text().replace(GOAL, 'wayfinder map the repository'))
+        before = self.task_files()
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('Wayfinder goals need the interactive terminal', err)
+        self.assertEqual(self.task_files(), before)
+
     def test_resume_usage_errors_exit_2(self):
         for extra, goal, message in [(['--resume'], None, '--resume needs --headless'),
-                                     (['--resume', '--headless'], GOAL, '--resume cannot be combined with --go')]:
+                                     (['--resume', '--headless'], GOAL, '--resume cannot be combined with --go'),
+                                     (['--resume', '--headless', '--model', 'other'], None, 'omit --model and --max-repairs'),
+                                     (['--resume', '--headless', '--max-repairs', '1'], None, 'omit --model and --max-repairs')]:
             code, out, err = self.run_headless(*extra, goal=goal)
             self.assertEqual((code, out), (2, ''), err)
             self.assertIn(message, err)

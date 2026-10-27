@@ -75,6 +75,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut qualification_repetitions = None;
     let mut go_goal: Option<String> = None;
     let mut resume = false;
+    let mut max_repairs_explicit = false;
     let mut headless = false;
     let mut chat_prompt: Option<String> = None;
     let mut approve: Option<headless::Policy> = None;
@@ -121,6 +122,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )?)
             }
             "--max-repairs" => {
+                max_repairs_explicit = true;
                 max_repairs = args
                     .next()
                     .and_then(|value| value.parse::<u32>().ok())
@@ -229,6 +231,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if resume && (go_goal.is_some() || chat_prompt.is_some()) {
         return Err("--resume cannot be combined with --go or --chat".into());
+    }
+    if resume && (model_explicit || max_repairs_explicit) {
+        return Err("--resume continues the paused run with its own model and repair budget; omit --model and --max-repairs".into());
     }
     if resume && !headless {
         return Err(

@@ -232,11 +232,11 @@ goal from stdin and streaming output.
 A run left paused (SIGINT/SIGTERM, `/stop`, an autopilot self-pause, or a restart of
 Alfredo) belongs to its conversation. `alfredo-tui --resume --headless` continues the
 default mission's paused run exactly as `/resume` does (same approvals, task policies and
-checks; nothing is replanned) and prints `resuming “GOAL” (1/2 accepted)` on stderr,
+checks; a finished plan is not replanned, but a run paused mid-planning plans again, as `/resume` does) and prints `resuming “GOAL” (1/2 accepted)` on stderr,
 then the usual progress lines, the same JSON object (`goal` is the paused run's goal)
 and the same exit codes. With no paused run (none, or one that already finished) it
 exits 2 with `--resume: nothing to resume` on stderr and nothing on stdout. `--resume`
-takes no `--go` or `--chat` and needs `--headless`.
+takes no `--go`, `--chat`, `--model` or `--max-repairs` (the run keeps its own model and repair budget) and needs `--headless`. A paused Wayfinder goal is refused (exit 2); `/resume` it in the terminal.
 
 `--go GOAL --headless` over a paused run no longer plans a second task family beside
 it: it exits 2 before any planner call or task-store change, with an error naming the

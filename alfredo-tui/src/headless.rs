@@ -277,6 +277,9 @@ pub fn run(options: Options) -> Result<i32, String> {
     let paused = work.autopilot.paused_run(&work.tasks);
     match (&paused, resume) {
         (Some(run), false) => return Err(paused_refusal(run)),
+        (Some(run), true) if alfredo_tui::wayfinder::entry_mode(&run.goal).is_some() => {
+            return Err("Wayfinder goals need the interactive terminal; /resume the paused run there".into())
+        }
         (None, true) => {
             return Err("--resume: nothing to resume; this mission has no paused run (--go GOAL --headless starts one)".into())
         }
