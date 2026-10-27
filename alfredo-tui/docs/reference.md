@@ -1476,7 +1476,9 @@ baseline text (CRLF read as LF, as for FILE). Rules:
 - Each SEARCH must match the current text exactly once (counting overlaps, after the
   earlier pairs); an empty SEARCH, no match and several matches fail with a message
   naming the file, the pair and the first SEARCH line, which the next repair prompt
-  carries. A failing pair changes nothing: the whole answer fails.
+  carries. A failing pair changes nothing: the whole answer fails. The prompt shows each
+  file with a newline appended, so a SEARCH may end on the last line of a file that has
+  no trailing newline; that file still ends without one after the edit.
 - An EDIT edits an existing file; a new file needs a FILE block. A path may be named
   once, as a FILE or an EDIT block, not both and not twice.
 - The edit result becomes the equivalent whole-file edit before the same checks as a FILE block run,
@@ -1486,7 +1488,8 @@ baseline text (CRLF read as LF, as for FILE). Rules:
 - Text between pairs may only be blank lines. Marker lines (`=== FILE:`, `=== EDIT:`,
   `=== END FILE ===`, `=== END EDIT ===`, and the three pair markers in the wrong place)
   cannot appear inside the text. Output ending inside an EDIT block fails with
-  `Model output ended inside EDIT block for PATH (truncated)`.
+  `Model output ended inside EDIT block for PATH (truncated)`, and the repair note asks
+  for fewer or shorter pairs (a truncated FILE block is asked for again in full).
 - A fresh repair sees a previous EDIT answer as the same EDIT blocks, applied against
   the original baseline again.
 
