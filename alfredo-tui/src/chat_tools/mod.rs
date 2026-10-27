@@ -220,7 +220,7 @@ pub(crate) fn text_arg<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'
 }
 
 /// Never read, listed or searched: the `@path` and planner exclusions (Git metadata,
-/// secrets such as `.env*` and `*.key`, generated and vendor trees).
+/// secrets such as `.env*`, `*.key`, `.npmrc` and `id_rsa*`, generated and vendor trees).
 pub(crate) fn excluded(relative: &str) -> bool {
     crate::planning_context::excluded(&relative.to_lowercase())
 }
