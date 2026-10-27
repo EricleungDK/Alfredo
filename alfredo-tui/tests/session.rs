@@ -1009,3 +1009,15 @@ fn capacity_wait_stays_with_the_attempt_until_the_endpoint_drains() {
     session.apply(2, Update::Failed("boom".into()));
     assert_eq!(session.capacity_wait(), None);
 }
+
+/// Issue #303: the approval-whole flag is draw state; a conversation saved by main (no
+/// such field) still loads and a saved session never carries it.
+#[test]
+fn the_approval_whole_flag_is_never_saved_and_old_saves_still_load() {
+    let session = Session::new("m".into());
+    let json = serde_json::to_value(&session).unwrap();
+    assert!(json.get("approval_whole").is_none(), "{json}");
+    assert!(json.get("approval_header_drawn").is_none(), "{json}");
+    let restored: Session = serde_json::from_value(json).unwrap();
+    assert!(!restored.approval_whole());
+}

@@ -1347,6 +1347,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         let _ = request.reply.send(decision);
                                     }
                                 }
+                                None if answer != 'n'
+                                    && !work.app.sessions[index].approval_whole() =>
+                                {
+                                    work.app.notice = "The whole card is not on screen (a command too long to show is deny-only): enlarge the terminal or press n".into()
+                                }
                                 None => {
                                     work.app.notice =
                                         "Read the approval card first; press y or n again (a always allows, not for push)".into()
