@@ -356,6 +356,10 @@ pub struct Session {
     /// the transcript viewport (issue #268). Arming waits for it.
     #[serde(skip)]
     approval_header_drawn: std::cell::Cell<bool>,
+    /// The last draw put the whole card, every command line included, in the viewport.
+    /// Only then may `y` or `a` answer it (issue #303); `n` needs just the header.
+    #[serde(skip)]
+    approval_whole: std::cell::Cell<bool>,
     /// When the key before the current one, and the current one, were pressed
     /// (issue #264: a y/n only answers a card after a quiet gap).
     #[serde(skip)]
@@ -403,6 +407,7 @@ impl Session {
             running_command: false,
             approval: None,
             approval_header_drawn: std::cell::Cell::new(false),
+            approval_whole: std::cell::Cell::new(false),
             key_times: (None, None),
             aside: None,
         }
@@ -1264,6 +1269,16 @@ impl Session {
         self.approval_header_drawn.set(drawn);
     }
 
+    /// Whether the last draw showed the whole card, so `y` and `a` may answer it.
+    pub fn approval_whole(&self) -> bool {
+        self.approval_whole.get()
+    }
+
+    /// Called by the draw: the whole card is (not) in the viewport.
+    pub fn set_approval_whole(&self, whole: bool) {
+        self.approval_whole.set(whole);
+    }
+
     pub fn await_approval(
         &mut self,
         attempt: u64,
@@ -1276,6 +1291,9 @@ impl Session {
         if let Some(timing) = &mut self.timing {
             timing.pause(now);
         }
+        // A new card is unseen until a draw says otherwise (issue #303).
+        self.approval_header_drawn.set(false);
+        self.approval_whole.set(false);
         self.approval = Some((card, None));
         true
     }
@@ -1326,6 +1344,10 @@ impl Session {
         if now.saturating_duration_since(*shown) < ARM {
             return None;
         }
+        // Approving needs the whole card on screen; denying never does (issue #303).
+        if key != 'n' && !self.approval_whole.get() {
+            return None;
+        }
         let decision = match key {
             'y' => Decision::Approve,
             'n' => Decision::Deny,
@@ -1352,6 +1374,8 @@ impl Session {
         self.restore_queue();
         self.compacting = None;
         self.approval = None;
+        self.approval_header_drawn.set(false);
+        self.approval_whole.set(false);
         self.running_command = false;
         self.pending_rule = None;
         if self.status.active() {

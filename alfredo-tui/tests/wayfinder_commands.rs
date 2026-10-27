@@ -386,3 +386,66 @@ fn wayfinder_command_after_an_interrupted_turn_binds_the_transcript_index_not_th
         "Build a new project for local calculations"
     );
 }
+
+#[test]
+fn scope_clear_returns_tools_and_survives_restart_until_the_scope_changes() {
+    use alfredo_tui::understanding::{Brief, Flow, Mode};
+    let fixture = Fixture::new();
+    let scope = fixture.tasks.understanding();
+    // No flow: tools are on, nothing to clear.
+    assert!(wayfinder_tools_enabled(&scope));
+    assert!(scope.clear_flow().is_err());
+    scope
+        .enter(
+            "enter".into(),
+            Flow {
+                mode: Mode::Chart,
+                prompt: "Plan a migration".into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        !wayfinder_tools_enabled(&scope),
+        "latched flow is tool-free"
+    );
+    scope.clear_flow().unwrap();
+    assert!(wayfinder_tools_enabled(&scope));
+    // A restart reopens the same state directory.
+    let reopened = TaskStore::new(
+        &fixture.root.join("state"),
+        &fixture.root.join("workspace"),
+        "mission",
+    )
+    .unwrap()
+    .understanding();
+    assert!(wayfinder_tools_enabled(&reopened), "clear survives restart");
+    // A cleared mission is not re-entered by another matching prompt.
+    let decision = alfredo_tui::wayfinder::route(
+        &reopened,
+        "Plan a migration of the importer",
+        "again",
+        Some(1),
+    )
+    .unwrap();
+    assert!(decision.acknowledgment.is_none());
+    assert_eq!(decision.state.revision, 1);
+    // An explicit new scope write reactivates Wayfinder.
+    reopened
+        .transact(Request {
+            correlation: "draft".into(),
+            expected_revision: 1,
+            action: Action::Draft {
+                brief: Brief {
+                    destination: "d".into(),
+                    scope: "s".into(),
+                    constraints: "c".into(),
+                    uncertainty: "u".into(),
+                },
+            },
+        })
+        .unwrap();
+    assert!(!wayfinder_tools_enabled(&reopened));
+}
+fn wayfinder_tools_enabled(scope: &alfredo_tui::understanding::Store) -> bool {
+    alfredo_tui::wayfinder::tools_enabled(scope, scope.snapshot().unwrap().revision)
+}

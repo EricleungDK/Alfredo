@@ -373,8 +373,9 @@ Control characters are dropped as before and bidi controls in a reply show as `<
 
 ## Establish scope in conversation
 
-Describe a new project or consequential architectural change to enter Wayfinder
-Chart mode. A reference such as “Wayfinder ticket #42” enters Work-through. Ordinary
+Describe a new project or a planned architectural change (for example "plan a
+migration", "redesign the architecture", "new app") to enter Wayfinder Chart mode.
+The bare words "migration" or "architecture" in an ordinary request do not enter it. A reference such as “Wayfinder ticket #42” enters Work-through. Ordinary
 read-only questions stay outside automatic entry. A saved flow continues across
 missions and restarts. New-project `/plan`, `/task` and `/after` requests also enter
 this flow before creating work.
@@ -1089,7 +1090,7 @@ omitted counts are lower bounds. Any other Git call whose output exceeds 256 KiB
 example a very large `git diff` evidence patch) is killed at once and fails with
 "Git output exceeds the bounded evidence limit" instead of waiting out the 30-second
 deadline.
-Symlinks/submodules, generated/vendor paths, common secret-file names, binary and
+Symlinks/submodules, generated/vendor paths, common secret-file names (the **Secret files** list under Chat tools (read-only)), binary and
 oversized sources are omitted. Counts and actual inputs appear in the preview and
 saved Plan receipt; the selection is not a full repository audit or secret scanner.
 Working edits and untracked files are excluded. A missing committed Git baseline or
@@ -1190,6 +1191,10 @@ missions sharing this workspace and native runtime. Review it and use
 owner agreement only; it creates no plan, approval, agent or invocation.
 A replacement draft requires fresh confirmation. `/scope-retry` repeats the exact
 last scope write after an uncertain acknowledgment; `/tasks` returns to supervision.
+While a scope flow is active, chat has no tools, and the footer says so on entry and on each chat turn ("Wayfinder chat: tools off here · /scope-clear gives them back"). `/scope-clear` leaves Wayfinder: chat
+gets its tools and task context back, also after a restart. Scope receipts are kept;
+a later `/scope` draft or confirmation re-activates the flow. Tools still need the usual
+approval cards.
 
 While pending, the task store refuses new proposals, saved plans, policy/assignment/
 approval changes, repairs and run claims. Model discussion and transient plan previews,
@@ -1584,8 +1589,8 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 
 - **Confinement.** Paths are relative to the repository root. Absolute paths, `..`, and
   symlinks that resolve outside the repository are refused; listing and search never
-  follow symlinks. The `@path` exclusions apply: `.git`, secrets (`.env*`, `*.pem`,
-  `*.key`, `*.p12`, `*.pfx`), `node_modules`, `target`, `dist`, `vendor`. Binary and
+  follow symlinks. The `@path` exclusions apply: `.git`, secrets (the **Secret files**
+  list below), `node_modules`, `target`, `dist`, `vendor`. Binary and
   non-UTF-8 files and files over 4 MiB are not shown.
 - **Glob filter (issue #337).** `list_files` and `grep` take an optional `glob` (`*` any
   run of characters except `/`, `?` one character except `/`, `**` any run including `/`,
@@ -1611,17 +1616,43 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   repository config with filter drivers or includes, a listing over 16 MiB), the plain walk
   is used with the fixed exclusions only. Nested repositories and submodule contents are
   not listed in a git workspace.
+- **Secret files.** One list, used by every chat tool (`read_file`, `grep`, `list_files`,
+  `write_file`, `edit_file`, `git_diff`, `git_commit`), by `@path` mentions and by planner
+  context. Matching ignores case and applies to every path component:
+  `.git`, `.ssh`, `.gnupg`, `.aws` and `.kube` directories (everything under them);
+  `.env*` and `*.env` (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`,
+  `.git-credentials`; names starting `id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa`
+  (keys and their `.pub` copies); `credentials*.json`; `secrets.y*ml` (starts `secrets.y`, ends `ml`);
+  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars` and
+  `*.tfvars.json`. Names that only look similar stay readable, for example
+  `environment.rs`, `keys.md`, `credentials.md`, `secrets.md` and `ssh_client.rs`.
+  Limits: the list matches names only; file content is never scanned. Git's rename and
+  copy detection finds a secret's copy or rename within git's similarity threshold, in
+  git_diff and in git_commit (staged files, and unstaged files that the commit adds, are
+  checked again after `git add` and the staging is undone on a refusal). Not detected: a
+  copy or rename edited beyond the threshold, a tracked innocent file overwritten with
+  secret bytes, and a hard link to a secret. Copy detection compares the index with HEAD,
+  so a copy of a secret that was never committed (an untracked `.env` copied to
+  `config.txt` by an approved `run_command` or by hand) is not detected. A copy search git cuts short past its
+  rename limit is refused, not shown. git_diff reads the changed names and the patch in
+  two git calls, so a file changed between them is not covered.
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
   tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
   no external diff or textconv. `ref`, `base` and `target` must be plain ref names
   (letters, digits, `._/-~^@{}+`; no leading `-`, `..` or `:`) and follow
   `--end-of-options`; `path` is a literal pathspec under the same exclusions. Diffs leave
-  out secret files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`) and files renamed or
+  out secret files (the **Secret files** list above) and files renamed or
   copied from them. Git runs only in the workspace itself (`GIT_CEILING_DIRECTORIES`),
   a call is stopped after 15 s, and when the repository config defines filter drivers or
   includes, `git_status` and working-tree or staged diffs are refused (they would run the
   repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work.
   A config too large to check is refused the same way.
+  Git also refuses a `.git` that points at another repository (a gitfile, a `commondir`
+  file, or `objects/info/alternates` into another repository); a linked worktree of the
+  workspace's own repository is read. The control files git reads (`gitdir`,
+  `objects/info/alternates`) must be regular files: a FIFO, device or link there is refused
+  at once, never waited on, and links under `logs/` are refused like those under `refs/` and
+  `info/`.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to. Results are also budgeted to the room left. With
   `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt
@@ -1701,6 +1732,13 @@ Approval (ADR 0004); there is no skip-approval mode.
   diff is cut to the rows that fit (`[N more diff lines]`) so the header, arguments and
   key line stay on screen; the 0.5 s delay below starts only once the header rows are
   drawn, and PageUp that scrolls them out of view disarms `y`/`n` until they return.
+  `y` and `a` also need the whole card on screen: header, arguments, every `$` line of a
+  `run_command` and the key line, with rows counted in display columns. A command or path
+  too long to show whole on the current terminal makes the card deny-only (issue #303): the
+  header is shortened with `…`, the key line reads `n deny · Esc cancels the turn (deny) ·
+  y is off: the whole card does not fit here, enlarge the terminal or press n`, and `y`/`a`
+  are refused with that advice while `n` still denies. Enlarging the terminal re-evaluates
+  the card; on a terminal so short that the header cannot be drawn, only Esc answers.
 - **Over-cap changes are refused, not cut (issue #269).** A card never hides lines the
   owner is asked to approve. `write_file` and `edit_file` are refused when the card's
   diff would pass 80 lines, counted as every line of the diff text: the `@@` header, the
@@ -1968,7 +2006,7 @@ size limit, and it is kept in memory only (not restored after a restart).
   an untracked file attaches only if Git does not ignore it. The ignore check runs
   hardened with a 3 s deadline and fails closed, so a gitignored untracked file, a Git
   error or a timeout (for example a `.gitignore` that is a FIFO) is refused.
-- Refused, with a notice: secrets (`.env*`, `*.pem`, `*.key`...), `.git`, `node_modules`,
+- Refused, with a notice: secrets (the **Secret files** list under Chat tools (read-only)), `.git`, `node_modules`,
   `target`, `dist`, `vendor`; absolute and `..` paths; any symlink,
   including a symlinked directory in the path and links that stay inside the repository;
   directories, binary and non-UTF-8 files; files over 256 KiB.

@@ -5,7 +5,11 @@
 use super::{excluded, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
 use std::{
+    cell::Cell,
+    collections::HashSet,
+    fs,
     io::Read,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
@@ -16,14 +20,8 @@ const DEFAULT_COMMITS: u64 = 20;
 const MAX_COMMITS: u64 = 200;
 /// Longest ref or path argument accepted.
 const MAX_ARG: usize = 256;
-/// Secrets never shown in a diff (the `@path` secret exclusions, any depth, any case).
-const SECRET_PATHSPECS: [&str; 5] = [
-    ":(exclude,glob,icase)**/.env*",
-    ":(exclude,glob,icase)**/*.pem",
-    ":(exclude,glob,icase)**/*.key",
-    ":(exclude,glob,icase)**/*.p12",
-    ":(exclude,glob,icase)**/*.pfx",
-];
+/// Largest name listing `git_diff` checks for secrets; a longer one is refused, not cut.
+const DIFF_NAMES: usize = 4 << 20;
 
 pub const GIT_STATUS: Tool = Tool {
     name: "git_status",
@@ -75,7 +73,12 @@ pub const GIT_DIFF: Tool = Tool {
     run: git_diff,
 };
 
-fn git_status(root: &Path, _: &Value) -> Result<String, String> {
+/// The tool call's git work runs under one budget (issue #359): see [`call_scope`].
+fn git_status(root: &Path, arguments: &Value) -> Result<String, String> {
+    call_scope(DEADLINE, || status_output(root, arguments))
+}
+
+fn status_output(root: &Path, _: &Value) -> Result<String, String> {
     refuse_filters(root)?;
     let output = git(
         root,
@@ -88,7 +91,11 @@ fn git_status(root: &Path, _: &Value) -> Result<String, String> {
     })
 }
 
-fn git_branch(root: &Path, _: &Value) -> Result<String, String> {
+fn git_branch(root: &Path, arguments: &Value) -> Result<String, String> {
+    call_scope(DEADLINE, || branch_output(root, arguments))
+}
+
+fn branch_output(root: &Path, _: &Value) -> Result<String, String> {
     let current = match git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
         Ok(name) => name.trim().to_string(),
         Err(_) => format!(
@@ -109,6 +116,10 @@ fn git_branch(root: &Path, _: &Value) -> Result<String, String> {
 }
 
 fn git_log(root: &Path, arguments: &Value) -> Result<String, String> {
+    call_scope(DEADLINE, || log_output(root, arguments))
+}
+
+fn log_output(root: &Path, arguments: &Value) -> Result<String, String> {
     let reference = ref_arg(arguments, "ref")?.unwrap_or("HEAD");
     let count = match arguments.get("max_count") {
         None | Some(Value::Null) => DEFAULT_COMMITS,
@@ -136,6 +147,10 @@ fn git_log(root: &Path, arguments: &Value) -> Result<String, String> {
 }
 
 fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
+    call_scope(DEADLINE, || diff_output(root, arguments))
+}
+
+fn diff_output(root: &Path, arguments: &Value) -> Result<String, String> {
     let base = ref_arg(arguments, "base")?;
     let target = ref_arg(arguments, "target")?;
     let staged = match arguments.get("staged") {
@@ -172,10 +187,27 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
         "-z",
         "--find-renames",
         "--find-copies",
+        "--find-copies-harder",
+        // No rename limit: past it git stops inexact copy detection and only warns.
+        "-l0",
     ];
     detect.extend(&selector);
     detect.push("--");
-    let derived: Vec<String> = secret_copies(&git_limited(root, &detect, 4 << 20)?)
+    // Every changed name in this selector (whole tree, any mode) that is a secret is
+    // left out by name, so the patch never carries its content.
+    let listing = git_complete_listing(root, &detect, DIFF_NAMES)?;
+    if listing.len() >= DIFF_NAMES {
+        return Err(
+            "too many changed files to check for secret files; narrow with path or a smaller range"
+                .into(),
+        );
+    }
+    // Names are read lossily: a replacement character may hide the bytes that made a
+    // name secret, so such a name is refused rather than matched.
+    if listing.contains('\u{FFFD}') {
+        return Err("a changed file name is not UTF-8; git_diff is not run".into());
+    }
+    let hidden: Vec<String> = secret_names(&listing)?
         .into_iter()
         .map(|path| format!(":(exclude,literal){path}"))
         .collect();
@@ -198,8 +230,7 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
         }
         None => args.push("."),
     }
-    args.extend(SECRET_PATHSPECS);
-    args.extend(derived.iter().map(String::as_str));
+    args.extend(hidden.iter().map(String::as_str));
     let output = git(root, &args)?;
     Ok(if output.is_empty() {
         "(no differences)\n".into()
@@ -208,23 +239,34 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
     })
 }
 
-/// Targets of renames and copies whose source is excluded, from `--name-status -z`.
-fn secret_copies(listing: &str) -> Vec<String> {
+/// Changed paths that are secret files, from `--name-status -z`. A rename or copy
+/// counts as a whole: if either name is a secret, both names are left out, because the
+/// content moved out of or into a secret file. A malformed listing is an error.
+fn secret_names(listing: &str) -> Result<Vec<String>, String> {
+    let malformed =
+        || "git diff listed names that could not be read; nothing was shown".to_string();
     let mut fields = listing.split('\0');
     let mut found = Vec::new();
     while let Some(status) = fields.next() {
-        if status.starts_with(['R', 'C']) {
+        if status.is_empty() {
+            continue;
+        }
+        let names: Vec<&str> = if status.starts_with(['R', 'C']) {
             let (Some(source), Some(target)) = (fields.next(), fields.next()) else {
-                break;
+                return Err(malformed());
             };
-            if excluded(source) && !excluded(target) {
-                found.push(target.to_string());
-            }
-        } else if fields.next().is_none() {
-            break;
+            vec![source, target]
+        } else {
+            vec![fields.next().ok_or_else(malformed)?]
+        };
+        if names
+            .iter()
+            .any(|name| crate::planning_context::secret(name))
+        {
+            found.extend(names.into_iter().map(String::from));
         }
     }
-    found
+    Ok(found)
 }
 
 /// Optional ref argument that cannot be read as an option, a path or a blob.
@@ -302,14 +344,15 @@ const FILTER_KEYS_LIMIT: usize = 64 << 10;
 /// and working-tree diffs would run the repository's clean filters (as worker host git).
 /// Fails closed: a listing that cannot be read whole is refused, never trusted as a prefix.
 pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
-    refuse_filters_within(root, FILTER_KEYS_LIMIT, DEADLINE)
+    refuse_filters_within(root, FILTER_KEYS_LIMIT, call_clock())
 }
 
 /// [`refuse_filters`] with the listing read up to `limit` bytes within `deadline`. A cut or
 /// late listing is an error (run_bounded stops git), so the gate never trusts a prefix.
-fn refuse_filters_within(root: &Path, limit: usize, deadline: Duration) -> Result<(), String> {
+fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), String> {
     const NOT_RUN: &str = "git status and working-tree diffs are not run (git_log and git_diff with base and target still work)";
-    let (status, out, error) = run_bounded(git_command(root, &FILTER_KEYS_ARGS)?, limit, deadline)?;
+    let command = git_command_within(root, &FILTER_KEYS_ARGS, clock)?;
+    let (status, out, error) = run_bounded(command, limit, clock.left())?;
     match status {
         None => Err(format!(
             "repository config is too large to check for filter drivers; {NOT_RUN}"
@@ -352,23 +395,154 @@ pub(crate) fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<St
     }
 }
 
-/// Run git in `root`, stdout read up to `limit` bytes. The flag is whether the output was
-/// cut at `limit`; a git that fails is an error with its first message line.
-fn git_output(root: &Path, args: &[&str], limit: usize) -> Result<(bool, String), String> {
-    let (status, out, error) = run_bounded(git_command(root, args)?, limit, DEADLINE)?;
-    let cut = status.is_none();
-    if status.is_some_and(|status| !status.success()) {
+/// Git's warnings that its copy or rename search was cut short by the rename limit
+/// (the listing then misses copies and renames). Matched against stderr lines.
+const CUT_SEARCH_WARNINGS: [&str; 3] = [
+    "only found copies from modified paths",
+    "inexact rename detection was skipped",
+    "diff.renameLimit",
+];
+
+/// [`git_limited`] for a listing that decides a secret check. A copy or rename search that
+/// git cut short (see [`CUT_SEARCH_WARNINGS`]) still exits 0 with an incomplete listing, so
+/// that stderr refuses it; other stderr is ignored.
+pub(crate) fn git_complete_listing(
+    root: &Path,
+    args: &[&str],
+    limit: usize,
+) -> Result<String, String> {
+    let clock = call_clock();
+    let (status, out, error) =
+        run_bounded(git_command_within(root, args, clock)?, limit, clock.left())?;
+    let Some(status) = status else {
+        return Err(format!(
+            "git {} output is larger than {limit} bytes and cannot be checked; refused",
+            args[0]
+        ));
+    };
+    if !status.success() {
         let first = error.lines().find(|line| !line.trim().is_empty());
         return Err(match first {
             Some(line) => line.trim().trim_start_matches("fatal: ").to_string(),
             None => format!("git {} failed", args[0]),
         });
     }
+    // Only git's copy and rename search warnings mean the listing is incomplete. Other
+    // stderr (line-ending notes under core.autocrlf, for example) does not change it.
+    if let Some(line) = error.lines().find(|line| {
+        CUT_SEARCH_WARNINGS
+            .iter()
+            .any(|warning| line.contains(warning))
+    }) {
+        return Err(format!(
+            "git {} cut its copy or rename search short, so its listing is incomplete ({}); refused",
+            args[0],
+            line.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Run git in `root`, stdout read up to `limit` bytes. The flag is whether the output was
+/// cut at `limit`; a git that fails is an error with its first message line.
+fn git_output(root: &Path, args: &[&str], limit: usize) -> Result<(bool, String), String> {
+    let clock = call_clock();
+    read_output(
+        git_command_within(root, args, clock)?,
+        args[0],
+        limit,
+        clock.left(),
+    )
+}
+
+/// Run `command` (git, named `verb` in messages), stdout read up to `limit` bytes within
+/// `deadline`; see [`git_output`].
+fn read_output(
+    command: Command,
+    verb: &str,
+    limit: usize,
+    deadline: Duration,
+) -> Result<(bool, String), String> {
+    let (status, out, error) = run_bounded(command, limit, deadline)?;
+    let cut = status.is_none();
+    if status.is_some_and(|status| !status.success()) {
+        let first = error.lines().find(|line| !line.trim().is_empty());
+        return Err(match first {
+            Some(line) => line.trim().trim_start_matches("fatal: ").to_string(),
+            None => format!("git {verb} failed"),
+        });
+    }
     Ok((cut, String::from_utf8_lossy(&out).into_owned()))
 }
 
-/// `git -C root ARGS` with the hardened environment; discovery stops above the parent.
-fn git_command(root: &Path, args: &[&str]) -> Result<Command, String> {
+/// One call's time budget, shared by its verification and its git run, so a call never takes
+/// longer than its deadline in all (issue #359).
+#[derive(Clone, Copy)]
+pub(crate) struct Clock {
+    started: Instant,
+    deadline: Duration,
+}
+
+impl Clock {
+    pub(crate) fn start(deadline: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            deadline,
+        }
+    }
+
+    /// The budget not yet spent, for the next git process of the call.
+    pub(crate) fn left(&self) -> Duration {
+        self.deadline.saturating_sub(self.started.elapsed())
+    }
+}
+
+thread_local! {
+    /// The budget of the tool call running on this thread (issue #359, one per call).
+    static CALL_CLOCK: Cell<Option<Clock>> = const { Cell::new(None) };
+}
+
+/// Clears the running call's budget when the call ends, also when it unwinds.
+struct LeaveCallScope;
+
+impl Drop for LeaveCallScope {
+    fn drop(&mut self) {
+        CALL_CLOCK.with(|clock| clock.set(None));
+    }
+}
+
+/// Runs one tool call (or one approval step of a git write) under one budget: every
+/// verification and git process it starts draws on `deadline` together, so the call as a
+/// whole stops at it. A call already inside a scope keeps the outer budget.
+pub(crate) fn call_scope<T>(deadline: Duration, run: impl FnOnce() -> T) -> T {
+    if CALL_CLOCK.with(Cell::get).is_some() {
+        return run();
+    }
+    CALL_CLOCK.with(|clock| clock.set(Some(Clock::start(deadline))));
+    let _leave = LeaveCallScope;
+    run()
+}
+
+/// The budget of the running call; a lone git call outside any call gets a fresh one.
+pub(crate) fn call_clock() -> Clock {
+    CALL_CLOCK
+        .with(Cell::get)
+        .unwrap_or_else(|| Clock::start(DEADLINE))
+}
+
+/// `git -C root ARGS` with the hardened environment, pinned to the git directory that
+/// [`verified_git_dir`] checked (issue #359). The verification draws on `clock`.
+fn git_command_within(root: &Path, args: &[&str], clock: Clock) -> Result<Command, String> {
+    let verified = verified_git_dir_within(root, clock, Config::Hardened)?;
+    let mut command = hardened_command(root)?;
+    pin_git_dir(&mut command, root, &verified);
+    command.args(args);
+    Ok(command)
+}
+
+/// `git -C root` with the hardened environment; discovery stops above the parent. Not
+/// pinned: only [`verified_git_dir`] runs it unpinned, to learn where the repository is.
+fn hardened_command(root: &Path) -> Result<Command, String> {
     let ceiling = root
         .canonicalize()
         .map_err(|_| "Coding Workspace is not available".to_string())?;
@@ -377,8 +551,7 @@ fn git_command(root: &Path, args: &[&str]) -> Result<Command, String> {
     hardened(&mut command)
         .env("GIT_CEILING_DIRECTORIES", ceiling)
         .arg("-C")
-        .arg(root)
-        .args(args);
+        .arg(root);
     Ok(command)
 }
 
@@ -430,7 +603,9 @@ pub(crate) fn is_ignored(root: &Path, rel: &str, excludes: Option<&Path>) -> Res
         args.extend(["-c", config]);
     }
     args.extend(["check-ignore", "-q", "--", &rel]);
-    let (status, _, error) = run_bounded(git_command(root, &args)?, 1024, DEADLINE)?;
+    let clock = call_clock();
+    let command = git_command_within(root, &args, clock)?;
+    let (status, _, error) = run_bounded(command, 1024, clock.left())?;
     match status.and_then(|status| status.code()) {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
@@ -476,6 +651,239 @@ pub(crate) fn global_excludes() -> Option<PathBuf> {
     (path.is_absolute() && path.is_file()).then_some(path)
 }
 
+/// The git directories of the Coding Workspace's repository, verified by
+/// [`verified_git_dir`] (issue #359).
+pub(crate) struct VerifiedGit {
+    /// The directory git works in: `<root>/.git`, or `<common>/worktrees/<name>` of a linked
+    /// worktree.
+    pub(crate) git_dir: PathBuf,
+    /// `git_dir` itself, or the main repository's `.git` for a linked worktree.
+    pub(crate) common_dir: PathBuf,
+}
+
+/// Refusal when the workspace's repository is not its own (issue #359).
+const OUTSIDE: &str = "the workspace's .git points outside the Coding Workspace (its git directory is neither the workspace's own nor a linked worktree of it); git tools refuse";
+
+/// Where git keeps the repository of the Coding Workspace at `root`, verified before any
+/// git call trusts it (issue #359). Accepted: `root/.git` as a real directory that is both
+/// the git and the common directory; or `root/.git` as a gitfile to a linked worktree
+/// `<common>/worktrees/<name>`, where `<common>` is a directory and the entry's `gitdir`
+/// file points back at `root/.git`. Anything else, including a `commondir` file that
+/// leads elsewhere, is refused. Paths are compared canonically, so symlinks, `..`, relative
+/// back-references and whitespace in the gitfile cannot hide another repository.
+pub(crate) fn verified_git_dir(root: &Path, config: Config) -> Result<VerifiedGit, String> {
+    verified_git_dir_within(root, call_clock(), config)
+}
+
+/// The git configuration a check runs under: the read tier's hardened one, or a write's,
+/// which also reads the owner's global config (identity and `safe.directory`).
+#[derive(Clone, Copy)]
+pub(crate) enum Config {
+    Hardened,
+    Owner,
+}
+
+/// [`verified_git_dir`] whose one git call draws on `clock`. A repository config that blocks
+/// git (a FIFO include) is then an error within the caller's budget.
+pub(crate) fn verified_git_dir_within(
+    root: &Path,
+    clock: Clock,
+    config: Config,
+) -> Result<VerifiedGit, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Coding Workspace is not available".to_string())?;
+    let mut command = hardened_command(&root)?;
+    if matches!(config, Config::Owner) {
+        owner_config(&mut command);
+    }
+    command.args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--absolute-git-dir",
+        "--git-common-dir",
+    ]);
+    let (cut, listing) = read_output(command, "rev-parse", 64 << 10, clock.left())?;
+    let lines: Vec<&str> = listing.lines().collect();
+    let [git_dir, common_dir] = lines[..] else {
+        return Err(format!("cannot locate the repository; {OUTSIDE}"));
+    };
+    if cut {
+        return Err(format!("cannot locate the repository; {OUTSIDE}"));
+    }
+    let git_dir = canonical_dir(git_dir)?;
+    let common_dir = canonical_dir(common_dir)?;
+    let dot_git = root.join(".git");
+    let kind = fs::symlink_metadata(&dot_git).map_err(|_| OUTSIDE.to_string())?;
+    let dot_git = dot_git.canonicalize().map_err(|_| OUTSIDE.to_string())?;
+    let verified = if kind.is_dir() {
+        // A plain repository: nothing redirects it (a `commondir` file would).
+        git_dir == dot_git && common_dir == dot_git
+    } else if kind.is_file() {
+        // A linked worktree: its entry sits in the main repository's worktrees directory,
+        // and the entry points back at this workspace. The main repository is not inside
+        // the workspace: a repository the chat can write to is not the owner's.
+        let entry_of_main = git_dir != common_dir
+            && !common_dir.starts_with(&root)
+            && git_dir.parent() == Some(common_dir.join("worktrees").as_path());
+        let back = read_control_file(&git_dir.join("gitdir"), clock, OUTSIDE)?
+            .ok_or_else(|| OUTSIDE.to_string())?;
+        let back = git_dir.join(back.trim_end());
+        entry_of_main && back.canonicalize().is_ok_and(|back| back == dot_git)
+    } else {
+        false
+    };
+    if !verified {
+        return Err(OUTSIDE.to_string());
+    }
+    // Nothing in the git directory, the common directory, refs or info may be a link, and
+    // every object store git reads (its own and the alternates it names) is walked for links
+    // and kept inside the repository: a link or a borrowed store shows another repository.
+    walk_without_links(&git_dir, clock, false)?;
+    walk_without_links(&common_dir, clock, false)?;
+    for tree in ["refs", "info", "logs"] {
+        walk_without_links(&common_dir.join(tree), clock, true)?;
+        if git_dir != common_dir {
+            walk_without_links(&git_dir.join(tree), clock, true)?;
+        }
+    }
+    object_stores_within(&common_dir, clock)?;
+    Ok(VerifiedGit {
+        git_dir,
+        common_dir,
+    })
+}
+
+const LINKED: &str = "the workspace's repository holds a symbolic link in its git directory, refs or object store; git tools refuse";
+const UNCHECKED: &str = "the workspace's repository could not be checked for links or borrowed objects within the call's time limit; git tools refuse";
+const ALTERNATES: &str = "the workspace's repository borrows objects from outside it (objects/info/alternates); git tools refuse";
+
+/// Refuses a symbolic link among the entries of `dir`, or, when `recursive`, anywhere under
+/// it. A missing directory is fine. The walk is charged to `clock`: running out is a refusal,
+/// never a partial check (issue #359).
+fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), String> {
+    let unreadable = || UNCHECKED.to_string();
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => return Err(LINKED.to_string()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(unreadable()),
+    }
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if clock.left().is_zero() {
+            return Err(unreadable());
+        }
+        for entry in fs::read_dir(&dir).map_err(|_| unreadable())? {
+            let entry = entry.map_err(|_| unreadable())?;
+            let kind = entry.file_type().map_err(|_| unreadable())?;
+            if kind.is_symlink() {
+                return Err(LINKED.to_string());
+            }
+            if recursive && kind.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every object store the repository reads: its own, and each store its `info/alternates`
+/// names, followed transitively. Each store is walked for links and each entry must stay
+/// inside `common_dir`. A store already seen is skipped, so a cycle or a store shared by
+/// many paths is checked once (issue #359). Charged to `clock`.
+fn object_stores_within(common_dir: &Path, clock: Clock) -> Result<(), String> {
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut pending = vec![common_dir.join("objects")];
+    while let Some(store) = pending.pop() {
+        if !seen.insert(store.clone()) {
+            continue;
+        }
+        if clock.left().is_zero() {
+            return Err(UNCHECKED.to_string());
+        }
+        walk_without_links(&store, clock, true)?;
+        let Some(text) =
+            read_control_file(&store.join("info").join("alternates"), clock, ALTERNATES)?
+        else {
+            continue;
+        };
+        for line in text.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let entry = store
+                .join(line)
+                .canonicalize()
+                .map_err(|_| ALTERNATES.to_string())?;
+            if !entry.starts_with(common_dir) {
+                return Err(ALTERNATES.to_string());
+            }
+            pending.push(entry);
+        }
+    }
+    Ok(())
+}
+
+/// Most bytes of a control file git reads here (`gitdir`, `info/alternates`).
+const CONTROL_FILE_LIMIT: u64 = 64 << 10;
+
+/// The text of `path` when it is an ordinary file, `None` when it does not exist, and the
+/// `refusal` for anything else: a FIFO, device, socket, directory or symbolic link. Reading
+/// a FIFO blocks until a writer comes, so nothing is read before the file type is known
+/// (issue #359, review 3). The file is opened without following links and without blocking,
+/// then its type is checked again on the open file, so a swap between the two checks is
+/// refused too. Charged to `clock`: a spent budget is a refusal, never a partial read.
+fn read_control_file(path: &Path, clock: Clock, refusal: &str) -> Result<Option<String>, String> {
+    if clock.left().is_zero() {
+        return Err(UNCHECKED.to_string());
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(_) | Err(_) => return Err(refusal.to_string()),
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| refusal.to_string())?;
+    if !file.metadata().map_err(|_| refusal.to_string())?.is_file() {
+        return Err(refusal.to_string());
+    }
+    let mut text = String::new();
+    file.take(CONTROL_FILE_LIMIT + 1)
+        .read_to_string(&mut text)
+        .map_err(|_| refusal.to_string())?;
+    if text.len() as u64 > CONTROL_FILE_LIMIT {
+        return Err(refusal.to_string());
+    }
+    Ok(Some(text))
+}
+
+/// A git-reported directory, canonical, or the refusal when it is not a directory.
+fn canonical_dir(text: &str) -> Result<PathBuf, String> {
+    Path::new(text)
+        .canonicalize()
+        .ok()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| OUTSIDE.to_string())
+}
+
+/// Point `command` (already `-C root`) at the verified git directory and work tree, so git
+/// uses the directory that was checked, not whatever `.git` says when it runs (issue #359).
+pub(crate) fn pin_git_dir<'a>(
+    command: &'a mut Command,
+    root: &Path,
+    verified: &VerifiedGit,
+) -> &'a mut Command {
+    command
+        .arg("--git-dir")
+        .arg(&verified.git_dir)
+        .arg("--work-tree")
+        .arg(root)
+}
+
 /// Longest one git call may run.
 pub(crate) const DEADLINE: Duration = Duration::from_secs(15);
 
@@ -497,9 +905,10 @@ pub(crate) fn run_bounded(
     let started = Instant::now();
     let stderr = child.stderr.take().map(|stderr| {
         std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = stderr.take(4096).read_to_string(&mut text);
-            text
+            // Lossy: a non-UTF-8 warning must still be seen by the listing check.
+            let mut bytes = Vec::new();
+            let _ = stderr.take(4096).read_to_end(&mut bytes);
+            String::from_utf8_lossy(&bytes).into_owned()
         })
     });
     let Some(stdout) = child.stdout.take() else {
@@ -589,6 +998,19 @@ fn stop(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// The owner's global git config for a write: its identity and `safe.directory`, which the
+/// read tier keeps off. Applied after [`hardened`].
+pub(crate) fn owner_config(command: &mut Command) -> &mut Command {
+    command.env_remove("GIT_CONFIG_GLOBAL");
+    for name in ["HOME", "XDG_CONFIG_HOME"] {
+        match std::env::var_os(name) {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    command
+}
+
 /// The clean environment and command-line overrides every git call here uses.
 pub(crate) fn hardened(command: &mut Command) -> &mut Command {
     command
@@ -634,6 +1056,54 @@ mod tests {
         root
     }
 
+    /// Issue #312: a copy search past git's rename limit warns on stderr and exits 0. The
+    /// complete-listing helper refuses that output, and the same search with `-l0` passes.
+    #[test]
+    fn a_copy_search_warning_refuses_the_listing_and_l0_avoids_it() {
+        let root = scratch_repo(
+            "copy-warning",
+            "[user]\n\tname = Owner\n\temail = owner@example.com\n",
+        );
+        let git_ok = |args: &[&str]| {
+            assert!(Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success())
+        };
+        fs::write(root.join("a.txt"), "alpha\n").unwrap();
+        git_ok(&["add", "a.txt"]);
+        git_ok(&["commit", "-q", "-m", "a"]);
+        for name in ["b.txt", "c.txt", "d.txt"] {
+            fs::write(root.join(name), format!("{name}\n")).unwrap();
+        }
+        git_ok(&["add", "b.txt", "c.txt", "d.txt"]);
+        let search = |limit: &str| {
+            let mut args = vec!["diff", "--cached"];
+            if !limit.is_empty() {
+                args.push(limit);
+            }
+            args.extend([
+                "--find-renames",
+                "--find-copies",
+                "--find-copies-harder",
+                "--name-status",
+                "-z",
+                "--",
+            ]);
+            git_complete_listing(&root, &args, 1 << 20)
+        };
+        let warned = search("-l1").unwrap_err();
+        assert!(
+            warned.contains("cut its copy or rename search short"),
+            "{warned}"
+        );
+        assert!(search("-l0").is_ok());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_global_excludes_file_hides_more_and_a_big_listing_is_refused() {
         let root = scratch_repo("global-excludes", "");
@@ -654,6 +1124,20 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_git_call_draws_on_the_running_calls_budget() {
+        call_scope(Duration::from_millis(300), || {
+            std::thread::sleep(Duration::from_millis(200));
+            // A git call inside the call sees what is left of the call's own budget.
+            assert!(call_clock().left() < Duration::from_millis(150));
+            call_scope(Duration::from_secs(60), || {
+                assert!(call_clock().left() < Duration::from_millis(150));
+            });
+        });
+        // Outside any call a lone git call gets a fresh, full budget.
+        assert!(call_clock().left() > Duration::from_secs(14));
+    }
+
+    #[test]
     fn a_cut_listing_is_an_error_not_a_prefix() {
         let root = scratch_repo("cut-listing", "[filter \"f\"]\n\tclean = cat\n");
         let error = git_limited(&root, &["config", "--list"], 64).unwrap_err();
@@ -664,7 +1148,7 @@ mod tests {
     #[test]
     fn a_cut_filter_listing_refuses_the_gate() {
         let root = scratch_repo("cut-gate", "[filter \"f\"]\n\tclean = cat\n");
-        let error = refuse_filters_within(&root, 8, DEADLINE).unwrap_err();
+        let error = refuse_filters_within(&root, 8, Clock::start(DEADLINE)).unwrap_err();
         assert!(error.contains("too large"), "{error}");
         let error = refuse_filters(&root).unwrap_err();
         assert!(error.contains("filter drivers"), "{error}");
@@ -689,8 +1173,12 @@ mod tests {
             .write_all(include.as_bytes())
             .unwrap();
         let started = Instant::now();
-        let error = refuse_filters_within(&root, FILTER_KEYS_LIMIT, Duration::from_millis(300))
-            .unwrap_err();
+        let error = refuse_filters_within(
+            &root,
+            FILTER_KEYS_LIMIT,
+            Clock::start(Duration::from_millis(300)),
+        )
+        .unwrap_err();
         assert!(error.contains("stopped"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(5));
         let _ = fs::remove_dir_all(&root);

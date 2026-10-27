@@ -293,6 +293,53 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual({'A': 120, 'B': 120, 'C': 120}, metrics['M6']['secondary']['per_task'])
         self.assertEqual(120, metrics['M6']['secondary']['peak_ctx_max'])
 
+    def mixed_go_and_chat(self):
+        tasks = [{'id': 'A', 'kind': 'positive', 'mode': 'go'}, {'id': 'T7', 'kind': 'positive', 'mode': 'chat'}]
+        go = [good_trial('A') for _ in range(3)]
+        chat = [good_trial('T7') for _ in range(3)]
+        for trial in chat:
+            trial.update(turns=4, tool_calls=3, repairs=None, tokens={'prompt': 2500, 'eval': 233,
+                         'planner': None, 'peak_ctx': 900}, errors={'malformed': 1, 'refused': 0, 'sandbox': 0})
+        return tasks, go, chat
+
+    def test_trial_records_carry_the_task_mode(self):
+        self.assertEqual('go', run_eval.blank_trial({'id': 'A', 'kind': 'positive'}, 1)['mode'])
+        self.assertEqual('chat', run_eval.blank_trial({'id': 'T', 'kind': 'positive', 'mode': 'chat'}, 1)['mode'])
+
+    def test_adding_a_chat_trial_does_not_move_the_go_headlines(self):
+        tasks, go, chat = self.mixed_go_and_chat()
+        for trial in go:
+            trial['mode'] = 'go'
+        for trial in chat:
+            trial['mode'] = 'chat'
+        _s, before, _w, _b = self.run_aggregate(go, tasks[:1])
+        _s, after, _w, _b = self.run_aggregate(go + chat, tasks)
+        for key in ('M4', 'M5', 'M6', 'M7', 'M16'):
+            self.assertEqual(before[key]['value'], after[key]['value'], key)
+        self.assertEqual((2, 2, 120, 0.0), tuple(after[k]['value'] for k in ('M4', 'M5', 'M6', 'M7')))
+        self.assertEqual({'value': 4, 'trials': 3}, after['M4']['secondary']['chat'])
+        self.assertEqual({'value': 3, 'trials': 3}, after['M5']['secondary']['chat'])
+        self.assertEqual({'value': 2733, 'trials': 3}, after['M6']['secondary']['chat'])
+        self.assertEqual({'value': 33.333, 'trials': 3}, after['M7']['secondary']['chat'])
+        self.assertNotIn('chat', before['M4']['secondary'])
+        self.assertEqual({'A': 2, 'T7': 4}, after['M4']['secondary']['per_task'])
+
+    def test_records_without_mode_take_the_task_mode_or_go(self):
+        tasks, go, chat = self.mixed_go_and_chat()  # blank_trial of these ids has no chat mode on the record
+        for trial in go + chat:
+            trial.pop('mode', None)  # as loaded from a result file written before the field existed
+        _s, metrics, _w, _b = self.run_aggregate(go + chat, tasks)
+        self.assertEqual(2, metrics['M4']['value'])
+        self.assertEqual(4, metrics['M4']['secondary']['chat']['value'])
+        _s, metrics, _w, _b = self.run_aggregate(go + chat, [{'id': 'A', 'kind': 'positive'}])
+        self.assertEqual(3, metrics['M4']['value'], 'no known mode: every record counts as go')
+
+    def test_m1_and_m2_keep_counting_every_positive_task(self):
+        tasks, go, chat = self.mixed_go_and_chat()
+        chat[0]['pass'] = False
+        _s, metrics, _w, _b = self.run_aggregate(go + chat, tasks)
+        self.assertAlmostEqual(5 / 6, metrics['M1']['value'], places=3)
+
     def test_m3_reports_repairs_per_accepted_task_for_each_task(self):
         tasks = [{'id': 'A', 'kind': 'positive'}, {'id': 'B', 'kind': 'positive'}]
         trials = [good_trial('A') for _ in range(3)] + [good_trial('B') for _ in range(3)]

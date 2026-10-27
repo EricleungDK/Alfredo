@@ -129,6 +129,15 @@ const NAMES: [&str; 4] = ["git_commit", "git_switch", "git_merge", "git_push"];
 pub(crate) fn fingerprint(
     root: &Path,
     name: &str,
+    arguments: &Value,
+) -> Option<Result<String, String>> {
+    git_read::call_scope(LOCAL_DEADLINE, || fingerprint_state(root, name, arguments))
+}
+
+/// [`fingerprint`] for one call's budget (issue #359).
+fn fingerprint_state(
+    root: &Path,
+    name: &str,
     _arguments: &Value,
 ) -> Option<Result<String, String>> {
     if !NAMES.contains(&name) {
@@ -173,7 +182,16 @@ pub(crate) fn preview(
     name: &str,
     arguments: &Value,
 ) -> Option<Result<(Change, CardKind), String>> {
-    let fingerprint = match fingerprint(root, name, arguments)? {
+    // One budget for the whole card: its fingerprint and its preview (issue #359).
+    git_read::call_scope(LOCAL_DEADLINE, || preview_card(root, name, arguments))
+}
+
+fn preview_card(
+    root: &Path,
+    name: &str,
+    arguments: &Value,
+) -> Option<Result<(Change, CardKind), String>> {
+    let fingerprint = match fingerprint_state(root, name, arguments)? {
         Ok(fingerprint) => fingerprint,
         Err(error) => return Some(Err(error)),
     };
@@ -201,6 +219,19 @@ type CardText = (String, String, CardKind);
 /// Complete stdout of a read-only git call; output past [`FULL`] is refused, never cut.
 fn full(root: &Path, args: &[&str]) -> Result<String, String> {
     let output = git_read::git_limited(root, args, FULL)?;
+    if output.len() >= FULL {
+        return Err(format!(
+            "git {} output is too large to check safely; refused",
+            verb(args)
+        ));
+    }
+    Ok(output)
+}
+
+/// [`full`] for a listing that decides a secret check: git's stderr warnings refuse it
+/// too (see [`git_read::git_complete_listing`]).
+fn full_complete(root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = git_read::git_complete_listing(root, args, FULL)?;
     if output.len() >= FULL {
         return Err(format!(
             "git {} output is too large to check safely; refused",
@@ -300,9 +331,10 @@ fn refuse_repository_config(root: &Path) -> Result<(), String> {
 /// The repository config as a write reads it (`--show-scope`), read whole: local, worktree
 /// and the owner's global config, never a cut listing.
 fn config_listing(root: &Path) -> Result<String, String> {
-    let mut command = local_command(root)?;
+    let clock = git_read::call_clock();
+    let mut command = local_command(root, clock)?;
     command.args(["config", "--null", "--list", "--show-scope"]);
-    let (status, out, error) = git_read::run_bounded(command, FULL, LOCAL_DEADLINE)?;
+    let (status, out, error) = git_read::run_bounded(command, FULL, clock.left())?;
     match status {
         None => Err("repository config is too large to check; refused".into()),
         Some(status) if status.success() => Ok(String::from_utf8_lossy(&out).into_owned()),
@@ -319,21 +351,18 @@ fn config_listing(root: &Path) -> Result<String, String> {
 }
 
 /// `git -C root` for a local write: hardened, with the owner's HOME (global identity) and
-/// no other environment; discovery stops above the parent.
-fn local_command(root: &Path) -> Result<Command, String> {
+/// no other environment; discovery stops above the parent. Pinned to the verified git
+/// directory, so a write never lands in another repository (issue #359).
+fn local_command(root: &Path, clock: git_read::Clock) -> Result<Command, String> {
+    let verified = git_read::verified_git_dir_within(root, clock, git_read::Config::Owner)?;
     let ceiling = ceiling(root)?;
     let mut command = Command::new("/usr/bin/git");
-    git_read::hardened(&mut command).env_remove("GIT_CONFIG_GLOBAL");
-    for name in ["HOME", "XDG_CONFIG_HOME"] {
-        match std::env::var_os(name) {
-            Some(value) => command.env(name, value),
-            None => command.env_remove(name),
-        };
-    }
+    git_read::owner_config(git_read::hardened(&mut command));
     command
         .env("GIT_CEILING_DIRECTORIES", ceiling)
         .arg("-C")
         .arg(root);
+    git_read::pin_git_dir(&mut command, root, &verified);
     Ok(command)
 }
 
@@ -531,41 +560,111 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
             }
         }
     }
+    // Status shows a rename only when both names are in the pathspec, and the staged
+    // name listing above shows a copy as a plain add, so a secret staged under a new
+    // name (`git mv .npmrc docs/notes.txt`, `cp .npmrc config.txt`) is found here: the
+    // sources of every staged rename or copy in the whole index, in either mode.
+    let index = full_complete(
+        root,
+        &[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--find-renames",
+            "--find-copies",
+            "--find-copies-harder",
+            "-l0",
+            "--name-status",
+            "-z",
+            "--",
+        ],
+    )?;
+    // Read lossily: a replacement character may hide the bytes that made a name secret.
+    if index.contains('\u{FFFD}') {
+        return Err("a staged file name is not UTF-8; the commit is refused".into());
+    }
+    let mut fields = index.split('\0').filter(|f| !f.is_empty());
+    while let Some(status) = fields.next() {
+        let first = fields.next();
+        if status.starts_with(['R', 'C']) {
+            names.extend(first.map(String::from));
+            fields.next();
+        }
+    }
     match names
         .iter()
-        .find(|name| crate::planning_context::secret(&name.to_lowercase()))
+        .find(|name| crate::planning_context::secret(name))
     {
         Some(name) => Err(format!(
-            "refused: {name} looks like a secret (.env*, *.pem, *.key, *.p12, *.pfx or .git); commit it by hand if intended"
+            "refused: {name} looks like a secret or credential file (see the secret-file list in docs/reference.md); commit it by hand if intended"
         )),
         None => Ok(()),
     }
 }
 
+/// The `commit` tool: one budget for the whole call (issue #359).
 fn commit(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(LOCAL_DEADLINE, || commit_run(root, arguments))
+}
+
+fn commit_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_commit(root, arguments)?;
     let mut args = vec!["commit", "--quiet", "--no-verify", "-m", &plan.message];
     if !plan.pathspecs.is_empty() {
         let mut add = vec!["add", "--"];
         add.extend(plan.pathspecs.iter().map(String::as_str));
+        let intent = intent_to_add(root)?;
         let index = write(root, &["write-tree"], Env::Local)?;
         let index = index.trim();
         write(root, &add, Env::Local).map_err(|error| error + &leftovers(root))?;
+        // Re-check the staged set the commit will take: a plain-named file holding a copy
+        // of a secret is only visible once it is staged (`plan_commit` saw it untracked).
+        if let Err(error) = refuse_secrets(root, &plan.pathspecs) {
+            return Err(error + &restore_index(root, index, &intent) + &leftovers(root));
+        }
         args.push("--");
         args.extend(plan.pathspecs.iter().map(String::as_str));
         if let Err(error) = write(root, &args, Env::Local) {
-            let restored = match write(root, &["read-tree", "--end-of-options", index], Env::Local)
-            {
-                Ok(_) => "; the index was restored".to_string(),
-                Err(reset) => format!("; restoring the index failed ({reset})"),
-            };
-            return Err(error + &restored + &leftovers(root));
+            return Err(error + &restore_index(root, index, &intent) + &leftovers(root));
         }
     } else {
         write(root, &args, Env::Local).map_err(|error| error + &leftovers(root))?;
     }
     let made = git_read::git(root, &["log", "-1", "--no-color", "--format=%h %s"])?;
     Ok(format!("committed on {}: {}", plan.branch, made.trim()))
+}
+
+/// Put the index back to the tree `write-tree` recorded before `git add`; the message
+/// says whether that worked.
+/// `read-tree` drops intent-to-add entries (`git add -N`), so they are added again.
+fn restore_index(root: &Path, index: &str, intent: &[String]) -> String {
+    let restored =
+        write(root, &["read-tree", "--end-of-options", index], Env::Local).and_then(|_| {
+            if intent.is_empty() {
+                return Ok(String::new());
+            }
+            let mut args = vec!["add", "--intent-to-add", "--"];
+            args.extend(intent.iter().map(String::as_str));
+            write(root, &args, Env::Local)
+        });
+    match restored {
+        Ok(_) => "; the index was restored".to_string(),
+        Err(reset) => format!("; restoring the index failed ({reset})"),
+    }
+}
+
+/// Paths that are intent-to-add entries in the index (new to the index, not to the
+/// worktree; the worktree diff lists them as added).
+fn intent_to_add(root: &Path) -> Result<Vec<String>, String> {
+    let out = full(
+        root,
+        &["diff", "--name-only", "--diff-filter=A", "-z", "--"],
+    )?;
+    Ok(out
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 struct SwitchPlan {
@@ -633,7 +732,12 @@ fn plan_switch(root: &Path, arguments: &Value) -> Result<SwitchPlan, String> {
     })
 }
 
+/// The `switch` tool: one budget for the whole call (issue #359).
 fn switch(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(LOCAL_DEADLINE, || switch_run(root, arguments))
+}
+
+fn switch_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_switch(root, arguments)?;
     if plan.create {
         // Validated above: a plain branch name that cannot start with `-`.
@@ -789,7 +893,12 @@ fn refuse_long_list(what: &str, lines: usize, advice: &str) -> Result<(), String
     Ok(())
 }
 
+/// The `merge` tool: one budget for the whole call (issue #359).
 fn merge(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(LOCAL_DEADLINE, || merge_run(root, arguments))
+}
+
+fn merge_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_merge(root, arguments)?;
     let before = git_read::git(root, &["rev-parse", "HEAD"])?;
     if let Err(error) = write(
@@ -1090,7 +1199,12 @@ fn plan_push(root: &Path, arguments: &Value) -> Result<PushPlan, String> {
     })
 }
 
+/// The `push` tool: one budget for the whole call (issue #359).
 fn push(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(PUSH_DEADLINE, || push_run(root, arguments))
+}
+
+fn push_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_push(root, arguments)?;
     let refspec = format!("refs/heads/{0}:refs/heads/{0}", plan.branch);
     write(
@@ -1170,9 +1284,14 @@ fn failure_message(args: &[&str], error: &str, remote: bool) -> String {
 
 /// Run a writing git command in `root`. `Err` is git's message.
 fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
-    let (mut command, deadline) = match env {
-        Env::Local => (local_command(root)?, LOCAL_DEADLINE),
+    let (mut command, clock) = match env {
+        Env::Local => {
+            let clock = git_read::call_clock();
+            (local_command(root, clock)?, clock)
+        }
         Env::Remote => {
+            let clock = git_read::call_clock();
+            let verified = git_read::verified_git_dir_within(root, clock, git_read::Config::Owner)?;
             let mut command = Command::new("/usr/bin/git");
             for name in REDIRECTING_ENV {
                 command.env_remove(name);
@@ -1184,16 +1303,18 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
                 .env("LC_ALL", "C")
                 .env("GIT_PAGER", "cat")
                 .arg("-C")
-                .arg(root)
+                .arg(root);
+            // Pinned like the local writes: a push cannot be redirected either (issue #359).
+            git_read::pin_git_dir(&mut command, root, &verified)
                 .arg("--no-pager")
                 .args(crate::worker::HARDENED_GIT_ARGS)
                 .args(["-c", "protocol.ext.allow=never"]);
-            (command, PUSH_DEADLINE)
+            (command, clock)
         }
     };
     command.args(args);
     detach_from_terminal(&mut command);
-    let (status, out, error) = git_read::run_bounded(command, MAX_OUTPUT * 2, deadline)?;
+    let (status, out, error) = git_read::run_bounded(command, MAX_OUTPUT * 2, clock.left())?;
     match status {
         // Cut output: git was stopped part-way, so the result is not known. Never success.
         None => Err(format!(

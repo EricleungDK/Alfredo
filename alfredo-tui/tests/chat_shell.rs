@@ -655,6 +655,8 @@ fn a_running_command_shows_its_status_and_that_esc_stops_it() {
     session.apply(attempt, Update::Admitted);
     let shown = Instant::now();
     assert!(session.await_approval(attempt, card, shown));
+    // Stands in for a draw that showed the whole card (issue #303).
+    session.set_approval_whole(true);
     session.approval_visible(true, shown);
     let armed = shown + approval::ARM + Duration::from_millis(1);
     assert_eq!(session.answer_approval('y', armed), Some(Decision::Approve));
@@ -918,6 +920,68 @@ fn git_works_sandboxed_in_a_linked_worktree() {
     assert!(result.starts_with("exit code 0"), "{result}");
     assert!(result.contains(" a"), "{result}");
     let _ = fs::remove_dir_all(base);
+}
+
+/// Issue #359: a workspace whose `.git` leads to another repository, by a gitfile or by a
+/// `commondir` file behind a gitfile, gets that repository's config and objects neither
+/// bound into the sandbox nor readable from it.
+#[test]
+fn a_git_pointer_to_another_repository_is_not_bound_into_the_sandbox() {
+    if !sandbox_works() {
+        return;
+    }
+    let other = workspace("pointer-other");
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?} {out:?}");
+    };
+    git(&other, &["init", "-q", "-b", "main"]);
+    git(
+        &other,
+        &[
+            "config",
+            "remote.origin.url",
+            "https://user:tok-7f3a@example.com/repo.git",
+        ],
+    );
+    fs::write(other.join("creds.txt"), "AWS_SECRET=hunter2\n").unwrap();
+    git(&other, &["add", "creds.txt"]);
+    git(&other, &["commit", "-q", "-m", "add creds"]);
+    let other_git = other.join(".git");
+    for variant in ["gitfile", "commondir behind a gitfile"] {
+        let root = workspace("pointer-ws");
+        if variant == "gitfile" {
+            fs::write(
+                root.join(".git"),
+                format!("gitdir: {}\n", other_git.display()),
+            )
+            .unwrap();
+        } else {
+            fs::write(root.join(".git"), "gitdir: ./fake\n").unwrap();
+            fs::create_dir_all(root.join("fake")).unwrap();
+            fs::write(root.join("fake/HEAD"), "ref: refs/heads/main\n").unwrap();
+            fs::write(
+                root.join("fake/commondir"),
+                format!("{}\n", other_git.display()),
+            )
+            .unwrap();
+        }
+        let command = format!("cat '{}/config'; git log -p --oneline", other_git.display());
+        let card = approval::card(&root, &call(json!({"command": command}))).unwrap();
+        let result = approval::apply(&root, &card).unwrap();
+        assert!(!result.contains("tok-7f3a"), "{variant}: {result}");
+        assert!(!result.contains("hunter2"), "{variant}: {result}");
+        let _ = fs::remove_dir_all(root);
+    }
+    let _ = fs::remove_dir_all(other);
 }
 
 #[test]

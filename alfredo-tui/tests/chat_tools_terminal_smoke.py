@@ -7,14 +7,17 @@ diff; y edits the file in place, n leaves it untouched and the model gets a refu
 Issue #264: text typed into the prompt while the card waits never decides it.
 Issue #302: Esc in the middle of an approved run_command (sandboxed or HOST) and Ctrl+Q
 both kill the command, and so do SIGHUP and SIGTERM (issue #342); its later `touch marker`
-never happens and the approval log says cancelled. Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
+never happens and the approval log says cancelled. Issue #303: a 900-character run_command at 24x80 is deny-only: y is refused with a note and
+the command never runs, n denies. Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
 prompt holds the editable /plan command; nothing else is requested or started."""
 import http.server
 import json
+import fcntl
 import os
 from pathlib import Path
 import select
 import signal
+import struct
 import subprocess
 import tempfile
 import termios
@@ -24,6 +27,7 @@ import unittest
 
 from terminal_smoke import Pty
 
+LONG = 'echo ' + 'a ' * 440 + '; touch pwned'
 SLOW = 'echo $$ > pid; touch started; sleep 4; touch marker'
 README = '# Demo project\nREADME_BODY_MARKER: a tiny repository used by the smoke.\n'
 
@@ -87,6 +91,14 @@ class Fixture:
                             'command': SLOW, 'escalate': 'on host' in prompt}}}]}, 'done': False}]
                 elif 'slow command' in prompt:
                     chunks = [{'message': {'content': 'SLOW_DONE'}, 'done': False}]
+                elif 'long command' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'run_command', 'arguments': {'command': LONG}}}]},
+                        'done': False}]
+                elif 'long command' in prompt:
+                    denied = 'denied' in tool_results[-1]['content']
+                    chunks = [{'message': {'content': 'LONG_DENIED' if denied else 'LONG_RAN'},
+                               'done': False}]
                 elif 'loop forever' in prompt:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'list_files', 'arguments': {}}}]}, 'done': False}]
@@ -96,6 +108,8 @@ class Fixture:
                         'done': False}]
                 elif 'read big' in prompt:
                     chunks = [{'message': {'content': 'BIG_DONE'}, 'done': False}]
+                elif 'just do it' in prompt:
+                    chunks = [{'message': {'content': 'WAYFINDER_CHAT_REPLY'}, 'done': False}]
                 elif 'slow one' in prompt:
                     time.sleep(2)
                     chunks = [{'message': {'content': 'SLOW_REPLY_MARKER'}, 'done': False}]
@@ -374,6 +388,73 @@ class ChatTools(unittest.TestCase):
         self.terminal.write(b'n')
         self.terminal.wait_for('MODEL_SAW_DENIAL')
         self.assertEqual(self.readme(), README)
+
+    def test_a_900_character_command_at_24x80_is_deny_only(self):
+        # Issue #303: the command cannot be shown whole, so y and a never arm (the old
+        # card scrolled its header off and refused y forever); n still denies.
+        fcntl.ioctl(self.terminal.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
+        self.terminal.process.send_signal(signal.SIGWINCH)
+        # Keys typed while the resize is still being handled are lost (CI hit this: the
+        # prompt stayed empty and the card never came). Wait for the 80-column frame to be
+        # drawn, then let the input reader settle before typing.
+        self.terminal.wait_for_width(80)
+        time.sleep(0.5)
+        self.assertGreater(len(LONG), 880)
+        self.terminal.write(b'long command\r')
+        self.terminal.wait_for('Approve run_command')
+        self.terminal.wait_for('enlarge the terminal or press n')
+        time.sleep(0.8)
+        self.terminal.write(b'y')
+        self.terminal.wait_for('enlarge the terminal or press n')
+        time.sleep(0.8)
+        self.terminal.write(b'a')
+        time.sleep(0.8)
+        self.assertIn('Approve run_command', self.terminal.screen())
+        root = Path(os.path.realpath(self.repo.name))
+        self.assertFalse(root.joinpath('pwned').exists(), 'y must not run a hidden command')
+        self.terminal.write(b'n')
+        self.terminal.wait_for('LONG_DENIED')
+        self.assertFalse(root.joinpath('pwned').exists())
+        self.assertEqual(self.approval_outcomes(), ['denied'])
+
+    def tool_names(self, request):
+        return [tool['function']['name'] for tool in request.get('tools') or []]
+
+    def test_an_ordinary_migration_prompt_reaches_the_model_with_tools(self):
+        # Issue #334: the bare word "migration" is ordinary chat, not Wayfinder.
+        self.terminal.write(b'Run the migration script in migrations/ and fix any errors\r')
+        self.terminal.wait_for('SUMMARY_FROM_TOOL')
+        chats = self.fixture.chats()
+        self.assertGreaterEqual(len(chats), 1)
+        self.assertIn('read_file', self.tool_names(chats[0]))
+        self.assertIn('run_command', self.tool_names(chats[0]))
+        self.assertNotIn('Wayfinder', self.terminal.screen())
+
+    def test_wayfinder_chat_says_tools_are_off_and_scope_clear_gives_them_back(self):
+        # Issue #334: a project-start prompt enters Wayfinder (no request); the mission
+        # chat is tool-free and says so; /scope-clear restores the tools.
+        self.terminal.write(b'plan a migration of the whole system\r')
+        self.terminal.wait_for('Scope is not agreed yet')
+        # Wait for the whole footer: a partial redraw can stop at "tools off he".
+        self.terminal.wait_for('tools off here · /scope-clear gives them back')
+        self.assertIn('/scope-clear', self.terminal.screen())
+        self.assertEqual(len(self.fixture.chats()), 0)
+        self.terminal.write(b'please just do it\r')
+        self.terminal.wait_for('WAYFINDER_CHAT_REPLY')
+        chats = self.fixture.chats()
+        self.assertEqual(len(chats), 1)
+        self.assertEqual(self.tool_names(chats[0]), [], 'a Wayfinder chat sends no tools')
+        self.terminal.wait_for('tools off')
+        # A refused @path must not hide the tools-off footer (and vice versa).
+        self.terminal.write(b'@missing.txt please just do it\r')
+        self.terminal.wait_for('not attached · Wayfinder chat: tools off')
+        self.terminal.write(b'/scope-clear\r')
+        self.terminal.wait_for('chat tools are back')
+        self.terminal.write(b'summarise README\r')
+        self.terminal.wait_for('SUMMARY_FROM_TOOL')
+        chats = self.fixture.chats()
+        self.assertIn('read_file', self.tool_names(chats[-1]))
+        self.assertIn('propose_plan', self.tool_names(chats[-1]))
 
     def test_a_proposal_prefills_the_prompt_and_starts_nothing(self):
         self.terminal.write(b'refactor everything\r')
