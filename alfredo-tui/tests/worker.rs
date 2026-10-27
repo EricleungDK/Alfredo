@@ -6504,7 +6504,7 @@ fn edit_with_missing_ambiguous_or_empty_search_fails_with_the_reason_and_changes
     let ambiguous = resolve_with(&edit_block("calc.py", &[(" = 1\n", " = 5\n")]), base);
     let ambiguous = ambiguous.unwrap_err();
     assert!(
-        ambiguous.contains("calc.py") && ambiguous.contains("matches 2 times"),
+        ambiguous.contains("calc.py") && ambiguous.contains("matches more than once"),
         "{ambiguous}"
     );
     // A good first pair does not survive a failing second pair: the whole answer fails.
@@ -6525,6 +6525,59 @@ fn edit_with_missing_ambiguous_or_empty_search_fails_with_the_reason_and_changes
         new.contains("notes.txt") && new.contains("does not exist"),
         "{new}"
     );
+}
+
+#[test]
+fn edit_match_count_stops_at_two_on_a_degenerate_baseline() {
+    // 64 KiB of newlines and a 32 Ki-newline SEARCH: every offset matches, so a
+    // full overlapping count is quadratic (4.7 s in release before the fix).
+    let base = "\n".repeat(64 * 1024);
+    let answer = edit_block("calc.py", &[(&"\n".repeat(32 * 1024), "x\n")]);
+    let started = std::time::Instant::now();
+    let error = resolve_with(&answer, &base).unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(error.contains("matches more than once"), "{error}");
+    // Generous bound: the count now stops at the second match (milliseconds).
+    assert!(elapsed.as_secs_f64() < 1.0, "{elapsed:?}");
+}
+
+#[test]
+fn edit_search_can_match_the_last_line_of_a_file_without_a_trailing_newline() {
+    // The prompt shows each file with a newline appended, so the last line is
+    // editable; the file keeps ending without a newline.
+    let base = "x = 1\nreturn 0";
+    let plan = resolve_with(
+        &edit_block("calc.py", &[("return 0\n", "return 1\n")]),
+        base,
+    )
+    .unwrap();
+    assert_eq!(plan.files[0].content, "x = 1\nreturn 1");
+    // Adding lines after the last one and deleting it keep the no-newline ending.
+    let plan = resolve_with(
+        &edit_block("calc.py", &[("return 0\n", "return 1\nreturn 2\n")]),
+        base,
+    )
+    .unwrap();
+    assert_eq!(plan.files[0].content, "x = 1\nreturn 1\nreturn 2");
+    let plan = resolve_with(&edit_block("calc.py", &[("return 0\n", "")]), base).unwrap();
+    assert_eq!(plan.files[0].content, "x = 1");
+    // A SEARCH inside the file does not change the missing final newline, and a
+    // file that does end with a newline is unchanged.
+    let plan = resolve_with(&edit_block("calc.py", &[("x = 1\n", "x = 2\n")]), base).unwrap();
+    assert_eq!(plan.files[0].content, "x = 2\nreturn 0");
+    let plan = resolve_with(
+        &edit_block("calc.py", &[("return 0\n", "return 1\n")]),
+        "x = 1\nreturn 0\n",
+    )
+    .unwrap();
+    assert_eq!(plan.files[0].content, "x = 1\nreturn 1\n");
+    // A SEARCH still has to match exactly once, appended newline included.
+    let error =
+        resolve_with(&edit_block("calc.py", &[("1\n", "2\n")]), "a = 1\nb = 1").unwrap_err();
+    assert!(error.contains("matches more than once"), "{error}");
+    // An empty file has no last line to match.
+    let error = resolve_with(&edit_block("calc.py", &[("\n", "x\n")]), "").unwrap_err();
+    assert!(error.contains("not found"), "{error}");
 }
 
 #[test]
@@ -6698,7 +6751,7 @@ async fn edit_block_changes_the_tail_of_a_large_file_without_re_emitting_it() {
 async fn failed_edit_is_repairable_and_the_repair_prompt_names_the_reason() {
     for (search, reason) in [
         ("def missing():\n", "not found"),
-        ("    return 0\n", "matches 2 times"),
+        ("    return 0\n", "matches more than once"),
     ] {
         let fixture = unittest_fixture();
         commit_files(
@@ -6761,6 +6814,31 @@ async fn truncated_edit_block_repair_says_the_previous_response_was_truncated() 
 }
 
 #[tokio::test]
+async fn truncated_edit_block_repair_asks_for_fewer_pairs_not_whole_files() {
+    let fixture = unittest_fixture();
+    let (_, detail) = run_reply(
+        &fixture,
+        1,
+        "=== EDIT: calc.py ===\n<<<<<<< SEARCH\n    return 0\n=======\n    return {todo[".into(),
+    )
+    .await;
+    assert!(detail.contains("EDIT block"), "{detail}");
+    let second = repair_of(&fixture, 1);
+    let (request, _) = run_reply(
+        &fixture,
+        second,
+        blocks(&[("calc.py", "def answer():\n    return 42\n")]),
+    )
+    .await;
+    let section = failing_section(&last_prompt(&request));
+    assert!(
+        section.contains("fewer or shorter SEARCH/REPLACE pairs")
+            && !section.contains("Return every changed file completely"),
+        "{section}"
+    );
+}
+
+#[tokio::test]
 async fn edit_to_an_unapproved_path_fails_exactly_like_a_file_block() {
     for path in ["test_calc.py", ".env", "../escape", "/etc/passwd"] {
         let mut details = Vec::new();
@@ -6796,6 +6874,23 @@ fn live_display_shows_edit_blocks_as_a_heading_without_their_end_line() {
         shown,
         "▸ calc.py (edit)\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n"
     );
+}
+
+#[test]
+fn live_display_recognises_edit_markers_only_outside_file_blocks() {
+    // Inside a FILE block an EDIT marker line is file content, shown as written.
+    let spoof = "=== FILE: a.py ===\n=== EDIT: other.py ===\nx = 1\n=== END EDIT ===\ny = 2\n=== END FILE ===\n";
+    assert_eq!(
+        worker::display_output(spoof),
+        "▸ a.py\n=== EDIT: other.py ===\nx = 1\n=== END EDIT ===\ny = 2\n"
+    );
+    // Outside any block both markers still work, and a FILE block after an EDIT too.
+    let both = format!(
+        "{}{}",
+        edit_block("calc.py", &[("a\n", "b\n")]),
+        blocks(&[("n.txt", "z\n")])
+    );
+    assert!(worker::display_output(&both).starts_with("▸ calc.py (edit)\n"));
 }
 
 #[tokio::test]
