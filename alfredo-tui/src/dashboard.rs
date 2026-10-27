@@ -157,8 +157,20 @@ pub fn single_line_visible_tabs(text: &str) -> String {
 }
 
 /// [`safe_visible`] on one line.
+///
+/// Control characters are dropped as before (headless stderr, issue #361): only the
+/// Default_Ignorable and format characters of [`card_hidden`] are shown as `<U+XXXX>`
+/// (issue #468).
 pub fn single_line_visible(text: &str) -> String {
-    safe_visible(&line_breaks_as_spaces(text))
+    let mut out = String::with_capacity(text.len());
+    for c in line_breaks_as_spaces(text).chars() {
+        if !card_hidden(c) {
+            out.push(c);
+        } else if !c.is_control() {
+            out.push_str(&format!("<U+{:04X}>", c as u32));
+        }
+    }
+    out
 }
 
 /// LF, tab and the [`LINE_SEPARATORS`] become a space, so single-line output never starts
