@@ -57,6 +57,8 @@ fn waiting_session(root: &std::path::Path) -> Session {
     let attempt = session.attempt;
     session.apply(attempt, Update::Admitted);
     assert!(session.await_approval(attempt, card(root), Instant::now()));
+    // Stands in for a draw that showed the whole card (issue #303).
+    session.set_approval_whole(true);
     session
 }
 

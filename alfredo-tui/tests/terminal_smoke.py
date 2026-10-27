@@ -95,6 +95,22 @@ class Pty:
             self.test.assertIsNone(self.process.poll(), self.output.decode(errors='replace'))
         self.test.fail(f'Missing {text!r}:\n{self.screen()}')
 
+    def wait_for_width(self, width, timeout=10):
+        """Wait until the drawn frame is exactly `width` columns wide (after a resize)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            rows = [line.rstrip() for line in self.screen().split('\n')]
+            if any(line.startswith('┌') and len(line) == width for line in rows) and not any(
+                    len(line) > width for line in rows):
+                return
+            if select.select([self.master], [], [], 0.05)[0]:
+                chunk = os.read(self.master, 65536)
+                self.output.extend(chunk)
+                if b'\x1b[6n' in chunk:
+                    os.write(self.master, b'\x1b[1;1R')
+            self.test.assertIsNone(self.process.poll(), self.output.decode(errors='replace'))
+        self.test.fail(f'Never drew a {width}-column frame:\n{self.screen()}')
+
     def wait_gone(self, text, timeout=10):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -404,6 +420,93 @@ class ChatHarnessContext(unittest.TestCase):
                 release['hold c'].set()
                 terminal.close()
                 server.shutdown()
+
+
+    def test_ctrl_c_cancels_a_running_turn_keeps_the_draft_and_quits_only_when_idle(self):
+        # Issue #345: Ctrl+C mid-turn acts like Esc (stop the reply, keep the draft and the
+        # session); idle, it quits as before. The draft also survives the quit.
+        release = threading.Event()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps({'models': [{'name': 'fixture'}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-ndjson')
+                self.end_headers()
+                if self.path != '/api/chat':
+                    self.wfile.write(b'{"done":true,"done_reason":"load"}\n')
+                    return
+                self.wfile.write(json.dumps({'message': {'content': 'PARTIAL_REPLY'}, 'done': False}).encode() + b'\n')
+                self.wfile.flush()
+                release.wait(30)
+
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory(prefix='alfredo-ctrlc-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-ctrlc-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            args = [str(binary), '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}']
+            terminal = Pty(self, args, repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'slow one\r')
+                terminal.wait_for('PARTIAL_REPLY')
+                terminal.write(b'half typed')
+                terminal.wait_for('half typed')
+                terminal.write(b'\x03')  # Ctrl+C mid-turn: cancels, does not quit
+                terminal.wait_for('Chat 1 · cancelled')
+                time.sleep(0.5)
+                self.assertIsNone(terminal.process.poll(), terminal.screen())
+                self.assertIn('PARTIAL_REPLY', terminal.screen())
+                self.assertIn('half typed', terminal.screen())
+                terminal.write(b'\x03')  # idle: quits as today
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                release.set()
+                terminal.close()
+            # The session and the draft are restored on relaunch.
+            terminal = Pty(self, args, repo, env)
+            try:
+                terminal.wait_for('half typed')
+                self.assertIn('PARTIAL_REPLY', terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+                server.shutdown()
+
+    def test_ctrl_c_quits_at_once_when_idle_with_a_typed_draft(self):
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-ctrlc-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-ctrlc-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'typed text')
+                terminal.wait_for('typed text')
+                terminal.write(b'\x03')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
 
 
 class ChatFileMentions(unittest.TestCase):

@@ -196,7 +196,8 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | Ctrl+Left / Ctrl+Right (Alt+B / Alt+F) | Move one word left / right |
 | Ctrl+K | Delete from the cursor to the end of the prompt |
 | Ctrl+W / Ctrl+U | Delete word / clear prompt |
-| Ctrl+Q / Ctrl+C | Quit (cancels workers and waits for their results) |
+| Ctrl+Q | Quit (cancels workers and waits for their results) |
+| Ctrl+C | While a chat reply is running (and no worker is): cancel it like Esc, keeping the prompt draft and the session. Otherwise quit like Ctrl+Q |
 
 ## What Alfredo leaves behind
 
