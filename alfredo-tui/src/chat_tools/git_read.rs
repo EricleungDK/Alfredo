@@ -131,6 +131,7 @@ fn log_output(root: &Path, arguments: &Value) -> Result<String, String> {
             .min(MAX_COMMITS),
     };
     let count = format!("--max-count={count}");
+    refuse_includes(root, INCLUDES_NOT_RUN)?;
     git(
         root,
         &[
@@ -175,6 +176,8 @@ fn diff_output(root: &Path, arguments: &Value) -> Result<String, String> {
     }
     if target.is_none() {
         refuse_filters(root)?;
+    } else {
+        refuse_includes(root, INCLUDES_NOT_RUN)?;
     }
     let selector: Vec<&str> = selector.iter().map(String::as_str).collect();
     // Files renamed or copied from a secret are secret too: find them across the
@@ -338,20 +341,40 @@ const FILTER_KEYS_ARGS: [&str; 4] = [
     "^(filter|include|includeif)\\.|^core\\.worktree$",
 ];
 
+const INCLUDES_NOT_RUN: &str =
+    "repository config includes another file (include.path or includeIf); this git tool is not run";
+
+/// Include keys only, read without following the includes themselves (`--no-includes`), so a
+/// FIFO include target is never opened (issue #465).
+const INCLUDE_KEYS_ARGS: [&str; 5] = [
+    "config",
+    "--no-includes",
+    "--name-only",
+    "--get-regexp",
+    "^(include|includeif)\\.",
+];
+
 /// Most bytes of matching key names read; a listing past it is refused.
 const FILTER_KEYS_LIMIT: usize = 64 << 10;
+
+const NOT_RUN: &str = "git status and working-tree diffs are not run (git_log and git_diff with base and target still work)";
 
 /// Refuse when the repository config defines filter drivers or includes: `git status`
 /// and working-tree diffs would run the repository's clean filters (as worker host git).
 /// Fails closed: a listing that cannot be read whole is refused, never trusted as a prefix.
 pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
+    // Includes first, without opening them: the listing below reads the config with them, and
+    // a FIFO target would stall it to the time limit (issue #465).
+    refuse_includes(
+        root,
+        &format!("repository config defines filter drivers, includes or core.worktree; {NOT_RUN}"),
+    )?;
     refuse_filters_within(root, FILTER_KEYS_LIMIT, call_clock())
 }
 
 /// [`refuse_filters`] with the listing read up to `limit` bytes within `deadline`. A cut or
 /// late listing is an error (run_bounded stops git), so the gate never trusts a prefix.
 fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), String> {
-    const NOT_RUN: &str = "git status and working-tree diffs are not run (git_log and git_diff with base and target still work)";
     let command = git_command_within(root, &FILTER_KEYS_ARGS, clock)?;
     let (status, out, error) = run_bounded(command, limit, clock.left())?;
     match status {
@@ -380,6 +403,34 @@ fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), 
                 first.trim().trim_start_matches("fatal: ")
             ))
         }
+    }
+}
+
+/// Refuse when the repository config includes another file: git would open every include
+/// target, and a FIFO there stalls any git call to its time limit (issue #465). For the calls
+/// that do not run [`refuse_filters`] (`git_log`, `git_diff` with a target). Fails closed.
+pub(crate) fn refuse_includes(root: &Path, refusal: &str) -> Result<(), String> {
+    let clock = call_clock();
+    // Before the verification, whose `rev-parse` reads the config with its includes (so a
+    // FIFO target would stall it). The start-up files are type-checked first, and this
+    // config read skips includes, so it opens nothing outside the repository.
+    refuse_special_start_up_files(
+        &root
+            .canonicalize()
+            .map_err(|_| "Coding Workspace is not available".to_string())?,
+        clock,
+    )?;
+    let mut command = hardened_command(root)?;
+    command.args(INCLUDE_KEYS_ARGS);
+    let (status, out, _) = run_bounded(command, FILTER_KEYS_LIMIT, clock.left())?;
+    match status {
+        // `--get-regexp` exits 1 when no key matches.
+        Some(status) if status.code() == Some(1) && out.is_empty() => Ok(()),
+        Some(status) if status.success() && !out.is_empty() => Err(refusal.to_string()),
+        _ => Err(
+            "repository config cannot be read or checked for includes; this git tool is not run"
+                .to_string(),
+        ),
     }
 }
 
@@ -758,6 +809,18 @@ const ALTERNATES: &str = "the workspace's repository borrows objects from outsid
 /// `recursive`, anywhere under it. A missing directory is fine. The walk is charged to `clock`: running out is a refusal,
 /// never a partial check (issue #359).
 fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), String> {
+    walk_entries(dir, clock, recursive, false)
+}
+
+/// [`walk_without_links`] over a whole git directory, issue #465: every subdirectory (`refs`,
+/// `rebase-merge`, `sequencer`, `modules`, `worktrees/*` ...) except the top-level `objects`,
+/// which [`object_stores_within`] walks together with its alternates. Git's fsmonitor socket
+/// may sit in a git directory itself: the top, a `worktrees/*` entry or a `modules/*` one.
+fn walk_git_dir(dir: &Path, clock: Clock) -> Result<(), String> {
+    walk_entries(dir, clock, true, true)
+}
+
+fn walk_entries(dir: &Path, clock: Clock, recursive: bool, git_dir: bool) -> Result<(), String> {
     let unreadable = || UNREADABLE.to_string();
     match fs::symlink_metadata(dir) {
         Ok(meta) if meta.file_type().is_symlink() => return Err(LINKED.to_string()),
@@ -765,6 +828,7 @@ fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), S
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(unreadable()),
     }
+    let top = dir.to_path_buf();
     let mut pending = vec![dir.to_path_buf()];
     while let Some(dir) = pending.pop() {
         if clock.left().is_zero() {
@@ -779,12 +843,23 @@ fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), S
             // A FIFO, socket or device blocks any git process that opens it (issue #461).
             // The one exception: git's fsmonitor daemon socket directly in a git directory
             // (opening a socket fails, it cannot block; Alfredo's git runs without fsmonitor).
-            let daemon =
-                !recursive && kind.is_socket() && entry.file_name() == "fsmonitor--daemon.ipc";
+            let daemon = kind.is_socket()
+                && entry.file_name() == "fsmonitor--daemon.ipc"
+                && (if git_dir {
+                    dir == top
+                        || [top.join("worktrees"), top.join("modules")]
+                            .iter()
+                            .any(|parent| dir.parent() == Some(parent.as_path()))
+                } else {
+                    !recursive
+                });
             if !kind.is_file() && !kind.is_dir() && !daemon {
                 return Err(special(&entry.file_name().to_string_lossy()));
             }
-            if recursive && kind.is_dir() {
+            if recursive
+                && kind.is_dir()
+                && !(git_dir && dir == top && entry.file_name() == "objects")
+            {
                 pending.push(entry.path());
             }
         }
@@ -819,15 +894,14 @@ fn object_stores_within(common_dir: &Path, clock: Clock) -> Result<(), String> {
 /// every object store that is not a plain file or directory: no link, FIFO, socket or device
 /// where git may open a file (issue #461). Types only, nothing is opened.
 fn walk_repository(git_dir: &Path, common_dir: &Path, clock: Clock) -> Result<(), String> {
-    walk_without_links(git_dir, clock, false)?;
-    walk_without_links(common_dir, clock, false)?;
-    for tree in ["refs", "info", "logs"] {
-        walk_without_links(&common_dir.join(tree), clock, true)?;
-        if git_dir != common_dir {
-            walk_without_links(&git_dir.join(tree), clock, true)?;
-        }
+    // Object stores first: a bad alternates entry is named as such before the walk of the
+    // directories (which may hold the store it names) reaches the file inside it.
+    object_stores_within(common_dir, clock)?;
+    walk_git_dir(common_dir, clock)?;
+    if git_dir != common_dir {
+        walk_git_dir(git_dir, clock)?;
     }
-    object_stores_within(common_dir, clock)
+    Ok(())
 }
 
 /// Queues the stores listed in the `alternates` file `text` of `store` that are not seen yet
