@@ -426,7 +426,8 @@ pub(crate) fn refuse_includes(root: &Path, refusal: &str) -> Result<(), String> 
     match status {
         // `--get-regexp` exits 1 when no key matches.
         Some(status) if status.code() == Some(1) && out.is_empty() => Ok(()),
-        Some(status) if status.success() && !out.is_empty() => Err(refusal.to_string()),
+        // Exit 0 means a key matched, so an include exists whatever the output holds.
+        Some(status) if status.success() => Err(refusal.to_string()),
         _ => Err(
             "repository config cannot be read or checked for includes; this git tool is not run"
                 .to_string(),
