@@ -188,6 +188,12 @@ pub fn draw_with_tasks(frame: &mut Frame, app: &App, tasks: &TaskControl) {
 
 fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     let area = frame.area();
+    // Fail closed: a card is answerable only if this very draw shows it, so forget the
+    // last draw first (the early return below and a zero-size transcript skip the setters).
+    if let Some(session) = app.sessions.get(app.selected) {
+        session.set_approval_header_drawn(false);
+        session.set_approval_whole(false);
+    }
     if area.width < 32 || area.height < 10 {
         frame.render_widget(
             Paragraph::new("Alfredo\nResize to at least 32 × 10\nCtrl+Q quit")

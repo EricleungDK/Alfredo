@@ -358,6 +358,7 @@ pub struct Session {
     approval_header_drawn: std::cell::Cell<bool>,
     /// The last draw put the whole card, every command line included, in the viewport.
     /// Only then may `y` or `a` answer it (issue #303); `n` needs just the header.
+    #[serde(skip)]
     approval_whole: std::cell::Cell<bool>,
     /// When the key before the current one, and the current one, were pressed
     /// (issue #264: a y/n only answers a card after a quiet gap).

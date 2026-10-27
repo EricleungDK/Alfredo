@@ -1247,3 +1247,27 @@ fn chat_system_prompt_no_longer_claims_chat_cannot_edit() {
     assert!(prompt.contains("edit_file"), "{prompt}");
     assert!(!prompt.to_lowercase().contains("cannot edit"), "{prompt}");
 }
+
+/// Issue #303: shrinking below the minimum size hides the card, so a draw there
+/// clears what the last draw said and `y` no longer approves it.
+#[test]
+fn shrinking_below_the_minimum_size_disarms_a_card_that_was_whole() {
+    let mut app = App::new("m".into());
+    app.sessions[0] = shell_session("ls", false);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let start = Instant::now();
+    draw_and_report(&mut terminal, &mut app, start);
+    let later = start + approval::ARM * 2;
+    draw_and_report(&mut terminal, &mut app, later);
+    assert!(app.sessions[0].approval_whole() && app.sessions[0].approval_header_drawn());
+    terminal.backend_mut().resize(31, 9);
+    draw_and_report(&mut terminal, &mut app, later + Duration::from_millis(1));
+    assert!(!app.sessions[0].approval_whole() && !app.sessions[0].approval_header_drawn());
+    let at = later + approval::ARM * 2;
+    assert_eq!(app.sessions[0].answer_approval('y', at), None);
+    assert_eq!(
+        app.sessions[0].answer_approval('n', at),
+        None,
+        "header rule"
+    );
+}
