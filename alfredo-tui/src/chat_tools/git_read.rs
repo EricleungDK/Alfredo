@@ -813,7 +813,7 @@ fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), S
 }
 
 /// [`walk_without_links`] over a whole git directory, issue #465: every subdirectory (`refs`,
-/// `rebase-merge`, `sequencer`, `modules`, `worktrees/*` ...) except the top-level `objects`,
+/// `rebase-merge`, `sequencer`, `modules`, `worktrees/*` ...) except the top-level `objects` and `hooks` (never opened: hooks are off),
 /// which [`object_stores_within`] walks together with its alternates. Git's fsmonitor socket
 /// may sit in a git directory itself: the top, a `worktrees/*` entry or a `modules/*` one.
 fn walk_git_dir(dir: &Path, clock: Clock) -> Result<(), String> {
@@ -837,6 +837,11 @@ fn walk_entries(dir: &Path, clock: Clock, recursive: bool, git_dir: bool) -> Res
         for entry in fs::read_dir(&dir).map_err(|_| unreadable())? {
             let entry = entry.map_err(|_| unreadable())?;
             let kind = entry.file_type().map_err(|_| unreadable())?;
+            // `hooks/` is never opened here (hooks are off, `core.hooksPath=/dev/null`), and
+            // a linked hook is common in project setups: not checked (issue #465).
+            if git_dir && dir == top && entry.file_name() == "hooks" {
+                continue;
+            }
             if kind.is_symlink() {
                 return Err(LINKED.to_string());
             }

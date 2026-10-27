@@ -1732,8 +1732,9 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   a call is stopped after 15 s, and when the repository config defines filter drivers or
   includes, `git_status` and working-tree or staged diffs are refused (they would run the
   repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work
-  unless the config has `include.path` or `includeIf`, which refuses them too (an include target
-  that is a FIFO would stall git).
+  unless the config has `include.path` or `includeIf`, which refuses them too (an include
+  target that is a FIFO would stall git); this is deliberate, also for identity `includeIf`
+  setups.
   A config too large to check is refused the same way.
   Git also refuses a `.git` that points at another repository (a gitfile, a `commondir`
   file, or `objects/info/alternates` into another repository); a linked worktree of the
@@ -1742,10 +1743,10 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   at once, never waited on, and links under `logs/` are refused like those under `refs/` and
   `info/`. Before git runs, a FIFO, socket, device or link anywhere under the git
   directory and common directory (including `rebase-merge/`, `sequencer/`, `modules/` and
-  `worktrees/*`), or under an object store, is refused too (git's `fsmonitor--daemon.ipc` socket in a git directory is
-  allowed), as is a
-  workspace with no `.git`, no `HEAD` or no `objects/` and `refs/` (git would read the root
-  as a bare repository). The gitfile (`gitdir: ` prefix, only trailing CR/LF dropped) and
+  `worktrees/*`), or under an object store, is refused too; git's `fsmonitor--daemon.ipc`
+  socket in a git directory is allowed, and `hooks/` is not checked because git never runs
+  hooks here. A workspace with no `.git`, no `HEAD` or no `objects/` and `refs/` is refused
+  as well (git would read the root as a bare repository). The gitfile (`gitdir: ` prefix, only trailing CR/LF dropped) and
   alternates lines (quoted or whitespace-padded lines are refused) are read as git reads
   them. This start-up check is a best-effort fast path; the 15 s limit is the backstop for
   anything it does not foresee. That newer git opens the alternates file at start-up was inferred from CI.
