@@ -756,13 +756,14 @@ pub(crate) fn verified_git_dir_within(
 
 const LINKED: &str = "the workspace's repository holds a symbolic link in its git directory, refs or object store; git tools refuse";
 const UNCHECKED: &str = "the workspace's repository could not be checked for links or borrowed objects within the call's time limit; git tools refuse";
+const UNREADABLE: &str = "the workspace's repository changed or could not be read while it was checked for links or borrowed objects (a background git gc or repack may have been running); git tools refuse, try again";
 const ALTERNATES: &str = "the workspace's repository borrows objects from outside it (objects/info/alternates); git tools refuse";
 
 /// Refuses a symbolic link among the entries of `dir`, or, when `recursive`, anywhere under
 /// it. A missing directory is fine. The walk is charged to `clock`: running out is a refusal,
 /// never a partial check (issue #359).
 fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), String> {
-    let unreadable = || UNCHECKED.to_string();
+    let unreadable = || UNREADABLE.to_string();
     match fs::symlink_metadata(dir) {
         Ok(meta) if meta.file_type().is_symlink() => return Err(LINKED.to_string()),
         Ok(_) => {}
@@ -772,7 +773,7 @@ fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), S
     let mut pending = vec![dir.to_path_buf()];
     while let Some(dir) = pending.pop() {
         if clock.left().is_zero() {
-            return Err(unreadable());
+            return Err(UNCHECKED.to_string());
         }
         for entry in fs::read_dir(&dir).map_err(|_| unreadable())? {
             let entry = entry.map_err(|_| unreadable())?;
@@ -1181,6 +1182,23 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("stopped"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Issue #449: a directory that vanishes or cannot be read mid-walk (a background
+    /// `git gc` pruning loose objects) refuses with its own reason, not the time limit's;
+    /// a spent budget still refuses with the time limit.
+    #[test]
+    fn an_unreadable_directory_refuses_without_blaming_the_time_limit() {
+        let root = std::env::temp_dir().join(format!("alfredo-walk-449-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("not-a-dir");
+        fs::write(&file, "x").unwrap();
+        let error = walk_without_links(&file, Clock::start(DEADLINE), true).unwrap_err();
+        assert_eq!(error, UNREADABLE);
+        let error = walk_without_links(&root, Clock::start(Duration::ZERO), true).unwrap_err();
+        assert_eq!(error, UNCHECKED);
         let _ = fs::remove_dir_all(&root);
     }
 

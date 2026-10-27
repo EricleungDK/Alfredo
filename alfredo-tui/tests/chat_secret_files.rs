@@ -57,6 +57,10 @@ fn git(root: &Path, args: &[&str]) -> String {
         .arg("-C")
         .arg(root)
         .args(["-c", "commit.gpgsign=false"])
+        // No background maintenance: a detached `git gc`/repack started by a fixture commit
+        // prunes loose object directories while the chat's link walk reads them (issue #449).
+        .args(["-c", "gc.auto=0", "-c", "gc.autoDetach=false"])
+        .args(["-c", "maintenance.auto=false"])
         .args(args)
         .output()
         .unwrap();
