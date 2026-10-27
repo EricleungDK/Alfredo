@@ -8,3 +8,4 @@
   long line, a long commit message, a short terminal) is cut with `[N more diff lines]`
   and is deny-only for every kind of card: `y` and `a` are refused and `n` still denies,
   until the terminal is large enough to show it whole.
+  The `git_merge` file list shows each path in full instead of a `.../ci.yml` shortening.

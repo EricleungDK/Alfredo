@@ -826,6 +826,37 @@ fn a_commit_card_that_fits_still_arms() {
     assert_eq!(y, Some(Decision::Approve));
 }
 
+/// Issue #269: `git diff --stat` shortens a long path to `.../ci.yml`, hiding which
+/// directory a merged file lands in. The merge card lists the whole path, and a card
+/// whose wrapped rows do not fit is deny-only.
+#[test]
+fn a_merge_card_shows_a_deep_long_path_whole_and_is_deny_only_when_it_cannot_fit() {
+    let repo = Repo::new();
+    let dir = ["configuration-directory-segment"; 12].join("/");
+    let path = format!("{dir}/ci.yml");
+    git(&repo.root, &["checkout", "-q", "-b", "alfredo/deep"]);
+    fs::create_dir_all(repo.root.join(&dir)).unwrap();
+    fs::write(repo.root.join(&path), "on: push\n").unwrap();
+    git(&repo.root, &["add", "."]);
+    git(&repo.root, &["commit", "-q", "-m", "deep file"]);
+    git(&repo.root, &["checkout", "-q", "main"]);
+    let head = repo.head();
+    let card = repo
+        .card("git_merge", json!({"source": "alfredo/deep"}))
+        .unwrap();
+    assert!(card.preview.contains(&path), "{}", card.preview);
+    assert!(!card.preview.contains(".../"), "{}", card.preview);
+    let (y, _, _, whole) = probe_card(card.clone(), 120, 40);
+    assert!(whole);
+    assert_eq!(y, Some(Decision::Approve));
+    // A path wider than the terminal wraps; when the wrapped card does not fit, y is off.
+    let (y, a, n, whole) = probe_card(card, 40, 24);
+    assert!(!whole);
+    assert_eq!((y, a), (None, None));
+    assert_eq!(n, Some(Decision::Deny));
+    assert_eq!(repo.head(), head, "nothing was merged");
+}
+
 #[test]
 fn git_and_push_cards_render_their_effect_and_push_is_distinct() {
     let repo = Repo::new().with_remote();

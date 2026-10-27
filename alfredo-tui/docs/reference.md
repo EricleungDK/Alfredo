@@ -1775,8 +1775,8 @@ Approval (ADR 0004); there is no skip-approval mode.
   and the `new directories:` line. Exactly 80 passes; 81 is refused with
   `the change's diff is 81 lines, over the 80-line approval card limit; nothing was written. Split it …`
   before any card is shown, again at apply, and the file (and any directory) is left
-  untouched. `git_commit` (file listing) and `git_merge` (`--stat` listing, one line per
-  file plus the summary line) are refused the same way above 40 lines, with the index,
+  untouched. `git_commit` (file listing) and `git_merge` (`--stat` listing with full paths, never
+  shortened to `.../name`, one line per file plus the summary line) are refused the same way above 40 lines, with the index,
   HEAD and working tree untouched. Secret, protected-path and read-only refusals are
   checked first and still win. The caps bound the line count only. Whether the card then
   fits the terminal is a separate check: a card whose lines do not all fit the rows

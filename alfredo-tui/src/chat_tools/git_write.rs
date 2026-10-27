@@ -862,7 +862,9 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
-            "--stat",
+            // Wide enough that git never shortens a path to `.../ci.yml`: the owner must
+            // see which directory each merged file lands in (issue #269).
+            "--stat=4096,4000,20",
             "--end-of-options",
             &three,
             "--",
