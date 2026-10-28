@@ -48,7 +48,7 @@ fn compact_review(summary: &str) -> String {
     match criteria.as_slice() {
         [] => {}
         [(first, note), .., (last, _)] if criteria.iter().all(|(_, other)| other == note) => {
-            lines.push(format!("Criteria {first}–{last} · {note}"))
+            lines.push(format!("Criteria {first}–{last} · {note}"));
         }
         _ => lines.extend(
             criteria

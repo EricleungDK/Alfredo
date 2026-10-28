@@ -462,7 +462,7 @@ fn run_owned(
                     .is_none() => {}
         Ok(_) => return Err("Qualification case directory must be empty and not a symlink".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(scratch).map_err(|e| e.to_string())?
+            fs::create_dir(scratch).map_err(|e| e.to_string())?;
         }
         Err(e) => return Err(e.to_string()),
     }
@@ -1046,10 +1046,10 @@ fn observe_foreground(
                             )
                             .unwrap_or(false)
                     })
-                })
+                });
         }
         Update::Admitted => {
-            result.queue_ms = started.map(|start| start.elapsed().as_millis() as u64)
+            result.queue_ms = started.map(|start| start.elapsed().as_millis() as u64);
         }
         Update::Token(text) => {
             if response.len() + text.len() > 16 * 1024 {

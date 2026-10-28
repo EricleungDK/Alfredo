@@ -409,7 +409,7 @@ impl Store {
                 }
                 let mut file = options.open(&backup).map_err(|e| e.to_string())?;
                 file.write_all(&original)
-                    .and_then(|_| file.sync_all())
+                    .and_then(|()| file.sync_all())
                     .map_err(|e| e.to_string())?;
             }
             Err(error) => return Err(error.to_string()),
@@ -549,7 +549,7 @@ impl Store {
             }
             let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
             file.write_all(&bytes)
-                .and_then(|_| file.sync_all())
+                .and_then(|()| file.sync_all())
                 .map_err(|e| e.to_string())?;
             fs::rename(&temporary, self.root.join("understanding.json"))
                 .map_err(|e| e.to_string())?;

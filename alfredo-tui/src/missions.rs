@@ -90,7 +90,7 @@ pub fn remember(store: &TaskStore, workspace: &Path, mission: &str) -> Result<()
         }
         let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
         file.write_all(&bytes)
-            .and_then(|_| file.sync_all())
+            .and_then(|()| file.sync_all())
             .map_err(|e| e.to_string())?;
         // Atomic creation without replacing another writer's complete identity.
         match fs::hard_link(&temporary, &path) {
@@ -273,7 +273,7 @@ pub(crate) fn create_manifest(path: &Path, workspace: &Path, mission: &str) -> R
         }
         let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
         file.write_all(&bytes)
-            .and_then(|_| file.sync_all())
+            .and_then(|()| file.sync_all())
             .map_err(|e| e.to_string())?;
         fs::hard_link(&temporary, path).map_err(|e| {
             format!("Mission creation was not acknowledged: {e}; resume the same name if it exists")

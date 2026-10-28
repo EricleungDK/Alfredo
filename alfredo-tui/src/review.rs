@@ -1,4 +1,4 @@
-//! Readable projection of evidence already verified by TaskStore. No review authority.
+//! Readable projection of evidence already verified by `TaskStore`. No review authority.
 use crate::worker::Evidence;
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -106,7 +106,11 @@ impl View {
     }
 
     pub fn with_assessment(self, assessment: Option<&crate::assessment::Assessment>) -> Self {
-        self.with_review(assessment.map(|value| value.summary()).as_deref())
+        self.with_review(
+            assessment
+                .map(super::assessment::Assessment::summary)
+                .as_deref(),
+        )
     }
     pub fn with_review(mut self, summary: Option<&str>) -> Self {
         *self.layout.get_mut() = None;
@@ -191,7 +195,7 @@ impl View {
                 evidence
                     .generation
                     .as_ref()
-                    .map(|generation| generation.summary())
+                    .map(super::provider::Generation::summary)
                     .unwrap_or_else(|| "Requested generation: unrecorded".into()),
             ),
         );
@@ -199,7 +203,7 @@ impl View {
             4,
             Line::from(safe(&evidence.agent.as_ref().map_or_else(
                 || "Local Agent conversation unrecorded".into(),
-                |agent| agent.summary(),
+                super::agent::Record::summary,
             ))),
         );
         if let Some(metrics) = &evidence.model_metrics {

@@ -1870,7 +1870,7 @@ pub const SANDBOX_UNAVAILABLE: &str = "sandbox-unavailable";
 
 /// True when `receipt` shows the sandbox itself never started the check: the
 /// provider could not spawn Bubblewrap, or Bubblewrap refused its own setup
-/// (user namespaces, uid map, AppArmor) before any check output. Only this
+/// (user namespaces, uid map, `AppArmor`) before any check output. Only this
 /// start stage counts; an ordinary failing check is never reclassified.
 pub fn sandbox_unavailable_receipt(receipt: &ExecutionReceipt) -> bool {
     match receipt.status.as_str() {
@@ -2175,7 +2175,7 @@ fn json_string(value: &str) -> String {
             '\r' => encoded.push_str("\\r"),
             '\t' => encoded.push_str("\\t"),
             character if character.is_ascii_control() => {
-                encoded.push_str(&format!("\\u{:04x}", character as u32))
+                encoded.push_str(&format!("\\u{:04x}", character as u32));
             }
             character if character.is_ascii() => encoded.push(character),
             character => {

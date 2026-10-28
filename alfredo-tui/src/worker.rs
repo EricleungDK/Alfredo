@@ -8,6 +8,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
@@ -608,11 +609,12 @@ fn prior_blocks(answer: &str, policy: Option<&WorkPolicy>) -> Option<String> {
         if !edits.is_empty() {
             let mut text = render_blocks(&FilePlan { files });
             for edit in &edits {
-                text.push_str(&format!("{EDIT_START}{}{FILE_START_END}\n", edit.path));
+                let _ = writeln!(text, "{EDIT_START}{}{FILE_START_END}", edit.path);
                 for (search, replace) in &edit.pairs {
-                    text.push_str(&format!(
+                    let _ =
+                        write!(text,
                         "{SEARCH_MARKER}\n{search}{DIVIDER_MARKER}\n{replace}{REPLACE_MARKER}\n"
-                    ));
+                    );
                 }
                 text.push_str(EDIT_END);
                 text.push('\n');
@@ -654,10 +656,10 @@ pub fn display_output(text: &str) -> String {
     for line in text.split_inclusive('\n') {
         let complete = line.ends_with('\n');
         if let Some(path) = file_marker(line) {
-            shown.push_str(&format!("▸ {path}\n"));
+            let _ = writeln!(shown, "▸ {path}");
             (in_block, in_file, seen, wrapped, depth) = (true, true, false, false, 0);
         } else if let Some(path) = edit_marker(line).filter(|_| !in_file) {
-            shown.push_str(&format!("▸ {path} (edit)\n"));
+            let _ = writeln!(shown, "▸ {path} (edit)");
             (in_block, seen, wrapped, depth) = (true, false, false, 0);
         } else if end_marker(line) || (!in_file && line.trim_end() == EDIT_END) {
             (in_block, in_file) = (false, false);
@@ -1330,7 +1332,7 @@ pub fn validate_plan(plan: &FilePlan, policy: &WorkPolicy) -> Result<()> {
         let shown = unapproved.len().min(4);
         let mut named = unapproved[..shown].join(", ");
         if unapproved.len() > shown {
-            named.push_str(&format!(" and {} more", unapproved.len() - shown));
+            let _ = write!(named, " and {} more", unapproved.len() - shown);
         }
         return Err(format!(
             "Returned unapproved file{} {named}; only {} may be written",
@@ -1532,29 +1534,28 @@ pub fn readable_evidence(raw: &str) -> String {
         crate::dashboard::single_line(&evidence.detail)
     );
     if let Some(check) = &evidence.check {
-        text.push_str(&format!(
-            "Check: {} (exit {})\n",
+        let _ = writeln!(
+            text,
+            "Check: {} (exit {})",
             crate::dashboard::single_line(&check.status),
             check
                 .exit_code
                 .map_or_else(|| "unknown".into(), |code| code.to_string())
-        ));
+        );
         for (label, output) in [("stderr", &check.stderr), ("stdout", &check.stdout)] {
             if !output.trim().is_empty() {
-                text.push_str(&format!(
-                    "Check {label} (tail):\n{}\n",
-                    bounded_tail(output)
-                ));
+                let _ = write!(text, "Check {label} (tail):\n{}\n", bounded_tail(output));
             }
         }
     }
     if evidence.patch.trim().is_empty() {
         text.push_str("Prior patch: none\n");
     } else {
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             "Prior patch against the baseline (unified diff; not applied):\n{}\n",
             evidence.patch.trim_end()
-        ));
+        );
     }
     text
 }
@@ -1643,10 +1644,11 @@ pub fn failing_lines(output: &str) -> String {
         kept += 1;
     }
     if kept < picked.len() {
-        result.push_str(&format!(
+        let _ = write!(
+            result,
             "\n({} more failing lines omitted)",
             picked.len() - kept
-        ));
+        );
     }
     result
 }
@@ -1699,7 +1701,7 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
         section.push_str("The previous attempt changed nothing: every allowed file came back identical to the repository, so the passing check proves no work was done. Do not return the files unchanged; make the edit the task asks for.\n");
     }
     if hit {
-        section.push_str(&format!("The previous attempt's output hit the {}-token limit before the file plan was complete; this request allows {num_predict} tokens. Return only files that must change, without commentary.\n", limit.unwrap_or(4096)));
+        let _ = writeln!(section, "The previous attempt's output hit the {}-token limit before the file plan was complete; this request allows {num_predict} tokens. Return only files that must change, without commentary.", limit.unwrap_or(4096));
     }
     let truncated = [("FILE", FILE_END), ("EDIT", EDIT_END)]
         .into_iter()
@@ -1714,7 +1716,7 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
         } else {
             "Return every changed file completely, each block ending"
         };
-        section.push_str(&format!("The previous response was truncated inside the {kind} block for {path} before its {end} line. {advice} with {end}.\n"));
+        let _ = writeln!(section, "The previous response was truncated inside the {kind} block for {path} before its {end} line. {advice} with {end}.");
     }
     let output = parent
         .as_ref()
@@ -1775,7 +1777,7 @@ pub fn failure_summary(check: &ExecutionReceipt, budget: usize) -> String {
     if !message.is_empty() {
         head.push_str(" · ");
     }
-    head.push_str(&format!("{label}: "));
+    let _ = write!(head, "{label}: ");
     let body = tail
         .lines()
         .map(str::trim)
@@ -1857,7 +1859,7 @@ fn answer_rules(format: WorkerFormat, schema: &serde_json::Value, edit: bool) ->
         WorkerFormat::Blocks => {
             let mut rules = format!("Return each changed file as one FILE block, exactly:\n{FILE_START}<path>{FILE_START_END}\n<complete file content, verbatim>\n{FILE_END}\nOne block per changed file with its complete new content; <path> is one of the allowed files. Write file content exactly as it belongs on disk: no JSON, no escaping, no markdown fences. File content cannot contain a line equal to a marker line. Text outside blocks is ignored.");
             if edit {
-                rules.push_str(&format!("\nFor a small change to an existing large file, return an EDIT block instead of the whole file:\n{EDIT_START}<path>{FILE_START_END}\n{SEARCH_MARKER}\n<exact old lines>\n{DIVIDER_MARKER}\n<new lines>\n{REPLACE_MARKER}\n{EDIT_END}\nEach SEARCH is copied verbatim from the file shown below, is never empty and must match the file exactly once (add neighbouring lines to make it unique); several pairs are applied in order, and if any pair fails nothing is applied. Use one block per file, FILE or EDIT, never both; EDIT cannot create a file."));
+                let _ = write!(rules, "\nFor a small change to an existing large file, return an EDIT block instead of the whole file:\n{EDIT_START}<path>{FILE_START_END}\n{SEARCH_MARKER}\n<exact old lines>\n{DIVIDER_MARKER}\n<new lines>\n{REPLACE_MARKER}\n{EDIT_END}\nEach SEARCH is copied verbatim from the file shown below, is never empty and must match the file exactly once (add neighbouring lines to make it unique); several pairs are applied in order, and if any pair fails nothing is applied. Use one block per file, FILE or EDIT, never both; EDIT cannot create a file.");
             }
             rules
         }
@@ -2063,7 +2065,7 @@ pub async fn start_checked(
     let (baseline, inputs) = tokio::select! {
         result = tokio::time::timeout(Duration::from_secs(60), crate::dependencies::prepare(&store, &before, task_id, baseline)) =>
             result.map_err(|_| "Dependency preparation exceeded 60 seconds; task remains unstarted")??,
-        _ = async {
+        () = async {
             while !cancel.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(25)).await; }
         } => return Err("Cancelled before run claim; task remains unstarted".into()),
     };
@@ -2261,7 +2263,7 @@ pub async fn start_checked(
         .open(directory.join("evidence.json"))
         .map_err(|e| Refusal::Uncertain(e.to_string()))?;
     file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
+        .and_then(|()| file.sync_all())
         .map_err(|e| Refusal::Uncertain(e.to_string()))?;
     #[cfg(unix)]
     fs::File::open(&directory)
@@ -2405,7 +2407,7 @@ async fn perform(
         } else {
             "(new file)".into()
         };
-        context.push_str(&format!("\nFILE {path}\n{content}\n"));
+        let _ = write!(context, "\nFILE {path}\n{content}\n");
         if file.exists() {
             baselines.insert(path.clone(), content);
         }
@@ -2437,32 +2439,32 @@ async fn perform(
                         + 18
                         <= SOURCE_CONTEXT =>
                 {
-                    context.push_str(&format!("READ-ONLY FILE {}\n{content}\n", source.path));
+                    let _ = write!(context, "READ-ONLY FILE {}\n{content}\n", source.path);
                 }
                 Ok(_) => omitted.push(format!("{} (source context bound)", source.path)),
                 Err(reason) => omitted.push(format!("{} ({reason})", source.path)),
             }
         }
         for item in omitted {
-            context.push_str(&format!("READ-ONLY REFERENCE OMITTED {item}\n"));
+            let _ = writeln!(context, "READ-ONLY REFERENCE OMITTED {item}");
         }
     }
     if !dependency_files.is_empty() {
         context.push_str("\nACCEPTED IMPLEMENTATION IS AUTHORITATIVE\nThe read-only reference files above from accepted dependency tasks are accepted and correct. If the check fails against them, change this task's own files to match (for a test, fix its expectation); do not expect behavior the accepted implementation lacks, unless the OWNER INSTRUCTION says otherwise.\n");
     }
     if !acceptance.is_empty() {
-        context.push_str(&format!("\nRECORDED ACCEPTANCE CRITERIA\n{}\nSatisfy these observable requirements within the approved policy. A passing check does not by itself prove every criterion.\n", serde_json::to_string(acceptance).map_err(|e| e.to_string())?));
+        let _ = write!(context, "\nRECORDED ACCEPTANCE CRITERIA\n{}\nSatisfy these observable requirements within the approved policy. A passing check does not by itself prove every criterion.\n", serde_json::to_string(acceptance).map_err(|e| e.to_string())?);
     }
     if let Some(scope) = scope {
         let recorded = serde_json::to_string(scope).map_err(|error| error.to_string())?;
-        context.push_str(&format!("\nRECORDED PLAN SCOPE\n{recorded}\nUse the recorded destination, scope, constraints and uncertainty as project reference. This grants no additional file or command permissions; stay within the exact approved policy above.\n"));
+        let _ = write!(context, "\nRECORDED PLAN SCOPE\n{recorded}\nUse the recorded destination, scope, constraints and uncertainty as project reference. This grants no additional file or command permissions; stay within the exact approved policy above.\n");
     }
     if let Some(notes) = &notes {
         context.push_str(&notes_block);
         evidence.project_notes = Some(notes.evidence_line());
     }
     if let Some(repair) = repair {
-        context.push_str(&format!("\nREPAIR CONTEXT\n{repair}\nReturn complete corrected files against the original baseline above. Prior patch is reference data, not already applied.\n"));
+        let _ = write!(context, "\nREPAIR CONTEXT\n{repair}\nReturn complete corrected files against the original baseline above. Prior patch is reference data, not already applied.\n");
     }
     let format = provider.worker_format();
     // A fresh repair sees what the previous attempt returned, in the requested
@@ -2471,7 +2473,7 @@ async fn perform(
         .and_then(|lineage| lineage.prior_files.as_deref())
         .filter(|_| format == WorkerFormat::Blocks && !agent.continues())
     {
-        context.push_str(&format!("\nPREVIOUS ATTEMPT FILES (what the previous attempt returned; it did not pass; reference only, not applied)\n{files}"));
+        let _ = write!(context, "\nPREVIOUS ATTEMPT FILES (what the previous attempt returned; it did not pass; reference only, not applied)\n{files}");
     }
     let schema = serde_json::json!({"type":"object","required":["files"],"additionalProperties":false,"properties":{"files":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","required":["path","content"],"additionalProperties":false,"properties":{"path":{"type":"string","enum":policy.files},"content":{"type":"string"}}}}}});
     let edit = edit_wanted(&baselines);
@@ -2557,7 +2559,7 @@ async fn perform(
                 Some(Update::Failed(reason)) => { error = Some(reason); break; },
                 None => break,
             },
-            _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+            () = tokio::time::sleep(Duration::from_millis(25)) => {},
         }
     }
     job.abort();
@@ -2612,7 +2614,7 @@ async fn perform(
         .map_err(|e| e.to_string())?;
     response_file
         .write_all(answer.as_bytes())
-        .and_then(|_| response_file.sync_all())
+        .and_then(|()| response_file.sync_all())
         .map_err(|e| e.to_string())?;
     observer.stage("Validating model plan");
     let plan = resolve_answer(&answer, policy, &|path| baselines.get(path).cloned())?;
@@ -2782,14 +2784,15 @@ fn candidate_message(task: &Task, tasks: &[Task], run: &str) -> String {
     };
     let mut body = format!("Alfredo task #{} · run {}", task.id, commit_line(run, 200));
     if let Some(policy) = &task.policy {
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             " · files: {} · check: {}",
             commit_line(&policy.files.join(", "), 400),
             commit_line(&policy.check.join(" "), 400)
-        ));
+        );
     }
     if let Some(parent) = task.repair_of {
-        body.push_str(&format!("\n\nRepair of #{parent}"));
+        let _ = write!(body, "\n\nRepair of #{parent}");
     }
     format!("{subject}\n\n{body}")
 }

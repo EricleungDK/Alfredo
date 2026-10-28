@@ -112,7 +112,7 @@ pub async fn inspect(
         Err(_) if root_check.is_err() => lines
             .push("SKIP storage: not checked until the workspace is a Git repository root".into()),
         Ok(()) => {
-            lines.push("PASS storage: task state and named conversation can be opened".into())
+            lines.push("PASS storage: task state and named conversation can be opened".into());
         }
         Err(error) => {
             passed = false;

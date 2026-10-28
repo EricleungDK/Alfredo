@@ -96,7 +96,7 @@ impl Snapshot {
                 let owner = self
                     .sessions
                     .iter()
-                    .flat_map(|session| session.commands())
+                    .flat_map(super::model::Session::commands)
                     .find(|command| command.intent.planner_request() == Some(origin));
                 if self.schema_version < 12
                     || owner.is_none()
@@ -381,7 +381,7 @@ impl ConversationStore {
         for command in snapshot
             .sessions
             .iter()
-            .flat_map(|session| session.commands())
+            .flat_map(super::model::Session::commands)
         {
             let Some(request) = command.intent.selection_request() else {
                 continue;
@@ -468,7 +468,7 @@ impl ConversationStore {
                 match options.open(&backup) {
                     Ok(mut file) => file
                         .write_all(&original)
-                        .and_then(|_| file.sync_all())
+                        .and_then(|()| file.sync_all())
                         .map_err(|e| e.to_string())?,
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                         let mut retained = Vec::new();
@@ -506,7 +506,7 @@ impl ConversationStore {
             }
             let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
             file.write_all(&bytes)
-                .and_then(|_| file.sync_all())
+                .and_then(|()| file.sync_all())
                 .map_err(|e| e.to_string())?;
             fs::rename(&temporary, &self.path).map_err(|e| e.to_string())?;
             #[cfg(unix)]
@@ -557,7 +557,11 @@ impl Autosave {
         plan: Option<crate::planner::SavedDraft>,
     ) -> Result<bool> {
         let mut acknowledged = false;
-        if self.pending.as_ref().is_some_and(|job| job.is_finished()) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
             let result = runtime
                 .block_on(self.pending.take().unwrap())
                 .map_err(|_| "Conversation save worker stopped")??;

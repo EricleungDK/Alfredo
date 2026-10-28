@@ -648,7 +648,7 @@ pub struct TaskStore {
 }
 
 fn text_valid(text: &str, limit: usize) -> bool {
-    !text.trim().is_empty() && text.len() <= limit && !text.chars().any(|c| c.is_control())
+    !text.trim().is_empty() && text.len() <= limit && !text.chars().any(char::is_control)
 }
 
 pub(crate) fn regular_file(path: &Path, create: bool, write: bool) -> Result<File> {
@@ -1246,7 +1246,7 @@ impl TaskStore {
             {
                 Ok(mut file) => {
                     file.write_all(&original)
-                        .and_then(|_| file.sync_all())
+                        .and_then(|()| file.sync_all())
                         .map_err(|e| e.to_string())?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -1820,12 +1820,12 @@ impl TaskStore {
                     .ok_or_else(|| unknown_task(*task))?;
                 match action {
                     Action::Approve { .. } if item.status == TaskStatus::Proposed => {
-                        item.status = TaskStatus::Approved
+                        item.status = TaskStatus::Approved;
                     }
                     Action::Cancel { .. }
                         if matches!(item.status, TaskStatus::Proposed | TaskStatus::Approved) =>
                     {
-                        item.status = TaskStatus::Cancelled
+                        item.status = TaskStatus::Cancelled;
                     }
                     Action::Approve { .. } => {
                         return Err(format!(

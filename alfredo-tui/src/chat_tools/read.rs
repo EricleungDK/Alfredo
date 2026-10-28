@@ -1,8 +1,9 @@
-//! Read tier: read_file, list_files, grep on the Coding Workspace working tree.
+//! Read tier: `read_file`, `list_files`, grep on the Coding Workspace working tree.
 use super::{
     budget, display, excluded, git_read, open_confined, resolve, text_arg, Tier, Tool, MAX_OUTPUT,
 };
 use serde_json::{json, Value};
+use std::fmt::Write as _;
 use std::{
     collections::HashMap,
     io::Read,
@@ -10,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Largest file read_file or grep opens, in bytes.
+/// Largest file `read_file` or grep opens, in bytes.
 const MAX_FILE: u64 = 4 * 1024 * 1024;
 /// Files listed before the listing is cut.
 const MAX_ENTRIES: usize = 500;
@@ -144,10 +145,10 @@ pub(crate) fn read_file_within(
         }
         if !out.is_empty() {
             // Stop before it; the next call starts at this line and makes progress.
-            out.push_str(&format!(
+            let _ = write!(out,
                 "[truncated at line {number} of {total}; call read_file with start_line={} to continue]",
                 number + 1
-            ));
+            );
             return Ok(out);
         }
         // The line alone exceeds the budget: show its start, cut at a char boundary.
@@ -160,17 +161,18 @@ pub(crate) fn read_file_within(
         }
         out.push_str(&prefix);
         out.push_str(&line[..end]);
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\n[line {} is {} bytes; showed the first {end}]",
             number + 1,
             line.len()
-        ));
+        );
         if number + 1 < total {
-            out.push_str(&format!(
+            let _ = write!(out,
                 "\n[truncated at line {} of {total}; call read_file with start_line={} to continue]",
                 number + 1,
                 number + 2
-            ));
+            );
         }
         return Ok(out);
     }
@@ -190,7 +192,7 @@ fn walk(root: &Path, start: &Path, limit: usize, skip_noise: bool) -> (Vec<PathB
             continue;
         };
         let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
-        entries.sort_by_key(|entry| entry.file_name());
+        entries.sort_by_key(std::fs::DirEntry::file_name);
         let mut dirs = Vec::new();
         for entry in entries {
             visits += 1;
@@ -482,10 +484,11 @@ fn list_files(root: &Path, arguments: &Value) -> Result<String, String> {
     if full.is_file() {
         let shown = display(root, &full);
         if glob.as_ref().is_some_and(|glob| !glob.matches(&shown)) {
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "no files match glob {:?}",
                 glob.as_ref().map_or("", |g| g.text.as_str())
-            ));
+            );
             return Ok(out);
         }
         out.push_str(&shown);
@@ -506,21 +509,24 @@ fn list_files(root: &Path, arguments: &Value) -> Result<String, String> {
         }
     }
     if let Some(note) = note {
-        out.push_str(&format!("[{note}]\n"));
+        let _ = writeln!(out, "[{note}]");
     }
     if files.is_empty() {
         match &glob {
-            Some(glob) => out.push_str(&format!("no files match glob {:?}", glob.text)),
+            Some(glob) => {
+                let _ = write!(out, "no files match glob {:?}", glob.text);
+            }
             None => out.push_str("no files"),
         }
         return Ok(out);
     }
     out.extend(files.iter().map(|file| display(root, file) + "\n"));
     if cut {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "[truncated: first {} files; list a subdirectory with path]",
             files.len()
-        ));
+        );
     }
     Ok(out)
 }
@@ -571,7 +577,7 @@ fn grep_within(
     }
     let mut out = unknown_note(arguments, &["pattern", "path", "ignore_case", "glob"]);
     if let Some(note) = note {
-        out.push_str(&format!("[{note}]\n"));
+        let _ = writeln!(out, "[{note}]");
     }
     let mut matches = 0;
     'files: for file in &files {
@@ -608,7 +614,7 @@ fn grep_within(
             }
             matches += 1;
             let shown: String = line.chars().take(MAX_LINE).collect();
-            out.push_str(&format!("{}:{}:{shown}\n", display(root, file), number + 1));
+            let _ = writeln!(out, "{}:{}:{shown}", display(root, file), number + 1);
         }
     }
     if matches == 0 && !cut && !stopped {
@@ -619,19 +625,21 @@ fn grep_within(
         return Ok(out);
     }
     if cut {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "[truncated: first {matches} matches; narrow with path or a longer pattern]"
-        ));
+        );
     }
     if stopped {
         if cut {
             out.push('\n');
         }
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "[stopped: scanned {:.1} MiB in {:.1} s; narrow with path]",
             scanned as f64 / (1024.0 * 1024.0),
             started.elapsed().as_secs_f64()
-        ));
+        );
     }
     Ok(out)
 }

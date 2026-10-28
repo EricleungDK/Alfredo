@@ -699,7 +699,7 @@ pub async fn run(
         let remaining = Duration::from_secs(DEADLINE_SECONDS).saturating_sub(started.elapsed());
         let result = tokio::select! {
             result = &mut scenario => result,
-            _ = tokio::time::sleep(remaining) => { cancel.store(true, Ordering::SeqCst); scenario.await }
+            () = tokio::time::sleep(remaining) => { cancel.store(true, Ordering::SeqCst); scenario.await }
         };
         match result {
             Ok(result) => report.cases[index].result = Some(result),

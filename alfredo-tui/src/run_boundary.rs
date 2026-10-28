@@ -68,7 +68,7 @@ fn write_bounded(path: &Path, value: &impl Serialize, maximum: usize) -> Result<
     #[cfg(all(test, target_os = "linux"))]
     publication_crash_tests::pause_result_write(path, &bytes, true);
     file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
+        .and_then(|()| file.sync_all())
         .map_err(|e| e.to_string())?;
     #[cfg(unix)]
     File::open(parent)
