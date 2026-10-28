@@ -1347,9 +1347,11 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .env("LC_ALL", "C")
                 .env("GIT_PAGER", "cat")
+                .env("GIT_NO_LAZY_FETCH", "1")
                 .arg("-C")
                 .arg(root);
             // Pinned like the local writes: a push cannot be redirected either (issue #359).
+            // The push keeps its own transport policy: not LOCAL_ONLY_GIT_ARGS (#467).
             git_read::pin_git_dir(&mut command, root, &verified)
                 .arg("--no-pager")
                 .args(crate::worker::HARDENED_GIT_ARGS)

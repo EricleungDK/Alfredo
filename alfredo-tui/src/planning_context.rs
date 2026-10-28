@@ -44,20 +44,34 @@ pub(crate) fn path_valid(path: &str) -> bool {
 /// `/`-separated path in any case; every rule is tested on each lowercased path component,
 /// so a directory such as `.aws/` or `.ssh/` excludes everything under it.
 ///
-/// - Directories: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`.
-/// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `secrets.y*ml`
-///   (starts `secrets.y`, ends `ml`).
+/// - Directories: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.azure`, `.password-store`
+///   (everything under them), and `gh` under `.config` (`.config/gh`).
+/// - Directory-scoped files: `.docker/config.json`, `.cargo/credentials` and
+///   `.cargo/credentials.toml`, `.gem/credentials`. Only those names: `.docker/daemon.json`
+///   and `.cargo/config.toml` stay readable.
+/// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
+///   `kubeconfig.yaml`, `kubeconfig.yml`, `application_default_credentials.json`,
+///   `secrets.y*ml` (starts `secrets.y`, ends `ml`).
 /// - Name prefixes: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa` (private keys and
-///   their `.pub`/backup siblings; a name that merely starts so is refused too), and
-///   `credentials` with a `.json` ending (`credentials*.json`).
+///   their `.pub`/backup siblings; a name that merely starts so is refused too),
+///   `credentials` with a `.json` ending (`credentials*.json`), `service-account` and
+///   `client_secret` with a `.json` ending (`service-account*.json`, `client_secret*.json`).
 /// - Suffixes: `.pem`, `.key`, `.p12`, `.pfx`, `.env`, `.keystore`, `.jks`, `.tfvars`,
-///   `.tfvars.json`.
+///   `.tfvars.json`, `.tfstate`, `.tfstate.backup`, `.p8`, `.ppk`, `.gpg`.
+/// - Timestamped Terraform backups: a name containing `.tfstate.` and ending `.backup`
+///   (`terraform.tfstate.1700000000.backup`).
 ///
 /// Bare `credentials` and `secrets.*` names other than the two above stay readable.
+/// Directory-scoped rules look at the component directly above the name, so a nested
+/// `sub/.docker/config.json` is refused too.
 pub(crate) fn secret(path: &str) -> bool {
-    path.split('/').any(|raw| {
-        let lower = raw.to_lowercase();
-        let part = lower.as_str();
+    let lower = path.to_lowercase();
+    let parts: Vec<&str> = lower.split('/').collect();
+    parts.iter().enumerate().any(|(index, &part)| {
+        // The component directly above this one, for the rules scoped to a directory.
+        let parent = index.checked_sub(1).map(|up| parts[up]);
+        let json = Path::new(part).extension().is_some_and(|ext| ext == "json");
         matches!(
             part,
             ".git"
@@ -65,17 +79,36 @@ pub(crate) fn secret(path: &str) -> bool {
                 | ".gnupg"
                 | ".aws"
                 | ".kube"
+                | ".azure"
+                | ".password-store"
                 | ".npmrc"
                 | ".netrc"
                 | ".pgpass"
                 | ".git-credentials"
-        ) || part.starts_with(".env")
+                | ".pypirc"
+                | ".htpasswd"
+                | ".vault-token"
+                | ".s3cfg"
+                | ".boto"
+                | ".dockercfg"
+                | "kubeconfig"
+                | "kubeconfig.yaml"
+                | "kubeconfig.yml"
+                | "application_default_credentials.json"
+        ) || (parent == Some(".config") && part == "gh")
+            || (parent == Some(".docker") && part == "config.json")
+            || (parent == Some(".cargo") && matches!(part, "credentials" | "credentials.toml"))
+            || (parent == Some(".gem") && part == "credentials")
+            || (part.contains(".tfstate.") && part.ends_with(".backup"))
+            || part.starts_with(".env")
             || (part.starts_with("secrets.y") && part.ends_with("ml"))
             || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
                 .iter()
                 .any(|prefix| part.starts_with(prefix))
-            || (part.starts_with("credentials")
-                && Path::new(part).extension().is_some_and(|ext| ext == "json"))
+            || (["credentials", "service-account", "client_secret"]
+                .iter()
+                .any(|prefix| part.starts_with(prefix))
+                && json)
             || [
                 ".pem",
                 ".key",
@@ -86,6 +119,11 @@ pub(crate) fn secret(path: &str) -> bool {
                 ".jks",
                 ".tfvars",
                 ".tfvars.json",
+                ".tfstate",
+                ".tfstate.backup",
+                ".p8",
+                ".ppk",
+                ".gpg",
             ]
             .iter()
             .any(|suffix| part.ends_with(suffix))
@@ -558,6 +596,95 @@ mod tests {
             "rsa_parser.rs",
             "tfvars.md",
             "config/app.toml",
+        ] {
+            assert!(!secret(path), "{path} must stay readable");
+        }
+    }
+
+    /// Issue #471: credential files outside the first list (registry, Terraform,
+    /// cloud and vault tokens, service-account keys), in nested and case-varied forms.
+    #[test]
+    fn secret_covers_issue_471_credential_files() {
+        for path in [
+            ".pypirc",
+            "home/.PyPIRC",
+            ".htpasswd",
+            ".vault-token",
+            ".s3cfg",
+            ".boto",
+            ".dockercfg",
+            "kubeconfig",
+            "deploy/Kubeconfig",
+            "kubeconfig.yaml",
+            "deploy/kubeconfig.yml",
+            "application_default_credentials.json",
+            "gcloud/application_default_credentials.json",
+            "service-account.json",
+            "keys/service-account-prod.json",
+            "client_secret.json",
+            "client_secret_123.json",
+            "AuthKey_X.p8",
+            "key.ppk",
+            "backup/x.gpg",
+            "terraform.tfstate",
+            "terraform.tfstate.backup",
+            "terraform.tfstate.1700000000.backup",
+            "infra/terraform.tfstate.42.BACKUP",
+            "infra/prod.tfstate",
+            "Terraform.TFState",
+            ".docker/config.json",
+            "sub/.docker/config.json",
+            ".DOCKER/CONFIG.JSON",
+            ".cargo/credentials",
+            ".cargo/credentials.toml",
+            "sub/.cargo/Credentials.TOML",
+            ".gem/credentials",
+            ".config/gh/hosts.yml",
+            ".config/gh/config.yml",
+            "home/.config/gh/nested/x.txt",
+            ".azure/accessTokens.json",
+            ".azure/azureProfile.json",
+            ".password-store/x.gpg",
+            ".password-store/notes.txt",
+        ] {
+            assert!(secret(path), "{path} must be a secret");
+            assert!(excluded(path), "{path} must be excluded");
+        }
+    }
+
+    /// Issue #471 near misses: the directory-scoped rules only cover the named files
+    /// (`.docker/config.json`, `.cargo/credentials*`, `.gem/credentials`), and the name
+    /// rules need an exact name, suffix or `.json` ending.
+    #[test]
+    fn secret_leaves_issue_471_near_misses_alone() {
+        for path in [
+            "src/state.rs",
+            "terraform.md",
+            "docs/terraform.md",
+            "terraform.tfstate.md",
+            "terraform.tfstate.backup.md",
+            "docs/terraform.tfstate.notes.txt",
+            "config.json",
+            "docs/config.json",
+            ".docker/daemon.json",
+            ".docker/config.json.md",
+            "docs/.docker/readme.md",
+            ".cargo/config.toml",
+            ".cargo/config",
+            "src/key.rs",
+            "docs/kubeconfig.md",
+            "kubeconfig.md",
+            "service-account.md",
+            "client_secret.md",
+            "src/boto.rs",
+            "AuthKey_X.p8.md",
+            "docs/gpg.md",
+            ".gem/config",
+            ".config/ghost.md",
+            ".config/gh.md",
+            ".azure.md",
+            "docs/password-store.md",
+            "gcloud/config.json",
         ] {
             assert!(!secret(path), "{path} must stay readable");
         }
