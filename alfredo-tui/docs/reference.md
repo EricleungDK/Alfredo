@@ -700,7 +700,7 @@ a task depending on existing earlier tasks, `/permit ID JSON` to set its exact
 files and check, `/approve ID` to approve it (refused until a policy exists), or
 `/cancel-task ID` to cancel it. `/tasks` and F2 show the queue; `/chat` or F2 returns
 to the conversation. A command typed without its arguments prints its `Usage:` line and
-changes nothing. `/refresh` reads the latest committed state. Errors preserve
+changes nothing. `/refresh` reads the latest committed state; a terminal that shows its side pane (wide enough, 88 columns or more) also re-reads it about once a second, so tasks another terminal writes appear without it. Errors preserve
 the last acknowledged queue; `/retry-task` repeats the exact failed request.
 Commands entered here are handled by Rust directly and never sent to a model.
 

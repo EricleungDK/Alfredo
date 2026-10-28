@@ -171,8 +171,7 @@ pub fn background_refresh_due(
     pane_shown: bool,
     since_last: std::time::Duration,
 ) -> bool {
-    let _ = pane_shown;
-    (tasks_visible || has_workers || dispatch)
+    (pane_shown || tasks_visible || has_workers || dispatch)
         && since_last
             >= if dispatch {
                 std::time::Duration::from_millis(250)
