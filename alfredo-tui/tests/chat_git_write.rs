@@ -569,6 +569,8 @@ fn repo_with_ignore_none_submodule(repo: &Repo) -> PathBuf {
     let source = repo.base.join("sub-source");
     fs::create_dir_all(&source).unwrap();
     git(&source, &["init", "-q", "-b", "main"]);
+    git(&source, &["config", "user.name", "Owner"]);
+    git(&source, &["config", "user.email", "owner@example.com"]);
     fs::write(source.join("lib.txt"), "lib\n").unwrap();
     git(&source, &["add", "."]);
     git(&source, &["commit", "-q", "-m", "sub initial"]);
