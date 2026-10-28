@@ -1333,6 +1333,24 @@ fn a_committed_mailmap_is_not_applied_to_git_log() {
     );
 }
 
+/// Issue #474 (review): a FIFO `.mailmap` in the worktree is read by `git log` when the
+/// repository config sets `log.mailmap`; `log.mailmap=false` keeps it from stalling the call.
+#[test]
+fn a_fifo_mailmap_in_the_worktree_never_stalls_git_log() {
+    let repo = Repo::new();
+    let fifo = repo.root.join(".mailmap");
+    mkfifo(&fifo);
+    let _release = Unblock {
+        fifo,
+        base: repo.root.clone(),
+    };
+    let mut config = fs::read_to_string(repo.root.join(".git/config")).unwrap();
+    config.push_str("[log]\n\tmailmap = true\n");
+    fs::write(repo.root.join(".git/config"), config).unwrap();
+    let output = dispatch_promptly(&repo.root, "git_log");
+    assert!(output.contains("initial commit"), "{output}");
+}
+
 /// Issue #474 (3): a regular `core.excludesFile` in the repository config does not refuse
 /// `git_status`; git does not read it (the tools override the key), which the listing shows.
 #[test]

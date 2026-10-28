@@ -611,11 +611,12 @@ fn hardened_command(root: &Path) -> Result<Command, String> {
 }
 
 /// Overrides for the config keys through which the repository's own config names a file git
-/// opens by itself (issue #474): an attributes file, a mailmap, an excludes file. Any of them
-/// can be a FIFO or device that stalls the call to its time limit. They are emptied, so
+/// opens by itself (issue #474): an attributes file, a mailmap, an excludes file, a diff
+/// order file. Any of them
+/// can be a FIFO or device that stalls the call to its time limit. They are pointed at the null device, so
 /// the repository's choice is never opened; a caller that vets an excludes file passes its own
 /// `-c core.excludesFile=` after these, which wins.
-const REPOSITORY_FILE_KEYS: [&str; 8] = [
+const REPOSITORY_FILE_KEYS: [&str; 10] = [
     "-c",
     "core.attributesFile=/dev/null",
     "-c",
@@ -624,6 +625,9 @@ const REPOSITORY_FILE_KEYS: [&str; 8] = [
     "mailmap.file=/dev/null",
     "-c",
     "log.mailmap=false",
+    // An empty value fails ("failed to read orderfile ''"), so the null device it is.
+    "-c",
+    "diff.orderFile=/dev/null",
 ];
 
 /// Tracked and untracked-but-not-ignored files under `rel` (a workspace-relative `/` path,
