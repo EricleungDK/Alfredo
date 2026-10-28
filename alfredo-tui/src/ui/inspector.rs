@@ -328,7 +328,8 @@ fn work_detail(
     // At most two title lines; long repair titles carry whole check output.
     let title_width = width.saturating_sub(head.width());
     let mut title = wrap_words(&single_line(&task.title), title_width);
-    if title.len() > 2 {
+    let clipped = title.len() > 2;
+    if clipped {
         title.truncate(2);
         title[1] = truncate(&format!("{} …", title[1]), title_width);
     }
@@ -398,6 +399,18 @@ fn work_detail(
     }
     if let Some(parent) = task.repair_of {
         lines.extend(labeled("Repair", &format!("of #{parent}"), width, normal));
+        // The cut title ends where the check's key error line starts: show that line.
+        if let Some(failure) = clipped
+            .then(|| crate::autopilot::title_failure_line(&single_line(&task.title)))
+            .flatten()
+        {
+            lines.extend(labeled(
+                "Failure",
+                &failure,
+                width,
+                Style::default().fg(theme.color(Tone::Red)),
+            ));
+        }
     }
     if !matches!(task.status, TaskStatus::Running)
         && (task.status != TaskStatus::Accepted || task.repair_of.is_some())
