@@ -243,6 +243,30 @@ class HeadlessSmoke(unittest.TestCase):
             self.assertEqual((code, out), (2, ''), err)
             self.assertIn(message, err)
 
+    def test_fifo_file_keys_in_repository_config_are_refused_before_any_worker_or_repair(self):
+        # #509: a FIFO named by core.excludesFile & co. would stall host git to its deadline.
+        for key in ('core.excludesFile', 'core.attributesFile', 'mailmap.file', 'diff.orderFile'):
+            with self.subTest(key=key):
+                fifo = self.workspace / '.git' / 'x.fifo'
+                fifo.unlink(missing_ok=True)
+                os.mkfifo(fifo)
+                self.git('config', key, str(fifo))
+                self.addCleanup(subprocess.run, ['git', '-C', str(self.workspace), 'config', '--unset', key])
+                process = self.start('--headless')
+                try:
+                    out, err = process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    out, err = process.communicate()
+                    self.fail(f'/go did not stop within 5 s\nstderr: {err}')
+                self.assertIn(process.returncode, (1, 2), err)
+                self.assertIn(f'"{key.lower()}" is set', err)
+                self.assertNotIn('worker failed', err)
+                self.assertNotIn('repair #', err)
+                self.assertFalse({'CALC', 'APP', 'REPAIR'} & set(self.fixture.markers()), self.fixture.markers())
+                self.git('config', '--unset', key)
+                fifo.unlink()
+
     def test_interactive_refusal_without_a_terminal_names_headless(self):
         code, out, err = self.run_headless()
         self.assertEqual((code, out), (1, ''))
