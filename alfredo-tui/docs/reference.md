@@ -1732,23 +1732,25 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   copied from them. Git runs only in the workspace itself (`GIT_CEILING_DIRECTORIES`),
   a call is stopped after 15 s, and when the repository config defines filter drivers or
   includes, `git_status` and working-tree or staged diffs are refused (they would run the
-  repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work.
+  repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work
+  unless the config has `include.path` or `includeIf`, which refuses them too (an include
+  target that is a FIFO would stall git); this is deliberate, also for identity `includeIf`
+  setups.
   A config too large to check is refused the same way.
   Git also refuses a `.git` that points at another repository (a gitfile, a `commondir`
   file, or `objects/info/alternates` into another repository); a linked worktree of the
   workspace's own repository is read. The control files git reads (`gitdir`,
   `objects/info/alternates`) must be regular files: a FIFO, device or link there is refused
   at once, never waited on, and links under `logs/` are refused like those under `refs/` and
-  `info/`. Before git runs, a FIFO, socket, device or link in the top level of the git
-  directory and common directory, or anywhere under `refs`, `info`, `logs` or an object
-  store, is refused too (git's `fsmonitor--daemon.ipc` socket in a git directory is
-  allowed), as is a
-  workspace with no `.git`, no `HEAD` or no `objects/` and `refs/` (git would read the root
-  as a bare repository). The gitfile (`gitdir: ` prefix, only trailing CR/LF dropped) and
+  `info/`. Before git runs, a FIFO, socket, device or link anywhere under the git
+  directory and common directory (including `rebase-merge/`, `sequencer/`, `modules/` and
+  `worktrees/*`), or under an object store, is refused too; git's `fsmonitor--daemon.ipc`
+  socket in a git directory is allowed, and `hooks/` is not checked because git never runs
+  hooks here. A workspace with no `.git`, no `HEAD` or no `objects/` and `refs/` is refused
+  as well (git would read the root as a bare repository). The gitfile (`gitdir: ` prefix, only trailing CR/LF dropped) and
   alternates lines (quoted or whitespace-padded lines are refused) are read as git reads
   them. This start-up check is a best-effort fast path; the 15 s limit is the backstop for
-  anything it does not foresee (for example a FIFO in other subdirectories such as
-  `rebase-merge/`, `sequencer/` or `modules/`, or behind an `include.path`). That newer git opens the alternates file at start-up was inferred from CI.
+  anything it does not foresee. That newer git opens the alternates file at start-up was inferred from CI.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to. Results are also budgeted to the room left. With
   `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt
