@@ -1073,9 +1073,10 @@ async fn check_that_renames_an_unapproved_tracked_file_onto_an_approved_name_is_
     );
 }
 
-/// #518: a tracked file whose name holds a newline, deleted by the check, is refused even
-/// though each line of that name is an approved path. The guard reads NUL-terminated names,
-/// so the name stays one path.
+/// #518: end to end, a tracked file whose name holds a newline, deleted by the check, is refused
+/// even though each line of that name is an approved path. The `-z` split itself is guarded by
+/// the in-crate test `changed_tracked_paths_names_both_sides_of_a_rename_and_keeps_a_newline_name_whole`:
+/// git quotes this name, so this test stays green when only the split changes.
 #[tokio::test]
 async fn check_that_deletes_a_tracked_file_named_with_a_newline_is_refused() {
     let fixture = Fixture::new();
@@ -1114,6 +1115,7 @@ async fn check_that_deletes_a_tracked_file_named_with_a_newline_is_refused() {
         "Check modified tracked files outside approved paths; changes retained for inspection"
     );
 }
+
 #[test]
 fn terminal_shows_waiting_worker_and_cancellation_until_durable_result() {
     use alfredo_tui::{model::App, task_control::TaskControl, ui};
