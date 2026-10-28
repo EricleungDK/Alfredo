@@ -91,6 +91,12 @@ class SandboxArgvTests(unittest.TestCase):
         for flag in ('--unshare-all', '--unshare-net', '--die-with-parent', '--new-session'):
             self.assertIn(flag, self.argv)
 
+    def test_drops_every_capability_before_the_command(self):
+        # Issue #517: as root, bwrap keeps CAP_SYS_ADMIN unless every capability is dropped.
+        separator = self.argv.index('--')
+        prefix = self.argv[:separator]
+        self.assertIn(('--cap-drop', 'ALL'), list(zip(prefix, prefix[1:])), prefix)
+
     def test_root_is_a_tmpfs_with_fresh_dev_and_proc(self):
         i = self.argv.index('--tmpfs')
         self.assertEqual('/', self.argv[i + 1])
