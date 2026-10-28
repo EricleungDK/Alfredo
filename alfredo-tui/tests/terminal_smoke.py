@@ -748,6 +748,69 @@ class ModelPicker(unittest.TestCase):
             finally:
                 terminal.close()
 
+    def test_at_path_keys_echo_quickly_in_a_large_repository(self):
+        # Issue #524: the lookup runs off the key path, so keys echo at once, a list for
+        # an older draft is never shown, and a prefix past the 5000th file still lists.
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-big-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-big-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            for d in range(100):
+                Path(repo, f'd{d}').mkdir()
+                for f in range(100):
+                    Path(repo, f'd{d}', f'file{f}.txt').write_text('x\n')
+            subprocess.run(git + ['add', '.'], check=True)
+            subprocess.run(git + ['commit', '-q', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], repo, env)
+
+            def drain(quiet=0.15):
+                while select.select([terminal.master], [], [], quiet)[0]:
+                    chunk = os.read(terminal.master, 65536)
+                    terminal.output.extend(chunk)
+                    if b'\x1b[6n' in chunk:
+                        os.write(terminal.master, b'\x1b[1;1R')
+
+            def echo_ms(byte):
+                drain()
+                started = time.monotonic()
+                terminal.write(byte)
+                while True:
+                    if select.select([terminal.master], [], [], 5)[0]:
+                        chunk = os.read(terminal.master, 65536)
+                        terminal.output.extend(chunk)
+                        if b'\x1b[6n' in chunk:
+                            os.write(terminal.master, b'\x1b[1;1R')
+                        return (time.monotonic() - started) * 1000
+                    self.fail('no echo within 5 s')
+
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                drain(0.5)
+                timings = [echo_ms(byte.encode()) for byte in '@d1/file1']
+                timings.sort()
+                p95 = timings[min(len(timings) - 1, int(len(timings) * 0.95))]
+                print(f'at-path key echo ms (sorted): {[round(t, 1) for t in timings]} p95={p95:.1f}')
+                self.assertLess(p95, 75, f'key echo too slow: {timings}')
+                terminal.wait_for('Files ·')
+                terminal.write(b'\x15')
+                drain()
+                # Back-to-back keys while the lookup runs; the final draft's list wins.
+                started = time.monotonic()
+                terminal.write(b'@d1')
+                terminal.wait_for('Files ·', timeout=3)
+                print(f'at-path list after @d1: {(time.monotonic() - started) * 1000:.0f} ms')
+                terminal.write(b'00/file7')
+                terminal.wait_for('@d1')
+                terminal.write(b'\x15@d99/file7')
+                terminal.wait_for('@d99/file7.txt', timeout=5)
+                self.assertNotIn('@d1/', terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+
     def test_ctrl_j_and_alt_enter_insert_newlines_and_readline_motions_edit_the_draft(self):
         # Issue #351: ordinary terminals send Ctrl+J (LF) and Alt+Enter (ESC CR), never Shift+Enter.
         binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
