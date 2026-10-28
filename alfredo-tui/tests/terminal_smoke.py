@@ -421,7 +421,6 @@ class ChatHarnessContext(unittest.TestCase):
                 terminal.close()
                 server.shutdown()
 
-
     def test_slash_quit_and_slash_exit_quit_like_ctrl_q(self):
         # Issue #482: both aliases leave through the Ctrl+Q path and exit 0, not "Unknown command".
         binary = Path(os.environ.get('ALFREDO_TUI_BINARY',

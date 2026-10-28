@@ -65,6 +65,12 @@ impl ChatView {
     }
 }
 impl Workstation {
+    pub fn save_in_flight(&self) -> bool {
+        false
+    }
+    pub fn request_quit(&mut self, _quit_pending: &mut bool) -> bool {
+        true
+    }
     pub fn open(
         state: &Path,
         workspace: &Path,
