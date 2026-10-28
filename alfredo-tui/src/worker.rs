@@ -913,14 +913,21 @@ pub(crate) fn qualification_key(config: &str) -> Option<&str> {
 
 /// Keys that make git run a repository-chosen program or follow another file: filter
 /// drivers, includes, partial-clone promisors and their transport programs, ssh and proxy
-/// commands (#467).
+/// commands (#467), and the file-valued keys (#509: exclude, attributes, mailmap and diff
+/// order files) that git opens on `status`, `add` or `diff`, so a FIFO there stalls it.
 fn is_qualification_key(key: &str) -> bool {
     key.starts_with("filter.")
         || key.starts_with("include.")
         || key.starts_with("includeif.")
         || matches!(
             key,
-            "extensions.partialclone" | "core.sshcommand" | "core.gitproxy"
+            "extensions.partialclone"
+                | "core.sshcommand"
+                | "core.gitproxy"
+                | "core.excludesfile"
+                | "core.attributesfile"
+                | "mailmap.file"
+                | "diff.orderfile"
         )
         || (key.starts_with("remote.")
             && [".promisor", ".uploadpack", ".receivepack"]

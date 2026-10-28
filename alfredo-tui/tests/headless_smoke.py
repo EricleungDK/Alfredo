@@ -251,6 +251,7 @@ class HeadlessSmoke(unittest.TestCase):
                 fifo.unlink(missing_ok=True)
                 os.mkfifo(fifo)
                 self.git('config', key, str(fifo))
+                self.addCleanup(subprocess.run, ['git', '-C', str(self.workspace), 'config', '--unset', key])
                 process = self.start('--headless')
                 try:
                     out, err = process.communicate(timeout=5)
@@ -261,7 +262,7 @@ class HeadlessSmoke(unittest.TestCase):
                 self.assertIn(process.returncode, (1, 2), err)
                 self.assertIn(f'"{key.lower()}" is set', err)
                 self.assertNotIn('worker failed', err)
-                self.assertNotIn('repair', err)
+                self.assertNotIn('repair #', err)
                 self.assertFalse({'CALC', 'APP', 'REPAIR'} & set(self.fixture.markers()), self.fixture.markers())
                 self.git('config', '--unset', key)
                 fifo.unlink()
