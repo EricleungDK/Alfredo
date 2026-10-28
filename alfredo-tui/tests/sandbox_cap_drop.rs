@@ -13,6 +13,15 @@ use std::{
 
 static ID: AtomicU64 = AtomicU64::new(0);
 
+/// Removes a test workspace when the test ends, pass or fail.
+struct Cleanup(PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A Coding Workspace with a `.git` directory, as the chat sandbox binds it read-only.
 fn workspace(tag: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -69,6 +78,7 @@ fn a_sandboxed_command_keeps_its_workspace_writable() {
         return;
     }
     let root = workspace("writes");
+    let _cleanup = Cleanup(root.clone());
     let output = run_command(
         &root,
         "echo sandbox-ran && echo made > inside.txt && cat inside.txt",
@@ -94,6 +104,7 @@ fn a_sandboxed_command_cannot_remount_the_git_bind_writable_as_root() {
         return;
     }
     let root = workspace("remount");
+    let _cleanup = Cleanup(root.clone());
     let git = root.join(".git");
     let output = run_command(
         &root,
