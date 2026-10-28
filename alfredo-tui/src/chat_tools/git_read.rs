@@ -97,7 +97,7 @@ fn git_branch(root: &Path, arguments: &Value) -> Result<String, String> {
 }
 
 fn branch_output(root: &Path, _: &Value) -> Result<String, String> {
-    refuse_includes(root, INCLUDES_NOT_RUN)?;
+    refuse_partial_clone(root)?;
     let current = match git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
         Ok(name) => name.trim().to_string(),
         Err(_) => format!(
@@ -132,7 +132,7 @@ fn log_output(root: &Path, arguments: &Value) -> Result<String, String> {
             .min(MAX_COMMITS),
     };
     let count = format!("--max-count={count}");
-    refuse_includes(root, INCLUDES_NOT_RUN)?;
+    refuse_partial_clone(root)?;
     git(
         root,
         &[
@@ -178,7 +178,7 @@ fn diff_output(root: &Path, arguments: &Value) -> Result<String, String> {
     if target.is_none() {
         refuse_filters(root)?;
     } else {
-        refuse_includes(root, INCLUDES_NOT_RUN)?;
+        refuse_partial_clone(root)?;
     }
     let selector: Vec<&str> = selector.iter().map(String::as_str).collect();
     // Files renamed or copied from a secret are secret too: find them across the
@@ -382,11 +382,41 @@ pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
 /// [`refuse_filters`] with the listing read up to `limit` bytes within `deadline`. A cut or
 /// late listing is an error (run_bounded stops git), so the gate never trusts a prefix.
 fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), String> {
-    let command = git_command_within(root, &FILTER_KEYS_ARGS, clock)?;
+    refuse_keys_within(
+        root,
+        &FILTER_KEYS_ARGS,
+        limit,
+        clock,
+        &KeyRefusal {
+            checked: "filter drivers",
+            set: "which git would run or follow (filter drivers, includes, core.worktree, partial-clone or transport settings)",
+            not_run: NOT_RUN,
+        },
+    )
+}
+
+/// How a key gate words its refusals: what it checks for, what the keys do, and which tool
+/// calls are not run.
+struct KeyRefusal<'a> {
+    checked: &'a str,
+    set: &'a str,
+    not_run: &'a str,
+}
+
+/// Lists the config keys `args` selects and refuses when any is set. Fails closed.
+fn refuse_keys_within(
+    root: &Path,
+    args: &[&str],
+    limit: usize,
+    clock: Clock,
+    words: &KeyRefusal,
+) -> Result<(), String> {
+    let command = git_command_within(root, args, clock)?;
     let (status, out, error) = run_bounded(command, limit, clock.left())?;
     match status {
         None => Err(format!(
-            "repository config is too large to check for filter drivers; {NOT_RUN}"
+            "repository config is too large to check for {}; {}",
+            words.checked, words.not_run
         )),
         // Every listed key is a qualifying key, so any output refuses; the first three are named.
         Some(status) if status.success() => {
@@ -413,8 +443,10 @@ fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), 
                 count => format!(" and {count} more"),
             };
             Err(format!(
-                "repository config sets {}{more}, which git would run or follow (filter drivers, includes, core.worktree, partial-clone or transport settings); {NOT_RUN}",
-                named.join(", ")
+                "repository config sets {}{more}, {}; {}",
+                named.join(", "),
+                words.set,
+                words.not_run
             ))
         }
         // `--get-regexp` exits 1 when no key matches; a broken config exits 128.
@@ -425,11 +457,47 @@ fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), 
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or("git config failed");
             Err(format!(
-                "repository config cannot be read ({}); {NOT_RUN}",
-                first.trim().trim_start_matches("fatal: ")
+                "repository config cannot be read ({}); {}",
+                first.trim().trim_start_matches("fatal: "),
+                words.not_run
             ))
         }
     }
+}
+
+/// Config keys that make git lazy-fetch a missing object through a promisor remote, and so
+/// run that remote's transport program (`remote.<n>.uploadpack`, `core.sshCommand`, ...): the
+/// partial-clone switch and a promisor remote (issue #497). Only these, not every transport
+/// key, so a repository that is not a partial clone is never refused. Read as
+/// [`FILTER_KEYS_ARGS`] reads, command-scope lines skipped.
+const PARTIAL_CLONE_KEYS_ARGS: [&str; 5] = [
+    "config",
+    "--show-scope",
+    "--name-only",
+    "--get-regexp",
+    "^extensions\\.partialclone$|^remote\\..+\\.promisor$",
+];
+
+const PARTIAL_NOT_RUN: &str = "this git tool is not run on a partial clone";
+
+/// Refuse a partial clone for the calls that read objects but not [`refuse_filters`]
+/// (`git_log`, `git_diff` with a target): a missing object would make git lazy-fetch through
+/// the promisor remote and run the program the repository's config chose (issue #497). The
+/// hardened environment (`GIT_NO_LAZY_FETCH`, `protocol.allow=never`) stops the fetch on a
+/// git that honours it; this gate does not depend on the git version.
+pub(crate) fn refuse_partial_clone(root: &Path) -> Result<(), String> {
+    refuse_includes(root, INCLUDES_NOT_RUN)?;
+    refuse_keys_within(
+        root,
+        &PARTIAL_CLONE_KEYS_ARGS,
+        FILTER_KEYS_LIMIT,
+        call_clock(),
+        &KeyRefusal {
+            checked: "a partial clone",
+            set: "a partial clone that git would lazy-fetch through, running the remote's transport program (remote.<name>.uploadpack, core.sshCommand)",
+            not_run: PARTIAL_NOT_RUN,
+        },
+    )
 }
 
 /// Refuse when the repository config includes another file: git would open every include
