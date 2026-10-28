@@ -1236,6 +1236,7 @@ pub(crate) fn run_bounded(
     limit: usize,
     deadline: Duration,
 ) -> Result<(Option<ExitStatus>, Vec<u8>, String), String> {
+    use std::sync::mpsc;
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1243,27 +1244,33 @@ pub(crate) fn run_bounded(
         .spawn()
         .map_err(|error| format!("cannot start git: {error}"))?;
     let started = Instant::now();
+    // The readers hand their result over a channel, so this thread wakes the moment output
+    // ends instead of polling for it (issue #500).
     let stderr = child.stderr.take().map(|stderr| {
+        let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             // Lossy: a non-UTF-8 warning must still be seen by the listing check.
             let mut bytes = Vec::new();
             let _ = stderr.take(4096).read_to_end(&mut bytes);
-            String::from_utf8_lossy(&bytes).into_owned()
-        })
+            let _ = sender.send(String::from_utf8_lossy(&bytes).into_owned());
+        });
+        receiver
     });
     let Some(stdout) = child.stdout.take() else {
         stop(&mut child);
         return Err("cannot read git output".into());
     };
-    let reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+    let (sender, reader) = mpsc::channel();
+    std::thread::spawn(move || {
         let mut out = Vec::new();
-        stdout.take(limit as u64).read_to_end(&mut out)?;
-        Ok(out)
+        let read = stdout.take(limit as u64).read_to_end(&mut out);
+        let _ = sender.send(read.map(|_| out));
     });
     // Reading ends at the end of the output, or once `limit` bytes are in. A command that
     // holds its output open past the deadline, or whose round is cancelled or spent
     // (issue #257), is stopped here and is an error, never a partial result.
-    while !reader.is_finished() {
+    let mut pause = POLL_FIRST;
+    let read = loop {
         if let Some(note) = round_stop_note() {
             stop(&mut child);
             return Err(note);
@@ -1272,10 +1279,14 @@ pub(crate) fn run_bounded(
             stop(&mut child);
             return Err(deadline_error(deadline));
         }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    let out = match reader.join() {
-        Ok(Ok(out)) => out,
+        match reader.recv_timeout(pause) {
+            Ok(read) => break Some(read),
+            Err(mpsc::RecvTimeoutError::Timeout) => pause = next_pause(pause),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+        }
+    };
+    let out = match read {
+        Some(Ok(out)) => out,
         _ => {
             stop(&mut child);
             return Err("cannot read git output".into());
@@ -1285,6 +1296,7 @@ pub(crate) fn run_bounded(
         stop(&mut child);
         None
     } else {
+        let mut pause = POLL_FIRST;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
@@ -1302,20 +1314,38 @@ pub(crate) fn run_bounded(
                 stop(&mut child);
                 return Err(deadline_error(deadline));
             }
-            std::thread::sleep(Duration::from_millis(5));
+            wait_a_little(&mut pause);
         }
     };
     // stderr is only for messages: wait for it within the deadline, never past it.
-    let mut error = String::new();
-    if let Some(thread) = stderr {
-        while !thread.is_finished() && started.elapsed() <= deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        if thread.is_finished() {
-            error = thread.join().unwrap_or_default();
-        }
-    }
+    // A leftover child holding stderr open keeps this waiting up to the deadline (bounded).
+    let error = stderr
+        .and_then(|receiver| {
+            receiver
+                .recv_timeout(deadline.saturating_sub(started.elapsed()))
+                .ok()
+        })
+        .unwrap_or_default();
     Ok((status, out, error))
+}
+
+/// First pause between checks in `run_bounded`. Git usually answers within a millisecond,
+/// so a fixed pause of several milliseconds would be most of the call (issue #500).
+const POLL_FIRST: Duration = Duration::from_micros(100);
+
+/// Longest pause between checks: a slow command is still noticed within this of the
+/// deadline, and checking costs next to nothing.
+const POLL_MAX: Duration = Duration::from_millis(5);
+
+/// The pause after `pause`: twice as long, up to [`POLL_MAX`].
+fn next_pause(pause: Duration) -> Duration {
+    (pause * 2).min(POLL_MAX)
+}
+
+/// Sleep for `pause`, then lengthen it for the next check.
+fn wait_a_little(pause: &mut Duration) {
+    std::thread::sleep(*pause);
+    *pause = next_pause(*pause);
 }
 
 /// The error text when the round this call runs in was cancelled or is spent (issue #257).
@@ -1741,6 +1771,90 @@ mod tests {
         let (status, out, _) = run_bounded(command, 4096, DEADLINE).unwrap();
         assert_eq!(status.and_then(|status| status.code()), Some(3));
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn the_pause_between_checks_doubles_up_to_a_cap() {
+        let mut pause = POLL_FIRST;
+        let mut seen = vec![pause];
+        for _ in 0..8 {
+            pause = next_pause(pause);
+            seen.push(pause);
+        }
+        let micros: Vec<u128> = seen.iter().map(Duration::as_micros).collect();
+        assert_eq!(micros, [100, 200, 400, 800, 1600, 3200, 5000, 5000, 5000]);
+        assert_eq!(POLL_MAX, Duration::from_millis(5));
+    }
+
+    #[test]
+    fn waiting_sleeps_the_pause_and_lengthens_it() {
+        let mut pause = Duration::from_millis(20);
+        let started = Instant::now();
+        wait_a_little(&mut pause);
+        assert!(started.elapsed() >= Duration::from_millis(20));
+        assert_eq!(pause, POLL_MAX);
+        let mut pause = Duration::from_micros(300);
+        wait_a_little(&mut pause);
+        assert_eq!(pause, Duration::from_micros(600));
+    }
+
+    /// A command that closes stdout and never exits is killed at the deadline, and the
+    /// deadline is not overshot by more than a few poll pauses.
+    #[test]
+    fn a_command_that_closes_stdout_and_never_exits_is_killed_at_the_deadline() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec >&-; sleep 30"]);
+        let started = Instant::now();
+        let error = run_bounded(command, 4096, Duration::from_millis(200)).unwrap_err();
+        let took = started.elapsed();
+        assert!(error.contains("stopped"), "{error}");
+        assert!(took >= Duration::from_millis(200), "{took:?}");
+        assert!(took < Duration::from_secs(3), "{took:?}");
+    }
+
+    #[test]
+    fn stderr_is_returned_and_a_held_open_stderr_is_waited_for_only_to_the_deadline() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "echo out; echo warning >&2"]);
+        let (status, out, error) = run_bounded(command, 4096, DEADLINE).unwrap();
+        assert!(status.is_some_and(|status| status.success()));
+        assert_eq!(out, b"out\n");
+        assert_eq!(error, "warning\n");
+        // The command is done but a leftover child keeps stderr open for 2 s.
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 2 >/dev/null & exit 4"]);
+        let started = Instant::now();
+        let (status, _, error) = run_bounded(command, 4096, Duration::from_millis(300)).unwrap();
+        let took = started.elapsed();
+        assert_eq!(status.and_then(|status| status.code()), Some(4));
+        assert!(error.is_empty(), "{error}");
+        assert!(took >= Duration::from_millis(300), "{took:?}");
+        assert!(took < Duration::from_millis(1500), "{took:?}");
+    }
+
+    /// Issue #500: a command that exits at once must not pay a fixed polling floor; the
+    /// cold start runs several bounded git calls before the first frame. The old fixed 5 ms
+    /// sleep put a floor of 5 ms under every run however idle the box, and load only adds
+    /// time, so the fastest of 21 runs is the steady measure (on a quiet box the median is
+    /// under 3 ms too, but a busy one can push it past that).
+    #[test]
+    fn a_command_that_exits_at_once_returns_in_under_3_ms_median() {
+        let mut times = Vec::new();
+        for _ in 0..21 {
+            let started = Instant::now();
+            let (status, out, _) =
+                run_bounded(Command::new("/usr/bin/true"), 4096, DEADLINE).unwrap();
+            times.push(started.elapsed());
+            assert!(status.is_some_and(|status| status.success()));
+            assert!(out.is_empty());
+        }
+        times.sort();
+        assert!(
+            times[0] < Duration::from_millis(4),
+            "fastest of 21 runs was {:?} (median {:?})",
+            times[0],
+            times[10]
+        );
     }
 
     #[test]
