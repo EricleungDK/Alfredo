@@ -417,8 +417,8 @@ the text or after whitespace, a non-ASCII character or one of ``([{"'>:,;-|``, a
 next character is not whitespace; it closes at the next exactly-two `**` whose previous
 character is not whitespace. So `src/**/*.rs`, `2 ** 3`, `2**3`, `f(**kw, **o)` and
 `***both***` show every asterisk. An unclosed fence, `**` or backtick stays plain
-text (an open fence shows as an open code block while the reply streams). Your own messages are shown as typed.
-Control characters are dropped as before and bidi controls in a reply show as `<U+XXXX>`.
+text (an open fence shows as an open code block while the reply streams). Your own messages are shown as typed, except that invisible and control characters in them show as `<U+XXXX>` too.
+In a reply a zero-width joiner in an emoji sequence shows as `<U+200D>` and a variation selector as `<U+FE0F>`, as on the card. Control characters (such as ESC and BEL, except newline and tab) show as `<U+XXXX>`; bidi controls, zero-width and tag characters, line separators and other invisible characters in a reply show as `<U+XXXX>`, as on the approval card (issues #400, #436).
 
 ## Establish scope in conversation
 
@@ -1706,13 +1706,22 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 - **Secret files.** One list, used by every chat tool (`read_file`, `grep`, `list_files`,
   `write_file`, `edit_file`, `git_diff`, `git_commit`), by `@path` mentions and by planner
   context. Matching ignores case and applies to every path component:
-  `.git`, `.ssh`, `.gnupg`, `.aws` and `.kube` directories (everything under them);
-  `.env*` and `*.env` (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`,
-  `.git-credentials`; names starting `id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa`
-  (keys and their `.pub` copies); `credentials*.json`; `secrets.y*ml` (starts `secrets.y`, ends `ml`);
-  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars` and
-  `*.tfvars.json`. Names that only look similar stay readable, for example
-  `environment.rs`, `keys.md`, `credentials.md`, `secrets.md` and `ssh_client.rs`.
+  `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.azure` and `.password-store` directories
+  (everything under them); `.config/gh` (everything under it); `.env*` and `*.env`
+  (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+  `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
+  `kubeconfig.yaml`, `kubeconfig.yml` and `application_default_credentials.json`;
+  `.docker/config.json`, `.cargo/credentials`,
+  `.cargo/credentials.toml` and `.gem/credentials` (only these files in those
+  directories); names starting `id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa`
+  (keys and their `.pub` copies); `credentials*.json`, `service-account*.json` and
+  `client_secret*.json`; `secrets.y*ml` (starts `secrets.y`, ends `ml`);
+  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars`,
+  `*.tfvars.json`, `*.tfstate`, `*.tfstate.backup` and timestamped `*.tfstate.*.backup`,
+  `*.p8`, `*.ppk` and `*.gpg`. Names that
+  only look similar stay readable, for example `environment.rs`, `keys.md`,
+  `credentials.md`, `secrets.md`, `ssh_client.rs`, `terraform.md`, `.docker/daemon.json`
+  and `.cargo/config.toml`.
   Limits: the list matches names only; file content is never scanned. Git's rename and
   copy detection finds a secret's copy or rename within git's similarity threshold, in
   git_diff and in git_commit (staged files, and unstaged files that the commit adds, are
@@ -1730,13 +1739,19 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `--end-of-options`; `path` is a literal pathspec under the same exclusions. Diffs leave
   out secret files (the **Secret files** list above) and files renamed or
   copied from them. Git runs only in the workspace itself (`GIT_CEILING_DIRECTORIES`),
-  a call is stopped after 15 s, and when the repository config defines filter drivers or
-  includes, `git_status` and working-tree or staged diffs are refused (they would run the
-  repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work
-  unless the config has `include.path` or `includeIf`, which refuses them too (an include
-  target that is a FIFO would stall git); this is deliberate, also for identity `includeIf`
-  setups.
-  A config too large to check is refused the same way.
+  a call is stopped after 15 s, and when the repository config defines filter drivers,
+  includes, a partial clone (`extensions.partialclone`, `remote.*.promisor`), a remote's
+  `uploadpack` or `receivepack` program, `core.sshcommand`, `core.gitproxy` or a
+  `protocol.allow` / `protocol.<name>.allow` setting, `git_status`
+  and working-tree or staged diffs are refused (they would run the repository's clean
+  filters, or lazy-fetch through its transport); the refusal names the keys. Host git runs
+  with lazy fetch and every transport disabled (`GIT_NO_LAZY_FETCH`, `protocol.allow=never`),
+  so a missing object is an error, never a fetch. `git_log` and `git_diff` with `base` and
+  `target` still work unless the config has `include.path` or `includeIf`, which refuses them
+  too (an include target that is a FIFO would stall git); this is deliberate, also for identity
+  `includeIf` setups. A config too large to check is refused the same way. Host git
+  calls that `/go` makes at start (the uncommitted-changes check) share the same 15 s
+  limit; when git gives no answer in time, the start notice says so and the run goes on.
   Git also refuses a `.git` that points at another repository (a gitfile, a `commondir`
   file, or `objects/info/alternates` into another repository); a linked worktree of the
   workspace's own repository is read. The control files git reads (`gitdir`,
@@ -1820,7 +1835,7 @@ Approval (ADR 0004); there is no skip-approval mode.
 | `write_file` | `path`, `content` | Creates or replaces a UTF-8 text file (missing parent directories are created after approval and listed on the card as `new directories: src, src/util`; they are refused before asking when a parent exists as a file or symlink, or the path is `.git`, secret, generated or outside the workspace, or the first existing parent is read-only; at most 1 MiB); writes `content` exactly as given, so LF content replaces CRLF (the card says `line endings CRLF → LF`, `final newline removed` and so on instead of `(no line changes)`) |
 | `edit_file` | `path`, `old_text`, `new_text` | Replaces the one exact occurrence of `old_text`; zero or several matches are refused, as is an edit that changes nothing (identical `old_text` and `new_text`, or line-ending changes in an all-CRLF file; use `write_file` to change endings). In a file whose every line ends in CRLF, `old_text`/`new_text` are matched as LF text and the result keeps CRLF; a file mixing CRLF and LF is matched on exact bytes (the not-found error says so) and `new_text` is inserted as given |
 
-- **Invisible characters on the card.** Format characters (bidi overrides and isolates, zero-width and tag characters; issue #305) in an approval card or a `⚙` row show as `<U+XXXX>` instead of being drawn, so the card never looks different from what runs.
+- **Invisible characters on the card.** Format characters (bidi overrides and isolates, zero-width and tag characters; issue #305) and every Unicode default-ignorable character (variation selectors, Hangul fillers, Mongolian free variation selectors, tag characters; issue #468) in an approval card or a `⚙` row show as `<U+XXXX>` instead of being drawn, so the card never looks different from what runs. Every control character except newline and tab shows as `<U+XXXX>` too; a lone carriage return shows as `<U+000D>`, since Python, Node and YAML read it as a line break. A zero-width joiner inside an emoji shows as `<U+200D>`.
 - **Tabs on the card.** A tab in a diff line shows as `→` plus padding to the next 4-column stop (counted from the `+`/`-` column), so tab-indented code keeps its indent and an edit that only adds or removes a tab never shows two identical lines; a literal `→` shows as `<U+2192>` so it cannot pass for a tab (issue #404). The `args` line is unchanged. Transcript replies and expanded tool results expand tabs to the same stops without the arrow. The file written is unchanged.
 - **Read-only files.** `write_file` and `edit_file` refuse an existing file without the owner write bit (for example `chmod 444`) with `<path> is read-only; …`, before any approval card is raised and again before the write, and leave the file unchanged.
 
@@ -1944,7 +1959,10 @@ credentials). Each call pauses for Approval like a file edit.
   committable), remotes that are not a
   configured remote name (URLs and paths are refused), nothing to commit, an
   already-up-to-date merge or push, a detached HEAD for commit, merge and push, and
-  repositories whose config defines filter drivers, includes or `core.worktree`.
+  repositories whose config defines filter drivers, includes, `core.worktree`, a partial
+  clone (`extensions.partialclone`, `remote.*.promisor`), a remote's `uploadpack` or
+  `receivepack` program, `core.sshcommand`, `core.gitproxy` or a `protocol.allow` /
+  `protocol.<name>.allow` setting.
 - **Changed since the preview.** On approval HEAD, the current branch, local and
   remote-tracking refs, the index, working-tree status, the remote URLs and the
   repository config must match the preview; otherwise nothing runs and the model gets

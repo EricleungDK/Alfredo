@@ -104,7 +104,9 @@ fn scenario() -> Vec<String> {
 /// to four spaces (the golden had it vanish);
 /// re-captured for #399, which adds the `Ctrl+R retries` footer hint to the two failed-turn frames;
 /// re-captured for #393, which widens the chat footer's scroll hint to `PgUp/Dn/Home/End scroll`
-/// (the changed frames are the wide ones that show that hint; bodies are unchanged).
+/// (the changed frames are the wide ones that show that hint; bodies are unchanged);
+/// re-captured for #468 and #436: ESC and BEL in message 1 now show as `<U+001B>` and
+/// `<U+0007>` (controls are shown as code points), in the three frames that show that line.
 const GOLDEN: [&str; 21] = [
     "79e33b494ca7e0b0cb7efaab742759b360f99eee302a32277dc3072722b42b53",
     "d10d31cdc917e429a66da765248b31f13eed56bef302b23ce67adeef890a560a",
@@ -117,9 +119,9 @@ const GOLDEN: [&str; 21] = [
     "36846bf02582e75bf51e282bab99b4e75844967430d9f7507aeff9fea813fbd7",
     "fc4ca5b9376d952cbcf62f5e9fbb371c58c6e087223afd22f605894cf92a6cd7",
     "fc4ca5b9376d952cbcf62f5e9fbb371c58c6e087223afd22f605894cf92a6cd7",
-    "bfbbefefaaff5d19f25d0c8765b289619655e24648378a3206a689644a63fb39",
-    "aa6a34899781549760aa6bf14e88ea43b7f79b3584069a44a8c9b324360e241c",
-    "88fdba48d3cad1878c13c2b654f1e4303189df075d2b4c5e1dfa020e4a73184f",
+    "bbf69a63d98905924d0ce3c009d76e8623874e75457344bce82efb1d948429b6",
+    "3d898a4d31d2001109a6c08ca03481704939276a3ecc1015f0bfc8a9c0836d70",
+    "2a3b86b03b85ef7a357e80bb37fbcf46c5dd0422c005af241f17f6c4334eab60",
     "79e33b494ca7e0b0cb7efaab742759b360f99eee302a32277dc3072722b42b53",
     "67e61da96f70b321c2c04f48f2143c92268b82e19dff3bc4ed6d271c7eac2474",
     "27cbd2754954363982606a6a6fe9482ad1ac544d75073539149b60ffdf608378",
@@ -455,4 +457,91 @@ fn streaming_a_token_rebuilds_only_the_last_message() {
     let resized = app.sessions[0].transcript_cache_stats();
     assert_eq!(resized.builds, after.builds);
     assert_eq!(resized.height_passes, after.height_passes + 36);
+}
+
+/// Issue #436: tag characters, zero-width marks and line/paragraph separators in a reply
+/// show as `<U+XXXX>` in prose and inside fenced code, as the approval card shows them.
+#[test]
+fn invisible_code_points_in_replies_show_as_code_points() {
+    let prose = "ok\u{E0041}\u{E0042}\u{2028}done \u{200B}x **bold\u{200B}** `t\u{E0041}`";
+    let fenced = "```\ncode\u{E0041}\u{200B}\u{2028}end\n```";
+    let app = chat(&[("user", "x"), (BODY, &format!("{prose}\n{fenced}"))]);
+    let buffer = draw_buffer(&app, 80, 30);
+    for row in rows(&buffer) {
+        for symbol in row {
+            assert!(
+                !symbol
+                    .chars()
+                    .any(|c| matches!(c, '\u{E0041}' | '\u{E0042}' | '\u{200B}' | '\u{2028}')),
+                "raw symbol {symbol:?} in the buffer"
+            );
+        }
+    }
+    let text = row_text(&buffer).join("\n");
+    assert!(text.contains("ok<U+E0041><U+E0042><U+2028>done"), "{text}");
+    assert!(text.contains("code<U+E0041><U+200B><U+2028>end"), "{text}");
+    assert!(text.contains("<U+200B>x"), "{text}");
+}
+
+/// Issue #436: a `<U+XXXX>` marker next to `**` keeps the flanking rules, so the markers
+/// still pair and the text between them is bold.
+#[test]
+fn hidden_characters_beside_bold_markers_keep_the_bold() {
+    for (line, shown, bold) in [
+        ("**bold\u{200B}** end", "bold<U+200B> end", "bold"),
+        ("\u{E0041}**bold**", "<U+E0041>bold", "bold"),
+        ("see **qz\u{2028}wq** end", "see qz<U+2028>wq end", "qz"),
+    ] {
+        let app = chat(&[("user", "x"), (BODY, line)]);
+        let buffer = draw_buffer(&app, 60, 12);
+        let text = row_text(&buffer).join("\n");
+        assert!(text.contains(shown), "{line:?} shows {text}");
+        assert!(!text.contains("**"), "{line:?} kept its markers: {text}");
+        let cell = cell_of(&buffer, bold);
+        assert!(
+            cell.modifier.contains(Modifier::BOLD),
+            "{line:?}: {bold:?} not bold"
+        );
+    }
+}
+
+/// Issue #436 (guard): a user draft is shown through the same helper as replies, and CJK,
+/// accents, emoji and tab expansion must render exactly as before.
+#[test]
+fn a_user_draft_with_cjk_accents_emoji_and_tabs_renders_unchanged() {
+    let app = chat(&[("user", "你好 café 🙂\n\tx"), (BODY, "ok")]);
+    let buffer = draw_buffer(&app, 60, 30);
+    let text = row_text(&buffer).join("\n");
+    assert!(text.contains('你') && text.contains("café 🙂"), "{text}");
+    assert!(
+        text.contains("    x"),
+        "tab expanded to the next stop: {text}"
+    );
+    assert!(
+        !text.contains("<U+"),
+        "nothing escaped in plain text: {text}"
+    );
+}
+
+/// Issue #436 (decision): in a reply an emoji zero-width joiner and a variation selector show
+/// as `<U+200D>` and `<U+FE0F>`, as on the approval card; plain emoji, accents and CJK are
+/// unchanged.
+#[test]
+fn reply_emoji_joiners_and_selectors_show_as_code_points() {
+    let app = chat(&[(
+        "user",
+        "x",
+    ), (BODY, "fam \u{1F468}\u{200D}\u{1F469} heart \u{2764}\u{FE0F} smile \u{1F642} caf\u{E9} \u{4F60}")]);
+    let buffer = draw_buffer(&app, 80, 30);
+    let text = row_text(&buffer).join("\n");
+    assert!(text.contains("<U+200D>"), "{text}");
+    assert!(text.contains("<U+FE0F>"), "{text}");
+    assert!(
+        text.contains('\u{1F642}') && text.contains("caf\u{E9}") && text.contains('\u{4F60}'),
+        "{text}"
+    );
+    assert!(
+        !text.contains("\u{200D}") && !text.contains("\u{FE0F}"),
+        "{text}"
+    );
 }
