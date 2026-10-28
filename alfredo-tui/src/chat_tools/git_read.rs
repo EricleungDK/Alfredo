@@ -1659,6 +1659,27 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    /// Issue #500: a command that exits at once must not pay a fixed polling floor; the
+    /// cold start runs several bounded git calls before the first frame.
+    #[test]
+    fn a_command_that_exits_at_once_returns_in_under_3_ms_median() {
+        let mut times = Vec::new();
+        for _ in 0..21 {
+            let started = Instant::now();
+            let (status, out, _) =
+                run_bounded(Command::new("/usr/bin/true"), 4096, DEADLINE).unwrap();
+            times.push(started.elapsed());
+            assert!(status.is_some_and(|status| status.success()));
+            assert!(out.is_empty());
+        }
+        times.sort();
+        let median = times[10];
+        assert!(
+            median < Duration::from_millis(3),
+            "median of 21 runs was {median:?}"
+        );
+    }
+
     #[test]
     fn a_command_past_its_deadline_is_stopped_with_an_error() {
         let mut command = Command::new("/bin/sleep");
