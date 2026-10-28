@@ -1398,7 +1398,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                         KeyCode::Char('q' | 'c') if ctrl => {
-                            if request_quit(&mut work, &mut quit_pending) {
+                            if work.request_quit(&mut quit_pending) {
                                 break;
                             }
                         }
@@ -1410,7 +1410,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             work.app.sessions[index].remember_submission();
                             work.app.sessions[index].clear_draft();
-                            if request_quit(&mut work, &mut quit_pending) {
+                            if work.request_quit(&mut quit_pending) {
                                 break;
                             }
                         }
@@ -2653,33 +2653,6 @@ fn withdraw_pending_architect(
     );
     *pending = None;
     true
-}
-
-/// The shared quit request behind Ctrl+Q and `/quit`/`/exit`. Returns true when the main
-/// loop should leave now; otherwise it has started cancelling workers or noted the save wait.
-fn request_quit(work: &mut alfredo_tui::workstation::Workstation, quit_pending: &mut bool) -> bool {
-    use alfredo_tui::commands::{quit_step, QuitStep};
-    work.tasks.disable_dispatch();
-    match quit_step(
-        !work.tasks.workers.is_empty(),
-        work.tasks.writing || work.wayfinder.active(),
-        *quit_pending,
-    ) {
-        QuitStep::CancelWorkers => {
-            work.tasks.cancel_all();
-            *quit_pending = true;
-            work.app.notice =
-                "Cancelling workers; waiting for evidence receipts before exit".into();
-            false
-        }
-        QuitStep::WaitForSave => {
-            *quit_pending = true;
-            work.app.notice =
-                "Scope/task save pending; press quit again to exit with outcome unknown".into();
-            false
-        }
-        QuitStep::Leave => true,
-    }
 }
 
 /// Esc, and Ctrl+C during a running chat turn (issue #345): a pending action is denied

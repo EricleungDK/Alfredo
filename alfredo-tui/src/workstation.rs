@@ -65,11 +65,35 @@ impl ChatView {
     }
 }
 impl Workstation {
+    /// A scope operation or task write whose receipt a quit should wait for.
     pub fn save_in_flight(&self) -> bool {
-        false
+        self.tasks.writing || self.wayfinder.active()
     }
-    pub fn request_quit(&mut self, _quit_pending: &mut bool) -> bool {
-        true
+    /// The shared quit request behind Ctrl+Q and `/quit`/`/exit`. Returns true when the main
+    /// loop should leave now; otherwise it has started cancelling workers or noted the save wait.
+    pub fn request_quit(&mut self, quit_pending: &mut bool) -> bool {
+        use crate::commands::{quit_step, QuitStep};
+        self.tasks.disable_dispatch();
+        match quit_step(
+            !self.tasks.workers.is_empty(),
+            self.save_in_flight(),
+            *quit_pending,
+        ) {
+            QuitStep::CancelWorkers => {
+                self.tasks.cancel_all();
+                *quit_pending = true;
+                self.app.notice =
+                    "Cancelling workers; waiting for evidence receipts before exit".into();
+                false
+            }
+            QuitStep::WaitForSave => {
+                *quit_pending = true;
+                self.app.notice =
+                    "Scope/task save pending; press quit again to exit with outcome unknown".into();
+                false
+            }
+            QuitStep::Leave => true,
+        }
     }
     pub fn open(
         state: &Path,
