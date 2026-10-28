@@ -2731,6 +2731,87 @@ async fn save_candidate(
 }
 
 #[cfg(test)]
+mod edit_prompt_tests {
+    use super::{answer_rules, answer_tail, edit_wanted, WorkerFormat, EDIT_MIN_BYTES};
+    use std::collections::HashMap;
+
+    const PARAGRAPH: &str = "For a small change to an existing large file";
+    const CLAUSE: &str = "or with EDIT blocks for small changes to large files";
+
+    fn prompt_texts(baselines: &[(&str, usize)]) -> (String, String) {
+        let map: HashMap<String, String> = baselines
+            .iter()
+            .map(|(path, len)| (path.to_string(), "x".repeat(*len)))
+            .collect();
+        let edit = edit_wanted(&map);
+        let schema = serde_json::json!({});
+        (
+            answer_rules(WorkerFormat::Blocks, &schema, edit),
+            answer_tail(edit),
+        )
+    }
+
+    #[test]
+    fn small_approved_files_get_neither_edit_paragraph_nor_tail_clause() {
+        let (rules, tail) = prompt_texts(&[("a.py", 10), ("b.py", EDIT_MIN_BYTES - 1)]);
+        assert!(
+            !rules.contains(PARAGRAPH) && !rules.contains("EDIT"),
+            "{rules}"
+        );
+        assert!(!tail.contains(CLAUSE) && !tail.contains("EDIT"), "{tail}");
+        assert!(rules.contains("=== FILE: <path> ==="), "{rules}");
+        assert!(
+            tail.trim_end()
+                .ends_with("each ending with === END FILE ==="),
+            "{tail}"
+        );
+    }
+
+    #[test]
+    fn no_existing_file_gets_no_edit_text() {
+        let (rules, tail) = prompt_texts(&[]);
+        assert!(
+            !rules.contains("EDIT") && !tail.contains("EDIT"),
+            "{rules}{tail}"
+        );
+    }
+
+    #[test]
+    fn a_file_at_the_cutoff_gets_both_edit_texts() {
+        let (rules, tail) = prompt_texts(&[("a.py", 10), ("big.py", EDIT_MIN_BYTES)]);
+        assert!(rules.contains(PARAGRAPH), "{rules}");
+        assert!(rules.contains("EDIT cannot create a file."), "{rules}");
+        assert!(tail.contains(CLAUSE), "{tail}");
+        assert!(
+            tail.trim_end()
+                .ends_with("each ending with === END EDIT ==="),
+            "{tail}"
+        );
+    }
+
+    #[test]
+    fn a_file_over_the_cutoff_gets_both_edit_texts() {
+        let (rules, tail) = prompt_texts(&[("big.py", EDIT_MIN_BYTES + 1)]);
+        assert!(
+            rules.contains(PARAGRAPH) && tail.contains(CLAUSE),
+            "{rules}{tail}"
+        );
+    }
+
+    #[test]
+    fn json_format_text_does_not_depend_on_edit() {
+        let schema = serde_json::json!({"type": "object"});
+        let small = answer_rules(WorkerFormat::Json, &schema, false);
+        let large = answer_rules(WorkerFormat::Json, &schema, true);
+        assert_eq!(small, large);
+        assert_eq!(
+            small,
+            "Return complete replacement text for changed files matching this JSON schema: {\"type\":\"object\"}\nDo not use markdown fences."
+        );
+    }
+}
+
+#[cfg(test)]
 mod git_error_tests {
     use super::git_error_text;
 

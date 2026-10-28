@@ -6685,6 +6685,28 @@ fn edit_blocks_meet_the_same_policy_checks_as_file_blocks() {
 }
 
 #[tokio::test]
+async fn worker_prompt_offers_edit_blocks_only_for_a_large_approved_file() {
+    const PARAGRAPH: &str = "For a small change to an existing large file";
+    const CLAUSE: &str = "or with EDIT blocks for small changes to large files";
+    let small = "def answer():\n    return 0\n";
+    let large = format!("{}{small}", "# padding line\n".repeat(1100));
+    assert!(large.len() >= 16 * 1024 && large.len() < 64 * 1024);
+    for (content, edit) in [(small.to_string(), false), (large, true)] {
+        let fixture = unittest_fixture();
+        // The fixture already commits the small calc.py.
+        if edit {
+            commit_files(&fixture, &[("calc.py", &content)]);
+        }
+        let (request, _) = run_captured(&fixture, 1, "def answer():\n    return 42\n", None).await;
+        let prompt = last_prompt(&request);
+        assert_eq!(prompt.contains(PARAGRAPH), edit, "{prompt}");
+        assert_eq!(prompt.contains(CLAUSE), edit, "{prompt}");
+        assert_eq!(prompt.contains("=== END EDIT ==="), edit, "{prompt}");
+        assert!(prompt.contains("=== FILE: <path> ==="), "{prompt}");
+    }
+}
+
+#[tokio::test]
 async fn edit_block_changes_the_tail_of_a_large_file_without_re_emitting_it() {
     let fixture = unittest_fixture();
     let helpers: String = (0..1700)
