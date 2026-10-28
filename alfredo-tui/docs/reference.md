@@ -2034,6 +2034,10 @@ default false), `timeout_seconds` (1–600, default 120).
   Limit: the Coding Workspace is writable and mounted as is, so if it contains the cargo
   home itself (a workspace at `$HOME`, or a dotfiles repository there), its credentials are
   readable; the hiding applies only when the workspace does not contain `~/.cargo`.
+  A workspace with no root `.git` gets a read-only placeholder file at `.git` for the
+  run, so `git init`, `mkdir .git` and `ln -s` fail inside it (issue #522); the placeholder
+  is removed afterwards. Limit: it is a mount, so a sandbox running as root can unmount it;
+  the owner's own `.git` has the same limit.
   The card reads `? Approve run_command · run sh test.sh` with
   `cwd . · sandboxed · network off · …` and the exact command.
 - **Escalated.** `escalate: true` runs on the host with your environment and network
