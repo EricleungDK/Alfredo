@@ -318,6 +318,36 @@ fn doctor_refuses_worktree_scoped_filter_config_before_worker_execution() {
 }
 
 #[test]
+fn doctor_names_the_refused_config_key_and_the_fix_without_the_commit_hint() {
+    let fixture = Fixture::new();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&fixture.workspace)
+        .args(["config", "filter.lfs.clean", "git-lfs clean -- %f"])
+        .status()
+        .unwrap()
+        .success());
+    let (endpoint, server) = catalog("initial-model");
+    let output = fixture.command(&endpoint).output().unwrap();
+    server.join().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(2), "{text}");
+    assert!(
+        text.contains("FAIL worker workspace: Alfredo will not run in this repository"),
+        "{text}"
+    );
+    assert!(text.contains("\"filter.lfs.clean\""), "{text}");
+    assert!(
+        text.contains("git config --local --unset filter.lfs.clean"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Coding needs a Git repository with a commit"),
+        "{text}"
+    );
+}
+
+#[test]
 fn sandbox_preflight_names_bubblewrap_and_the_fix_only_when_it_is_unusable() {
     assert_eq!(
         alfredo_tui::doctor::sandbox_blocker_at("/nonexistent/alfredo-test/bwrap").as_deref(),

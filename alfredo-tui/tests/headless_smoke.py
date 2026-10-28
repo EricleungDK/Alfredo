@@ -267,6 +267,17 @@ class HeadlessSmoke(unittest.TestCase):
                 self.git('config', '--unset', key)
                 fifo.unlink()
 
+    def test_go_refuses_lfs_filter_config_at_once_exit_2_with_the_fix_and_no_planner_request(self):
+        # #525: the refusal is a precondition error before planning, not a launch failure.
+        self.git('config', 'filter.lfs.clean', 'git-lfs clean -- %f')
+        code, out, err = self.run_headless('--headless')
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('Alfredo will not run in this repository', err)
+        self.assertIn('"filter.lfs.clean"', err)
+        self.assertIn('git config --local --unset filter.lfs.clean', err)
+        self.assertNotIn('launch failed', err)
+        self.assertEqual(self.fixture.markers(), [])
+
     def test_interactive_refusal_without_a_terminal_names_headless(self):
         code, out, err = self.run_headless()
         self.assertEqual((code, out), (1, ''))
