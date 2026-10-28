@@ -1020,6 +1020,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Ctrl+R | Explicitly retry a failed/cancelled turn, replacing its partial reply; only until a new prompt starts a turn |
 | PageUp / PageDown | Scroll transcript, task/group details or open evidence |
 | Ctrl+Q | Quit and restore the terminal |
+| `/exit`, `/quit` | Type either and press Enter: the same quit as Ctrl+Q (running chat commands and workers are stopped first; the save wait below applies). Only the bare command quits; with extra text it is ordinary input (issue #482) |
 | Ctrl+C | While a chat reply is running and no worker is: cancel the turn like Esc (partial reply and prompt draft kept, session stays open, Ctrl+R retries). Otherwise quit and restore the terminal like Ctrl+Q; the draft is saved on exit either way (issue #345) |
 
 If a task write is pending, quit once waits for its receipt; pressing quit again

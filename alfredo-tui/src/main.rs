@@ -1398,19 +1398,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                         KeyCode::Char('q' | 'c') if ctrl => {
-                            work.tasks.disable_dispatch();
-                            if !work.tasks.workers.is_empty() {
-                                work.tasks.cancel_all();
-                                quit_pending = true;
-                                work.app.notice =
-                                    "Cancelling workers; waiting for evidence receipts before exit"
-                                        .into();
-                            } else if (work.tasks.writing || work.wayfinder.active())
-                                && !quit_pending
-                            {
-                                quit_pending = true;
-                                work.app.notice = "Scope/task save pending; press quit again to exit with outcome unknown".into();
-                            } else {
+                            if work.request_quit(&mut quit_pending) {
+                                break;
+                            }
+                        }
+                        // Issue #482: `/quit` and `/exit` take the Ctrl+Q path above.
+                        KeyCode::Enter
+                            if alfredo_tui::commands::is_quit_alias(
+                                &work.app.sessions[index].draft,
+                            ) && work.tasks.agent_shown().is_none() =>
+                        {
+                            work.app.sessions[index].remember_submission();
+                            work.app.sessions[index].clear_draft();
+                            if work.request_quit(&mut quit_pending) {
                                 break;
                             }
                         }
@@ -2721,6 +2721,7 @@ const HELP_LINES: &[&str] = &[
     "/clear start this conversation fresh (tasks are kept)",
     "/compact summarise older turns into a short note now (also automatic near the size limit)",
     "/allow list always-allow rules (a on an approval card adds one; never for push) · /allow clear [ID]",
+    "/exit, /quit quit Alfredo, same as Ctrl+Q",
     "/undo restore the files the last chat turn's approved edits changed; refuses any file changed since and names it (no run_command, no Git)",
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
     "Enter send · Ctrl+N new · Tab switch · Esc or Ctrl+C (while replying) cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",

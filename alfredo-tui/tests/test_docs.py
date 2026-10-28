@@ -58,6 +58,14 @@ class GlossaryTests(unittest.TestCase):
 
 
 class FlagTests(unittest.TestCase):
+    def test_quit_aliases_are_named_in_help_and_reference(self):
+        # Issue #482: /exit and /quit quit like Ctrl+Q.
+        source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        self.assertIn('"/exit, /quit quit Alfredo, same as Ctrl+Q"', source)
+        for name in ('/exit', '/quit'):
+            self.assertIn(f'`{name}`', reference)
+
     def test_readme_documents_every_flag(self):
         source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
         flags = set(re.findall(r'^\s*"(--[a-z-]+)"(?: \| "--[a-z-]+")* =>', source, re.M))

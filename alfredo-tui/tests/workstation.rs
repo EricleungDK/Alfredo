@@ -442,3 +442,40 @@ fn startup_launch_on_a_busy_conversation_reports_a_short_actionable_error() {
     }
     assert!(alfredo_tui::conversations::is_namespace_in_use(&error));
 }
+
+// Issue #482: the quit request behind Ctrl+Q, `/quit` and `/exit`.
+#[test]
+fn quit_request_cancels_workers_and_waits_for_a_pending_save_before_leaving() {
+    let fixture = Fixture::new();
+    let mut work = fixture.open();
+    let mut pending = false;
+    // Idle: leave at once, nothing waits.
+    assert!(work.request_quit(&mut pending));
+    assert!(!pending);
+    // A running worker: cancelled, the first request does not leave.
+    let flag = Arc::new(AtomicBool::new(false));
+    work.tasks.workers.insert(1, flag.clone());
+    assert!(!work.request_quit(&mut pending));
+    assert!(pending && flag.load(Ordering::SeqCst));
+    assert!(!work.tasks.dispatch.enabled);
+    assert_eq!(
+        work.app.notice,
+        "Cancelling workers; waiting for evidence receipts before exit"
+    );
+    // Workers gone while a task save is in flight: the first request waits, the second leaves.
+    work.tasks.workers.clear();
+    work.tasks.writing = true;
+    work.app.notice.clear();
+    pending = false;
+    assert!(!work.request_quit(&mut pending));
+    assert!(pending);
+    assert_eq!(
+        work.app.notice,
+        "Scope/task save pending; press quit again to exit with outcome unknown"
+    );
+    assert!(work.request_quit(&mut pending));
+    // A save alone (no scope operation) counts as in flight.
+    assert!(work.save_in_flight());
+    work.tasks.writing = false;
+    assert!(!work.save_in_flight());
+}

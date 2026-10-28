@@ -120,6 +120,8 @@ fn every_listed_command_typed_bare_is_known() {
                 | "/compact"
                 | "/allow"
                 | "/undo"
+                | "/exit"
+                | "/quit"
                 | "/scope-clear"
         ) {
             continue;

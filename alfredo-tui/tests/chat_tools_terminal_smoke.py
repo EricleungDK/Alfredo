@@ -348,11 +348,11 @@ class ChatTools(unittest.TestCase):
         pid = int(Path(os.path.realpath(self.repo.name), 'pid').read_text())
         self.assertFalse(self.alive(pid))
 
-    def test_ctrl_q_kills_a_running_host_command(self):
+    def check_quit_kills_the_host_command(self, keys):
         root = self.start_slow_command('slow command on host')
         pid = int(root.joinpath('pid').read_text())
         self.assertTrue(self.alive(pid))
-        self.terminal.write(b'\x11')
+        self.terminal.write(keys)
         deadline = time.time() + 10
         while self.terminal.process.poll() is None and time.time() < deadline:
             if select.select([self.terminal.master], [], [], 0.05)[0]:
@@ -362,6 +362,13 @@ class ChatTools(unittest.TestCase):
         time.sleep(5)
         self.assertFalse(root.joinpath('marker').exists(), 'the command ran on after quit')
         self.assertEqual(self.approval_outcomes(), ['cancelled'])
+
+    def test_ctrl_q_kills_a_running_host_command(self):
+        self.check_quit_kills_the_host_command(b'\x11')
+
+    def test_slash_exit_kills_a_running_host_command(self):
+        # Issue #482: /exit runs the same shutdown as Ctrl+Q, including stop_running_commands.
+        self.check_quit_kills_the_host_command(b'/exit\r')
 
     def check_signal_kills_the_host_command(self, signum, times=1):
         root = self.start_slow_command('slow command on host')

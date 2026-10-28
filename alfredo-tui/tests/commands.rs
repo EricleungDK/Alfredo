@@ -76,6 +76,12 @@ fn slash_typeahead_lists_prefix_then_substring_matches_with_usage() {
         .description
         .contains("GOAL"));
     assert_eq!(Completion::typeahead("/pla").unwrap().draft(), "/plan ");
+    // Issue #482: `/exit` and `/quit` are listed as quitting like Ctrl+Q.
+    for (typed, name) in [("/qu", "/quit"), ("/ex", "/exit")] {
+        let picker = Completion::typeahead(typed).unwrap();
+        assert_eq!(picker.choices[0].name, name, "{typed}");
+        assert!(picker.choices[0].description.contains("Ctrl+Q"), "{typed}");
+    }
     // An exact name leads, so Enter on a fully typed `/model` still submits it.
     let exact = Completion::typeahead("/model").unwrap();
     assert!(exact.selected_is("/model") && exact.choices.len() > 1);
@@ -163,6 +169,31 @@ fn for_draft_offers_at_path_only_with_the_cursor_at_the_end() {
 }
 
 #[test]
+fn quit_aliases_match_only_the_bare_commands_and_share_the_ctrl_q_steps() {
+    use alfredo_tui::commands::{is_quit_alias, quit_step, QuitStep};
+    for draft in ["/quit", "/exit", "  /quit ", "/exit\n"] {
+        assert!(is_quit_alias(draft), "{draft:?}");
+    }
+    for draft in [
+        "",
+        "quit",
+        "/quitx",
+        "/exit now",
+        "/quit\n/exit",
+        "/Exit",
+        "//exit",
+    ] {
+        assert!(!is_quit_alias(draft), "{draft:?}");
+    }
+    assert_eq!(quit_step(true, false, false), QuitStep::CancelWorkers);
+    assert_eq!(quit_step(true, true, true), QuitStep::CancelWorkers);
+    assert_eq!(quit_step(false, true, false), QuitStep::WaitForSave);
+    assert_eq!(quit_step(false, true, true), QuitStep::Leave);
+    assert_eq!(quit_step(false, false, false), QuitStep::Leave);
+    assert_eq!(quit_step(false, false, true), QuitStep::Leave);
+}
+
+#[test]
 fn f1_picker_filters_by_typed_text() {
     let mut help = Completion::all();
     let total = help.choices.len();
@@ -176,6 +207,20 @@ fn f1_picker_filters_by_typed_text() {
     help.set_query(String::new());
     assert_eq!(help.choices.len(), total);
     assert!(help.help && !help.live);
+    // Issue #482: the F1 catalog lists both quit aliases, described as quitting (Ctrl+Q).
+    let help = Completion::all();
+    for name in ["/exit", "/quit"] {
+        let choice = help
+            .choices
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("{name} missing from F1"));
+        assert!(
+            choice.description.contains("Ctrl+Q"),
+            "{name}: {}",
+            choice.description
+        );
+    }
 }
 
 #[test]
