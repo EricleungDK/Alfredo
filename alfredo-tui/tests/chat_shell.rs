@@ -988,6 +988,40 @@ fn overlapping_sandboxed_runs_in_a_workspace_without_git_stay_masked() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #522, reviewer's attack: in a workspace with no `.git`, a sandboxed command
+/// unmounts the placeholder, removes it and runs `git init`. Without `--cap-drop ALL` (#517)
+/// a root sandbox keeps CAP_SYS_ADMIN and this succeeds, so the chat git tools then accept
+/// the repository.
+#[test]
+fn a_sandboxed_umount_then_git_init_leaves_no_repository() {
+    if !sandbox_works() {
+        return;
+    }
+    let root = workspace("umount-init");
+    let card = approval::card(
+        &root,
+        &call(
+            json!({ "command": "umount .git 2>/dev/null; rm -f .git; git init -q . ; echo END" }),
+        ),
+    )
+    .unwrap();
+    let result = approval::apply(&root, &card).unwrap();
+    assert!(result.contains("END"), "{result}");
+    let status = chat_tools::dispatch(
+        &root,
+        &ToolCall {
+            name: "git_status".into(),
+            arguments: json!({}),
+        },
+    );
+    assert!(status.starts_with("error: "), "{status}");
+    assert!(
+        fs::symlink_metadata(root.join(".git")).is_err(),
+        "a .git entry was left on the host"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #359: a workspace whose `.git` leads to another repository, by a gitfile or by a
 /// `commondir` file behind a gitfile, gets that repository's config and objects neither
 /// bound into the sandbox nor readable from it.

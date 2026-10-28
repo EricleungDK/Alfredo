@@ -2048,7 +2048,8 @@ default false), `timeout_seconds` (1–600, default 120).
   A workspace with no root `.git` gets a read-only placeholder file at `.git` for the
   run, so `git init`, `mkdir .git` and `ln -s` fail inside it (issue #522). The placeholder
   is removed when the last run holding it ends; if the process is killed mid-run, the
-  marker file stays until the next sandboxed run in that workspace replaces it.
+  marker file stays until the next sandboxed run in that workspace replaces it, and the git
+  tools refuse it meanwhile.
   Every capability is dropped (`--cap-drop ALL`), so even as root the sandbox cannot remount
   a read-only bind and write `.git` or the host (#517).
   The card reads `? Approve run_command · run sh test.sh` with
