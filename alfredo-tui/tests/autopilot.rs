@@ -3619,6 +3619,22 @@ fn next_and_detail_rows_wrap_instead_of_clipping_at_100_columns() {
 }
 
 #[test]
+fn narrow_summary_wraps_wide_characters_without_panicking() {
+    let report = "✗ Autopilot failed\nShip it\n\nTasks     0/1 accepted\n\n✗ #1  界界\n      界界界界界界界界界界界界界界界界界界界界界界界界 failure 界界界界界界界界界界界界界\n      Next: 界界界界界界界界界界界界界界界界界界界界界界界界界界界界";
+    let fixture = Fixture::new();
+    let server = Server::new(|_, _| String::new());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    control.set_visible(true);
+    control.autopilot_report = Some(report.to_string());
+    let app = alfredo_tui::model::App::new("fixture".into());
+    for width in [20, 30, 41] {
+        let rows = render_rows(&app, &control, width, 20);
+        assert_eq!(rows.len(), 20);
+    }
+}
+
+#[test]
 fn planner_prose_is_reported_in_plain_words_without_serde_detail() {
     let fixture = Fixture::new();
     let server = Server::new(|request, _| {

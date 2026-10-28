@@ -341,3 +341,49 @@ fn live_progress_requests_timing_redraws_even_when_the_pane_is_hidden() {
     assert!(!tasks.timing_redraw_due());
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn a_failed_check_receipt_shows_its_whole_key_line_at_100_columns() {
+    let key = "AssertionError: answer was 41 not 42";
+    let detail = format!("Check failed (exit 1): stderr: {key}");
+    let (mut tasks, root) = control(0);
+    let snapshot = tasks.snapshot.as_mut().unwrap();
+    snapshot.receipts.push(Receipt {
+        revision: 1,
+        task: 1,
+        request: Request {
+            correlation: "finish:task-1-run-1".into(),
+            expected_revision: 0,
+            action: Action::Finish {
+                task: 1,
+                run: "task-1-run-1".into(),
+                status: alfredo_tui::tasks::TaskStatus::Failed,
+                evidence_sha256: "b".repeat(64),
+                detail: format!("No change from previous attempt · {detail}"),
+            },
+        },
+    });
+    snapshot.revision = 1;
+    // The stored entry holds the whole line; nothing cuts it where it is built.
+    let entries = alfredo_tui::activity::entries(snapshot, "");
+    assert!(entries[0].detail.contains(&detail), "{}", entries[0].detail);
+    tasks.activity = Some(String::new());
+    let app = App::new("fixture".into());
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| ui::draw_with_tasks(frame, &app, &tasks))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let screen = (0..buffer.area.height)
+        .map(|y| {
+            (ui::pane_width(100) + 2..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('│', " ");
+    let joined = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(joined.contains(&detail), "{joined}");
+    let _ = std::fs::remove_dir_all(root);
+}
