@@ -1398,19 +1398,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                         KeyCode::Char('q' | 'c') if ctrl => {
-                            work.tasks.disable_dispatch();
-                            if !work.tasks.workers.is_empty() {
-                                work.tasks.cancel_all();
-                                quit_pending = true;
-                                work.app.notice =
-                                    "Cancelling workers; waiting for evidence receipts before exit"
-                                        .into();
-                            } else if (work.tasks.writing || work.wayfinder.active())
-                                && !quit_pending
-                            {
-                                quit_pending = true;
-                                work.app.notice = "Scope/task save pending; press quit again to exit with outcome unknown".into();
-                            } else {
+                            if request_quit(&mut work, &mut quit_pending) {
+                                break;
+                            }
+                        }
+                        // Issue #482: `/quit` and `/exit` take the Ctrl+Q path above.
+                        KeyCode::Enter
+                            if alfredo_tui::commands::is_quit_alias(
+                                &work.app.sessions[index].draft,
+                            ) && work.tasks.agent_shown().is_none() =>
+                        {
+                            work.app.sessions[index].remember_submission();
+                            work.app.sessions[index].clear_draft();
+                            if request_quit(&mut work, &mut quit_pending) {
                                 break;
                             }
                         }
@@ -2655,6 +2655,33 @@ fn withdraw_pending_architect(
     true
 }
 
+/// The shared quit request behind Ctrl+Q and `/quit`/`/exit`. Returns true when the main
+/// loop should leave now; otherwise it has started cancelling workers or noted the save wait.
+fn request_quit(work: &mut alfredo_tui::workstation::Workstation, quit_pending: &mut bool) -> bool {
+    use alfredo_tui::commands::{quit_step, QuitStep};
+    work.tasks.disable_dispatch();
+    match quit_step(
+        !work.tasks.workers.is_empty(),
+        work.tasks.writing || work.wayfinder.active(),
+        *quit_pending,
+    ) {
+        QuitStep::CancelWorkers => {
+            work.tasks.cancel_all();
+            *quit_pending = true;
+            work.app.notice =
+                "Cancelling workers; waiting for evidence receipts before exit".into();
+            false
+        }
+        QuitStep::WaitForSave => {
+            *quit_pending = true;
+            work.app.notice =
+                "Scope/task save pending; press quit again to exit with outcome unknown".into();
+            false
+        }
+        QuitStep::Leave => true,
+    }
+}
+
 /// Esc, and Ctrl+C during a running chat turn (issue #345): a pending action is denied
 /// (logged as cancelled), the request is aborted and the turn ends; the draft is kept.
 fn cancel_chat_turn(
@@ -2721,6 +2748,7 @@ const HELP_LINES: &[&str] = &[
     "/clear start this conversation fresh (tasks are kept)",
     "/compact summarise older turns into a short note now (also automatic near the size limit)",
     "/allow list always-allow rules (a on an approval card adds one; never for push) · /allow clear [ID]",
+    "/exit, /quit quit Alfredo, same as Ctrl+Q",
     "/undo restore the files the last chat turn's approved edits changed; refuses any file changed since and names it (no run_command, no Git)",
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
     "Enter send · Ctrl+N new · Tab switch · Esc or Ctrl+C (while replying) cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",

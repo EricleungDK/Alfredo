@@ -111,9 +111,37 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/undo",
         "restore the files the last chat turn's approved edits changed (refuses any changed since)",
     ),
+    ("/exit", "quit Alfredo, same as Ctrl+Q"),
+    ("/quit", "quit Alfredo, same as Ctrl+Q"),
     ("/models", "list installed models"),
     ("/model", "NAME — select conversation model"),
 ];
+
+/// Issue #482: a draft that is exactly `/quit` or `/exit` (ignoring surrounding space)
+/// quits like Ctrl+Q. Arguments make it ordinary text, so `/exit now` is not a quit.
+pub fn is_quit_alias(draft: &str) -> bool {
+    matches!(draft.trim(), "/quit" | "/exit")
+}
+
+/// What a quit request (Ctrl+Q, Ctrl+C when idle, `/quit`, `/exit`) does next.
+#[derive(Debug, PartialEq, Eq)]
+pub enum QuitStep {
+    /// Cancel the running workers and wait for their evidence receipts.
+    CancelWorkers,
+    /// A scope or task save is in flight; the first request waits, the second leaves.
+    WaitForSave,
+    Leave,
+}
+
+pub fn quit_step(workers_running: bool, save_in_flight: bool, already_waiting: bool) -> QuitStep {
+    if workers_running {
+        QuitStep::CancelWorkers
+    } else if save_in_flight && !already_waiting {
+        QuitStep::WaitForSave
+    } else {
+        QuitStep::Leave
+    }
+}
 
 pub const CAPABILITIES: &[(&str, &str)] = &[(
     "@wayfinder",
@@ -193,6 +221,8 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
             "/compact",
             "/allow",
             "/undo",
+            "/exit",
+            "/quit",
             "/model",
             "/models",
             "@wayfinder",

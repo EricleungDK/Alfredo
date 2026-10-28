@@ -169,6 +169,31 @@ fn for_draft_offers_at_path_only_with_the_cursor_at_the_end() {
 }
 
 #[test]
+fn quit_aliases_match_only_the_bare_commands_and_share_the_ctrl_q_steps() {
+    use alfredo_tui::commands::{is_quit_alias, quit_step, QuitStep};
+    for draft in ["/quit", "/exit", "  /quit ", "/exit\n"] {
+        assert!(is_quit_alias(draft), "{draft:?}");
+    }
+    for draft in [
+        "",
+        "quit",
+        "/quitx",
+        "/exit now",
+        "/quit\n/exit",
+        "/Exit",
+        "//exit",
+    ] {
+        assert!(!is_quit_alias(draft), "{draft:?}");
+    }
+    assert_eq!(quit_step(true, false, false), QuitStep::CancelWorkers);
+    assert_eq!(quit_step(true, true, true), QuitStep::CancelWorkers);
+    assert_eq!(quit_step(false, true, false), QuitStep::WaitForSave);
+    assert_eq!(quit_step(false, true, true), QuitStep::Leave);
+    assert_eq!(quit_step(false, false, false), QuitStep::Leave);
+    assert_eq!(quit_step(false, false, true), QuitStep::Leave);
+}
+
+#[test]
 fn f1_picker_filters_by_typed_text() {
     let mut help = Completion::all();
     let total = help.choices.len();
