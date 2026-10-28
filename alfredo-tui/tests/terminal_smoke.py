@@ -718,6 +718,13 @@ class ModelPicker(unittest.TestCase):
                 terminal.write(b'\r')
                 terminal.wait_for('@notes.txt ▏')
                 terminal.wait_gone('Files ·')
+                # A lone Backspace must edit the draft and refresh the popup.
+                terminal.write(b'\x15@notes.txtx')
+                terminal.wait_for('@notes.txtx▏')
+                terminal.wait_gone('Files ·')
+                terminal.write(b'\x7f')
+                terminal.wait_for('Files ·')
+                terminal.wait_for('@notes.txt▏')
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
             finally:
