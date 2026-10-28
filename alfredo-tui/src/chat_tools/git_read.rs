@@ -367,6 +367,11 @@ pub(crate) const IGNORE_SUBMODULES: &str = "--ignore-submodules=all";
 const INCLUDES_NOT_RUN: &str =
     "repository config includes another file (include.path or includeIf); this git tool is not run";
 
+/// What an include in the config means for every chat git read tool (issue #492): `git_log`,
+/// `git_diff` with a target and `git_branch` refuse it as well, so the filter wording
+/// ([`NOT_RUN`]), which says they still work, would be false.
+const INCLUDES_REFUSE_ALL: &str = "an include refuses every chat git read tool (git_status, git_diff, git_log, git_branch); remove the include, or ask for an escalated run_command";
+
 /// Include keys only, read without following the includes themselves (`--no-includes`), so a
 /// FIFO include target is never opened (issue #465).
 const INCLUDE_KEYS_ARGS: [&str; 5] = [
@@ -390,7 +395,9 @@ pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
     // a FIFO target would stall it to the time limit (issue #465).
     refuse_includes(
         root,
-        &format!("repository config defines filter drivers, includes or core.worktree; {NOT_RUN}"),
+        &format!(
+            "repository config defines filter drivers, includes or core.worktree; {INCLUDES_REFUSE_ALL}"
+        ),
     )?;
     refuse_filters_within(root, FILTER_KEYS_LIMIT, call_clock())
 }
@@ -935,7 +942,38 @@ pub(crate) fn verified_git_dir_within(
     })
 }
 
-const LINKED: &str = "the workspace's repository holds a symbolic link in its git directory, refs or object store; git tools refuse";
+/// The refusal for a symbolic link at `shown` (see [`shown_path`]), issue #492.
+fn linked(shown: &str) -> String {
+    format!("`{shown}` in the repository's git directory is a symbolic link; chat git tools refuse. Remove or replace it with a regular file or directory, or ask for an escalated run_command")
+}
+
+/// The refusal for a FIFO, socket or device at `shown` (see [`shown_path`]), issue #492.
+fn special_entry(shown: &str) -> String {
+    format!("`{shown}` in the repository's git directory is a FIFO, socket, device or link; chat git tools refuse. Remove or replace it, or ask for an escalated run_command")
+}
+
+/// `path` as the walk's refusals name it: relative to `base`, never an absolute host path,
+/// every control or invisible character written as `<U+XXXX>` (issues #313, #361). Only the
+/// path the walk produced is used; the entry itself is never opened.
+fn shown_path(path: &Path, base: &Path) -> String {
+    let relative = path
+        .strip_prefix(base)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .or_else(|| path.file_name().map(Path::new))
+        .unwrap_or(Path::new("."));
+    relative
+        .to_string_lossy()
+        .chars()
+        .map(|c| {
+            if crate::dashboard::card_hidden(c) {
+                format!("<U+{:04X}>", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
 const UNCHECKED: &str = "the workspace's repository could not be checked for links or borrowed objects within the call's time limit; git tools refuse";
 const UNREADABLE: &str = "the workspace's repository changed or could not be read while it was checked for links or borrowed objects (a background git gc or repack may have been running); git tools refuse, try again";
 const ALTERNATES: &str = "the workspace's repository borrows objects from outside it (objects/info/alternates); git tools refuse";
@@ -944,21 +982,27 @@ const ALTERNATES: &str = "the workspace's repository borrows objects from outsid
 /// `recursive`, anywhere under it. A missing directory is fine. The walk is charged to `clock`: running out is a refusal,
 /// never a partial check (issue #359).
 fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), String> {
-    walk_entries(dir, clock, recursive, false)
+    walk_entries(dir, clock, recursive, (false, dir.parent().unwrap_or(dir)))
 }
 
 /// [`walk_without_links`] over a whole git directory, issue #465: every subdirectory (`refs`,
 /// `rebase-merge`, `sequencer`, `modules`, `worktrees/*` ...) except the top-level `objects` and `hooks` (never opened: hooks are off),
 /// which [`object_stores_within`] walks together with its alternates. Git's fsmonitor socket
 /// may sit in a git directory itself: the top, a `worktrees/*` entry or a `modules/*` one.
-fn walk_git_dir(dir: &Path, clock: Clock) -> Result<(), String> {
-    walk_entries(dir, clock, true, true)
+fn walk_git_dir(dir: &Path, base: &Path, clock: Clock) -> Result<(), String> {
+    walk_entries(dir, clock, true, (true, base))
 }
 
-fn walk_entries(dir: &Path, clock: Clock, recursive: bool, git_dir: bool) -> Result<(), String> {
+/// Walks `dir`; refusals name entries relative to `base` (`git_dir`: whether `dir` is a git directory).
+fn walk_entries(
+    dir: &Path,
+    clock: Clock,
+    recursive: bool,
+    (git_dir, base): (bool, &Path),
+) -> Result<(), String> {
     let unreadable = || UNREADABLE.to_string();
     match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.file_type().is_symlink() => return Err(LINKED.to_string()),
+        Ok(meta) if meta.file_type().is_symlink() => return Err(linked(&shown_path(dir, base))),
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(unreadable()),
@@ -978,7 +1022,7 @@ fn walk_entries(dir: &Path, clock: Clock, recursive: bool, git_dir: bool) -> Res
                 continue;
             }
             if kind.is_symlink() {
-                return Err(LINKED.to_string());
+                return Err(linked(&shown_path(&entry.path(), base)));
             }
             // A FIFO, socket or device blocks any git process that opens it (issue #461).
             // The one exception: git's fsmonitor daemon socket directly in a git directory
@@ -994,7 +1038,7 @@ fn walk_entries(dir: &Path, clock: Clock, recursive: bool, git_dir: bool) -> Res
                     !recursive
                 });
             if !kind.is_file() && !kind.is_dir() && !daemon {
-                return Err(special(&entry.file_name().to_string_lossy()));
+                return Err(special_entry(&shown_path(&entry.path(), base)));
             }
             if recursive
                 && kind.is_dir()
@@ -1037,9 +1081,9 @@ fn walk_repository(git_dir: &Path, common_dir: &Path, clock: Clock) -> Result<()
     // Object stores first: a bad alternates entry is named as such before the walk of the
     // directories (which may hold the store it names) reaches the file inside it.
     object_stores_within(common_dir, clock)?;
-    walk_git_dir(common_dir, clock)?;
+    walk_git_dir(common_dir, common_dir, clock)?;
     if git_dir != common_dir {
-        walk_git_dir(git_dir, clock)?;
+        walk_git_dir(git_dir, common_dir, clock)?;
     }
     Ok(())
 }
@@ -1148,7 +1192,7 @@ fn refuse_special_start_up_files(root: &Path, clock: Clock) -> Result<(), String
 }
 
 fn special(name: &str) -> String {
-    format!("the workspace's repository has a {name} that is not an ordinary file (a FIFO, socket, device or link); git tools refuse")
+    format!("the workspace's repository has a {name} that is not an ordinary file (a FIFO, socket, device or link); git tools refuse. Remove or replace it, or ask for an escalated run_command")
 }
 
 /// `Ok` for an ordinary file or a missing one, the refusal naming `name` for anything else.
@@ -1590,6 +1634,56 @@ mod tests {
         });
         // Outside any call a lone git call gets a fresh, full budget.
         assert!(call_clock().left() > Duration::from_secs(14));
+    }
+
+    /// Issue #492: the entry is named relative to the base (never absolute), invisible
+    /// characters as `<U+XXXX>`; a path outside the base keeps only its file name and the
+    /// base itself is `.`.
+    #[test]
+    fn shown_path_is_relative_and_escaped() {
+        let base = Path::new("/srv/ws/.git");
+        assert_eq!(
+            shown_path(Path::new("/srv/ws/.git/lfs/tmp/agent.sock"), base),
+            "lfs/tmp/agent.sock"
+        );
+        assert_eq!(
+            shown_path(Path::new("/srv/ws/.git/a\u{1b}b\u{202e}c"), base),
+            "a<U+001B>b<U+202E>c"
+        );
+        assert_eq!(shown_path(Path::new("/elsewhere/store/x"), base), "x");
+        assert_eq!(shown_path(base, base), ".git");
+        assert_eq!(shown_path(Path::new("/"), base), ".");
+    }
+
+    /// Issue #492: the messages name the path and say how to proceed.
+    #[test]
+    fn walk_refusals_name_the_entry_and_the_way_out() {
+        let root = std::env::temp_dir().join(format!("alfredo-walk-492-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("refs/heads")).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", root.join("refs/heads/main")).unwrap();
+        let error = walk_git_dir(&root, &root, Clock::start(DEADLINE)).unwrap_err();
+        assert!(
+            error.starts_with(
+                "`refs/heads/main` in the repository's git directory is a symbolic link"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("ask for an escalated run_command"),
+            "{error}"
+        );
+        assert!(!error.contains(root.to_str().unwrap()), "{error}");
+        // The top directory itself being a link is named by its own name.
+        let link = root.join("objects-link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let error = walk_without_links(&link, Clock::start(DEADLINE), true).unwrap_err();
+        assert!(
+            error
+                .starts_with("`objects-link` in the repository's git directory is a symbolic link"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
