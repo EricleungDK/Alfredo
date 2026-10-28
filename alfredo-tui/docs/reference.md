@@ -1749,7 +1749,10 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   and working-tree or staged diffs are refused (they would run the repository's clean
   filters, or lazy-fetch through its transport); the refusal names the keys. Host git runs
   with lazy fetch and every transport disabled (`GIT_NO_LAZY_FETCH`, `protocol.allow=never`),
-  so a missing object is an error, never a fetch. `git_log` and `git_diff` with `base` and
+  so a missing object is an error, never a fetch. `git_status` and `git_diff` pass
+  `--ignore-submodules=all`, so a `submodule.<name>.ignore=none` setting cannot make git run
+  inside a submodule and read that submodule's own config (#496); submodule contents are
+  never shown. `git_log` and `git_diff` with `base` and
   `target` still work unless the config has `include.path` or `includeIf`, which refuses them
   too (an include target that is a FIFO would stall git); this is deliberate, also for identity
   `includeIf` setups. A config too large to check is refused the same way. Host git

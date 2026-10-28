@@ -83,7 +83,15 @@ fn status_output(root: &Path, _: &Value) -> Result<String, String> {
     refuse_filters(root)?;
     let output = git(
         root,
-        &["status", "--short", "--branch", "--untracked-files=normal"],
+        &[
+            "status",
+            // On the command line, so no `submodule.<name>.ignore` of the repository can
+            // bring git into a submodule and its own config (#496).
+            IGNORE_SUBMODULES,
+            "--short",
+            "--branch",
+            "--untracked-files=normal",
+        ],
     )?;
     Ok(if output.lines().count() <= 1 {
         format!("{output}(clean: no changes)\n")
@@ -185,6 +193,7 @@ fn diff_output(root: &Path, arguments: &Value) -> Result<String, String> {
     // whole (git_limited): a cut listing would leave a secret copy out of the exclusions.
     let mut detect = vec![
         "diff",
+        IGNORE_SUBMODULES,
         "--no-ext-diff",
         "--no-textconv",
         "--name-status",
@@ -217,6 +226,7 @@ fn diff_output(root: &Path, arguments: &Value) -> Result<String, String> {
         .collect();
     let mut args = vec![
         "diff",
+        IGNORE_SUBMODULES,
         "--no-color",
         "--no-ext-diff",
         "--no-textconv",
@@ -346,6 +356,12 @@ const FILTER_KEYS_ARGS: [&str; 5] = [
     "--get-regexp",
     "^(filter|include|includeif)\\.|^core\\.(worktree|sshcommand|gitproxy)$|^extensions\\.partialclone$|^remote\\..+\\.(promisor|uploadpack|receivepack)$|^protocol\\.(allow|.+\\.allow)$",
 ];
+
+/// Never look inside a submodule (#496). The global `diff.ignoreSubmodules=all` loses to a
+/// per-submodule `submodule.<name>.ignore=none` in the repository's config or `.gitmodules`;
+/// the command-line option beats both. Git would then run in the submodule and read the
+/// config of `.git/modules/<name>`, which `refuse_filters` does not check.
+const IGNORE_SUBMODULES: &str = "--ignore-submodules=all";
 
 const INCLUDES_NOT_RUN: &str =
     "repository config includes another file (include.path or includeIf); this git tool is not run";
