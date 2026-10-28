@@ -1193,6 +1193,122 @@ fn the_include_refusal_and_the_unreadable_config_refusal_are_told_apart() {
     }
 }
 
+/// Frees git children blocked on `fifo` and kills every git working under `dir`, until none
+/// has shown up for a few checks in a row: git opens the FIFO again after its first read
+/// ends, so one wake-up is not enough. Without it a red run leaves `git` blocked for good.
+fn release_git_blocked_on(fifo: &Path, dir: &Path) {
+    let mut quiet = 0;
+    while quiet < 3 {
+        let _ = fs::OpenOptions::new().read(true).write(true).open(fifo);
+        let killed = Command::new("pkill")
+            .args(["-KILL", "-f", "--"])
+            .arg(format!("-C {}", dir.display()))
+            .status()
+            .is_ok_and(|status| status.success());
+        quiet = if killed { 0 } else { quiet + 1 };
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Releases the git children a failed run leaves blocked on its FIFO, when dropped (also
+/// while a failed assertion unwinds).
+struct Unblock {
+    fifo: PathBuf,
+    base: PathBuf,
+}
+impl Drop for Unblock {
+    fn drop(&mut self) {
+        release_git_blocked_on(&self.fifo, &self.base);
+    }
+}
+
+/// Appends `section` to the repository config, with `{}` replaced by the path of a fresh FIFO
+/// `base_relative` to the repository's parent directory.
+fn config_with_fifo(repo: &Repo, base_relative: &str, section: &str) -> Unblock {
+    let fifo = repo.base.join(base_relative);
+    mkfifo(&fifo);
+    let mut config = fs::read_to_string(repo.root.join(".git/config")).unwrap();
+    config.push_str(&section.replace("{}", fifo.to_str().unwrap()));
+    fs::write(repo.root.join(".git/config"), config).unwrap();
+    Unblock {
+        fifo,
+        base: repo.root.clone(),
+    }
+}
+
+/// Issue #474 (1): `git_branch` refuses a config with `include.path` or `includeIf` before
+/// git runs, as `git_status` and `git_log` do, so a FIFO include target never stalls it.
+#[test]
+fn git_branch_refuses_a_config_include_before_git_runs() {
+    for section in [
+        "[include]\n\tpath = {}\n",
+        "[includeIf \"gitdir:/\"]\n\tpath = {}\n",
+    ] {
+        let repo = Repo::new();
+        let _release = config_with_fifo(&repo, "included.fifo", section);
+        let output = dispatch_promptly(&repo.root, "git_branch");
+        assert!(
+            output.starts_with("error:") && output.contains("includes another file"),
+            "{output}"
+        );
+    }
+}
+
+/// Issue #474 (2): repository config naming a file git opens on its own (`core.excludesFile`,
+/// `core.attributesFile`, `mailmap.file`) as a FIFO, in the worktree or outside `.git`, never
+/// stalls a read-tier call: it is refused or completes within 3 s.
+#[test]
+fn a_fifo_named_by_excludes_attributes_or_mailmap_config_never_stalls() {
+    let cases = [
+        (
+            "core.excludesFile",
+            "[core]\n\texcludesFile = {}\n",
+            "git_status",
+        ),
+        (
+            "core.attributesFile",
+            "[core]\n\tattributesFile = {}\n",
+            "git_status",
+        ),
+        (
+            "mailmap.file",
+            "[mailmap]\n\tfile = {}\n[log]\n\tmailmap = true\n",
+            "git_log",
+        ),
+    ];
+    for (key, section, tool) in cases {
+        for path in ["repo/x.fifo", "x.fifo"] {
+            let repo = Repo::new();
+            let _release = config_with_fifo(&repo, path, section);
+            let output = dispatch_promptly(&repo.root, tool);
+            assert!(
+                !output.contains("time limit") && !output.contains("took longer"),
+                "{key} ({path}): {output}"
+            );
+        }
+    }
+}
+
+/// Issue #474 (3): a regular `core.excludesFile` in the repository config does not refuse
+/// `git_status`.
+#[test]
+fn a_regular_excludes_file_does_not_refuse_git_status() {
+    let repo = Repo::new();
+    let excludes = repo.base.join("excludes");
+    fs::write(&excludes, "ignored.txt\n").unwrap();
+    let mut config = fs::read_to_string(repo.root.join(".git/config")).unwrap();
+    config.push_str(&format!(
+        "[core]\n\texcludesFile = {}\n",
+        excludes.display()
+    ));
+    fs::write(repo.root.join(".git/config"), config).unwrap();
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(
+        output.contains("clean") && !output.starts_with("error:"),
+        "{output}"
+    );
+}
+
 /// Issue #465 (review): a symlinked hook (`ln -s ../../hook.sh .git/hooks/pre-commit`, common
 /// in setup scripts) is never opened by these calls (hooks are off), so it must not refuse a
 /// valid repository, also from a linked worktree.

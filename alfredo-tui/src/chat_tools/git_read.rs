@@ -1262,6 +1262,53 @@ mod tests {
         root
     }
 
+    /// Frees git children blocked on `fifo` and kills every git working under `dir`, until none
+    /// has shown up for a few checks in a row: git opens the FIFO again after its first read
+    /// ends, so one wake-up is not enough. Without it a red run leaves `git` blocked for good.
+    fn release_git_blocked_on(fifo: &Path, dir: &Path) {
+        let mut quiet = 0;
+        while quiet < 3 {
+            let _ = fs::OpenOptions::new().read(true).write(true).open(fifo);
+            let killed = Command::new("pkill")
+                .args(["-KILL", "-f", "--"])
+                .arg(format!("-C {}", dir.display()))
+                .status()
+                .is_ok_and(|status| status.success());
+            quiet = if killed { 0 } else { quiet + 1 };
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Issue #474: `is_ignored` (used by `read.rs` discovery) refuses a config with an include
+    /// before git runs, so a FIFO include target neither stalls it nor is ever opened.
+    #[test]
+    fn is_ignored_refuses_a_config_include_before_git_runs() {
+        let root = scratch_repo("ignored-include", "");
+        let fifo = root.join("included.fifo");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(".git/config"))
+            .unwrap();
+        write!(config, "[include]\n\tpath = {}\n", fifo.display()).unwrap();
+        drop(config);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = root.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(is_ignored(&worker, "sub", None));
+        });
+        let answer = receiver.recv_timeout(Duration::from_secs(3));
+        // Release a git child left blocked on the FIFO (a failing run) before checking.
+        release_git_blocked_on(&fifo, &root);
+        let answer = answer.expect("is_ignored was not refused within 3 s");
+        let error = answer.expect_err("a config with an include is refused");
+        assert!(error.contains("includes another file"), "{error}");
+    }
+
     /// Issue #312: a copy search past git's rename limit warns on stderr and exits 0. The
     /// complete-listing helper refuses that output, and the same search with `-l0` passes.
     #[test]
