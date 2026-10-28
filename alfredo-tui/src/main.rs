@@ -996,9 +996,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             if alfredo_tui::task_control::background_refresh_due(
                 work.tasks.visible,
-                !work.tasks.workers.is_empty(),
+                work.tasks.workers.len(),
                 work.tasks.dispatch.enabled,
-                terminal.size()?.width >= ui::PANE_BREAKPOINT,
+                terminal.size()?.width,
                 last_task_refresh.elapsed(),
             ) {
                 // Redraw happens when the refreshed projection differs (`poll`),

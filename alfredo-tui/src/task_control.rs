@@ -166,11 +166,13 @@ pub type OutcomeLines = Arc<Result<Vec<ratatui::text::Line<'static>>, String>>;
 /// pane, no tasks view, no workers and no dispatch means nothing displays the result.
 pub fn background_refresh_due(
     tasks_visible: bool,
-    has_workers: bool,
+    workers_len: usize,
     dispatch: bool,
-    pane_shown: bool,
+    width: u16,
     since_last: std::time::Duration,
 ) -> bool {
+    let pane_shown = width >= crate::ui::PANE_BREAKPOINT;
+    let has_workers = workers_len > 0;
     (pane_shown || tasks_visible || has_workers || dispatch)
         && since_last
             >= if dispatch {
