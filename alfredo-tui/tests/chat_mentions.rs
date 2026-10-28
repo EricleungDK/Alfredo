@@ -390,6 +390,49 @@ fn completion_leaves_out_paths_with_spaces() {
 }
 
 #[test]
+fn completion_lists_only_names_a_mention_reads_back_whole() {
+    let dir = tempdir::Dir::new();
+    let root = dir.path();
+    git(root, &["init", "-q", "--template="]);
+    for name in [
+        "ok.rs",
+        "notes.",
+        "why?",
+        "wayfinder",
+        "a.env.",
+        "x.pem.",
+        "zw\u{200b}.rs",
+        "x\u{202e}txt.sr",
+    ] {
+        fs::write(root.join(name), "x\n").unwrap();
+    }
+    assert_eq!(complete(root, ""), ["ok.rs"]);
+}
+
+#[test]
+fn completion_puts_an_exact_match_first() {
+    let dir = tempdir::Dir::new();
+    let root = dir.path();
+    git(root, &["init", "-q", "--template="]);
+    fs::write(root.join("A.rs.bak"), "x\n").unwrap();
+    fs::write(root.join("a.rs"), "x\n").unwrap();
+    assert_eq!(complete(root, "a.rs"), ["a.rs", "A.rs.bak"]);
+}
+
+#[test]
+fn completion_with_a_fifo_gitignore_returns_promptly() {
+    let dir = repo();
+    let status = Command::new("mkfifo")
+        .arg(dir.path().join(".gitignore"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let started = std::time::Instant::now();
+    let _ = complete(dir.path(), "");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}
+
+#[test]
 fn completion_walk_is_capped() {
     let dir = tempdir::Dir::new();
     let root = dir.path();

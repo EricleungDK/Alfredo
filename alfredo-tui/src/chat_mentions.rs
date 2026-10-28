@@ -468,4 +468,34 @@ mod tests {
         assert_eq!(out.notices, ["@gone.rs: not attached (not found)"]);
         assert!(out.block.is_empty());
     }
+
+    #[test]
+    fn vetting_examines_a_bounded_number_of_candidates() {
+        let calls = std::cell::Cell::new(0);
+        let many = (0..1000).map(|i| format!("f{i}.txt"));
+        let listed = vet(
+            many,
+            |_| {
+                calls.set(calls.get() + 1);
+                false
+            },
+            || false,
+        );
+        assert!(listed.is_empty());
+        assert_eq!(calls.get(), COMPLETE_EXAMINE);
+    }
+
+    #[test]
+    fn vetting_stops_when_the_time_is_spent() {
+        let calls = std::cell::Cell::new(0);
+        let listed = vet(
+            (0..20).map(|i| format!("f{i}.txt")),
+            |_| {
+                calls.set(calls.get() + 1);
+                true
+            },
+            || calls.get() >= 3,
+        );
+        assert_eq!(listed, ["f0.txt", "f1.txt", "f2.txt"]);
+    }
 }
