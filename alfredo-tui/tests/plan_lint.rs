@@ -7,6 +7,7 @@ use alfredo_tui::{
     tasks::WorkPolicy,
     understanding::Binding,
 };
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs,
     io::Write,
@@ -19,7 +20,6 @@ use std::{
     thread,
     time::Duration,
 };
-use std::os::unix::fs::OpenOptionsExt;
 
 fn step(files: &[&str], check: &[&str], dependencies: &[u64]) -> Step {
     Step {
@@ -322,14 +322,17 @@ fn file_the_plan_creates_is_not_sized_and_is_not_flagged() {
 /// A scratch repository with one empty commit; `config` is appended to its `.git/config`.
 /// Returns the directory and the commit (the plan baseline).
 fn repository(name: &str, config: &str) -> (PathBuf, String) {
-    let root = std::env::temp_dir().join(format!(
-        "alfredo-plan-lint-{}-{name}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("alfredo-plan-lint-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     let run = |args: &[&str]| {
-        let output = Command::new("git").arg("-C").arg(&root).args(args).output().unwrap();
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap();
         assert!(output.status.success(), "{args:?}: {output:?}");
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     };
@@ -397,7 +400,11 @@ fn release_fifo_until(fifo: PathBuf, done: Arc<AtomicBool>) -> thread::JoinHandl
 fn a_config_include_fifo_never_hangs_the_lint() {
     let (root, baseline) = repository("include-fifo", "");
     let fifo = root.join("blocked.config");
-    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
     fs::OpenOptions::new()
         .append(true)
         .open(root.join(".git/config"))

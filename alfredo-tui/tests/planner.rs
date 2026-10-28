@@ -1740,6 +1740,12 @@ fn manual_plan_shows_validation_warnings_without_blocking_save() {
         .unwrap();
     wait(&mut control, |c| c.planner.draft.is_some());
     server.join().unwrap();
+    // The findings come from a background lint (#519): wait for them before the panel shows them.
+    wait(&mut control, |c| {
+        c.planner
+            .preview()
+            .contains("Validation warnings · /plan-save still allowed")
+    });
     let preview = control.planner.preview();
     assert!(
         preview.contains("Validation warnings · /plan-save still allowed"),
@@ -1910,15 +1916,23 @@ fn plan_view_does_not_run_the_lint_on_the_draw_path() {
         first.contains("Validation warnings · checking"),
         "first view must not carry findings computed on the draw path: {first}"
     );
-    assert!(!first.contains("is not available in the check sandbox"), "{first}");
+    assert!(
+        !first.contains("is not available in the check sandbox"),
+        "{first}"
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !planner.view().contains("is not available in the check sandbox") {
+    while !planner
+        .view()
+        .contains("is not available in the check sandbox")
+    {
         planner.poll();
         assert!(Instant::now() < deadline, "findings never arrived");
         thread::sleep(Duration::from_millis(2));
     }
     assert!(
-        planner.view().contains("Validation warnings · /plan-save still allowed"),
+        planner
+            .view()
+            .contains("Validation warnings · /plan-save still allowed"),
         "{}",
         planner.view()
     );
