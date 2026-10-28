@@ -1755,6 +1755,17 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `includeIf` setups. A config too large to check is refused the same way. Host git
   calls that `/go` makes at start (the uncommitted-changes check) share the same 15 s
   limit; when git gives no answer in time, the start notice says so and the run goes on.
+  `git_branch` and the ignore check behind `list_files` and `grep` refuse `include.path` and
+  `includeIf` the same way. The repository config cannot name a file for git to open on its
+  own: `core.attributesFile`, `core.excludesFile` and `mailmap.file` (with `log.mailmap`) are
+  overridden on every call, so a FIFO there cannot stall git. The cost: a repository's own
+  `core.excludesFile` is not applied (`git_status` lists what it would hide; `.gitignore` and
+  `.git/info/exclude` still apply).
+  `diff.orderFile` is overridden the same way. Likewise, with no global excludes file, `list_files`
+  and `grep` discovery also show files the repository's own `core.excludesFile` used to hide
+  (their content is still governed by the secret and exclusion checks), and
+  `log.mailmap=false` means a committed `.mailmap` is no longer read by `git_log` (author names
+  are shown as committed either way).
   Git also refuses a `.git` that points at another repository (a gitfile, a `commondir`
   file, or `objects/info/alternates` into another repository); a linked worktree of the
   workspace's own repository is read. The control files git reads (`gitdir`,
