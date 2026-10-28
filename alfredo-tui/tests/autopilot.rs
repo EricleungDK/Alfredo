@@ -3903,6 +3903,49 @@ fn go_start_names_the_timeout_when_git_status_blocks_on_a_fifo() {
     );
 }
 
+/// Issue #521 (review 2): `/go` start refuses a FIFO `.gitignore` in the work tree at once, and
+/// its start notice names that entry (not the filters or includes text of the other refusal).
+#[test]
+fn go_start_names_a_fifo_rule_file_at_once() {
+    let (fifo_tx, fifo_rx) = std::sync::mpsc::channel();
+    let (notice_tx, notice_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let fixture = Fixture::new();
+        let fifo = fixture.workspace.join("sub/.gitignore");
+        fs::create_dir_all(fixture.workspace.join("sub")).unwrap();
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        fifo_tx.send(fifo).unwrap();
+        let server = one_good_task();
+        let runtime = Runtime::new().unwrap();
+        let control = control(&fixture, &server, &runtime);
+        let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+        let _ = notice_tx.send(autopilot.start("Answer", "fixture", 1, &control));
+    });
+    let fifo = fifo_rx.recv().unwrap();
+    let received = notice_rx.recv_timeout(Duration::from_secs(5));
+    if received.is_err() {
+        let unblock = fifo.clone();
+        thread::spawn(move || {
+            let _ = fs::OpenOptions::new().read(true).write(true).open(unblock);
+        });
+    }
+    let notice = received
+        .expect("/go start did not return within 5 s with a FIFO rule file")
+        .expect("/go still starts with an unchecked tree");
+    assert!(
+        notice.contains("sub/.gitignore") && notice.contains("not an ordinary file"),
+        "the start notice must name the rule file: {notice}"
+    );
+    assert!(
+        !notice.contains("include"),
+        "the start notice must not blame filters or includes: {notice}"
+    );
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Loop {
     None,

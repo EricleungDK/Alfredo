@@ -919,15 +919,57 @@ fn a_fifo_gitignore_never_stalls_list_files_or_grep() {
     let fifo = repo.root.join(".gitignore");
     mkfifo(&fifo);
     fs::write(repo.root.join("b.txt"), "needle\n").unwrap();
+    // Ignored by the repository's own rules (which the FIFO hides): its content must not leak.
+    fs::write(repo.root.join("local-only.txt"), "PRIVATE TOKEN xyz\n").unwrap();
     for (tool, arguments) in [
         ("list_files", json!({})),
-        ("grep", json!({"pattern": "needle"})),
+        ("grep", json!({"pattern": "PRIVATE"})),
     ] {
-        if dispatch_for(&repo.root, tool, arguments, Duration::from_secs(2)).is_none() {
+        let Some(output) = dispatch_for(&repo.root, tool, arguments, Duration::from_secs(2)) else {
             release(&fifo);
             panic!("{tool} with a FIFO .gitignore did not return within 2 s");
-        }
+        };
+        assert!(
+            output.starts_with("error:")
+                && output.contains(".gitignore")
+                && output.contains("not an ordinary file"),
+            "{tool} must refuse by name: {output}"
+        );
+        assert!(!output.contains("PRIVATE"), "{tool} leaked: {output}");
     }
+}
+
+/// Issue #521 (review 1): a workspace that is no repository still lists with the plain walk.
+#[test]
+fn list_files_outside_a_repository_still_walks() {
+    let base = std::env::temp_dir().join(format!(
+        "alfredo-chat-plain-{}-{}",
+        std::process::id(),
+        ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("plain.txt"), "x\n").unwrap();
+    let output = dispatch_for(&base, "list_files", json!({}), Duration::from_secs(5));
+    let _ = fs::remove_dir_all(&base);
+    let output = output.expect("list_files outside a repository did not return");
+    assert!(output.contains("plain.txt"), "{output}");
+}
+
+/// Issue #521 (review 3): git does not open a FIFO `.gitignore` inside an ignored directory, so
+/// it must not refuse `git_status`. The walk prunes ignored untracked directories.
+#[test]
+fn a_fifo_rule_file_in_an_ignored_directory_does_not_refuse_git_status() {
+    let repo = Repo::new();
+    fs::write(repo.root.join(".gitignore"), "node_modules/\n").unwrap();
+    git(&repo.root, &["add", ".gitignore"]);
+    git(&repo.root, &["commit", "-q", "-m", "ignore"]);
+    fs::create_dir_all(repo.root.join("node_modules/pkg")).unwrap();
+    let fifo = repo.root.join("node_modules/pkg/.gitignore");
+    mkfifo(&fifo);
+    let output = dispatch_for(&repo.root, "git_status", json!({}), Duration::from_secs(2));
+    release(&fifo);
+    let output = output.expect("git_status did not return within 2 s");
+    assert!(!output.starts_with("error:"), "{output}");
 }
 
 /// Issue #458: git itself reads `HEAD`, `config`, `commondir` and (newer git, at start-up)
