@@ -690,6 +690,168 @@ mod tests {
         }
     }
 
+    /// Issue #523: common credential files that #471 did not list (package and database
+    /// clients, Terraform and Maven settings, cloud CLIs, KeePass, shell history), with
+    /// case variants. Directory-scoped names need their directory chain.
+    #[test]
+    fn secret_covers_issue_523_credential_files() {
+        let mut missed = vec![];
+        for path in [
+            "_netrc",
+            "home/_NETRC",
+            ".my.cnf",
+            ".My.Cnf",
+            "db/.my.cnf",
+            ".terraformrc",
+            "terraform.rc",
+            "Terraform.RC",
+            "app/auth.json",
+            "auth.json",
+            "secrets.kdbx",
+            "vault/Passwords.KDBX",
+            ".bash_history",
+            "home/.Bash_History",
+            "gradle.properties",
+            "app/Gradle.Properties",
+            ".rclone.conf",
+            ".yarnrc.yml",
+            ".dev.vars",
+            "worker/.DEV.VARS",
+            "service_account.json",
+            "keys/Service_Account.JSON",
+            "firebase-adminsdk-x.json",
+            "firebase-adminsdk-abc12-9f8e7.json",
+            "ssh_host_rsa_key",
+            "etc/ssh_host_ed25519_key",
+            "private.asc",
+            "keys/Private-release.ASC",
+            "secret-key.asc",
+            "secrets.asc",
+            ".m2/settings.xml",
+            "home/.m2/settings.xml",
+            "build/.M2/Settings.XML",
+            ".config/rclone/rclone.conf",
+            "x/.config/rclone/rclone.conf",
+            ".config/gcloud/credentials.db",
+            ".config/gcloud/access_tokens.db",
+            ".pip/pip.conf",
+            "home/.PIP/Pip.conf",
+            ".mc/config.json",
+            "home/.mc/config.json",
+            ".config/hub",
+            "home/.config/hub",
+        ] {
+            if !secret(path) {
+                missed.push(path);
+            }
+        }
+        assert!(missed.is_empty(), "not secret: {missed:?}");
+    }
+
+    /// Issue #523: `.` and empty components name nothing, so every spelling of a listed
+    /// path is matched as the plain path. A `..` is resolved as well, and a path is a
+    /// secret when either its raw or its resolved reading is.
+    #[test]
+    fn secret_drops_dot_and_empty_components_before_matching() {
+        let mut missed = vec![];
+        for path in [
+            ".docker//config.json",
+            ".cargo/./credentials.toml",
+            ".config/./gh/hosts.yml",
+            "./.my.cnf",
+            "a//b/.npmrc",
+            "./.docker/config.json",
+            ".m2/./settings.xml",
+            ".config//rclone/rclone.conf",
+            ".config/hub//x",
+            ".mc//config.json",
+            ".config/gcloud/./credentials.db",
+            ".pip/./pip.conf",
+            "./src/../.env",
+            "a/.docker/x/../config.json",
+            ".config/rclone/x/../rclone.conf",
+            ".m2/x/../../.m2/settings.xml",
+            "a/../.my.cnf",
+            "../.docker/config.json",
+        ] {
+            if !secret(path) {
+                missed.push(path);
+            }
+        }
+        assert!(missed.is_empty(), "not secret: {missed:?}");
+    }
+
+    /// Issue #523 near misses: ordinary files that share a name stem with the new
+    /// credential names, and the same names outside their directories. `docs/*.asc`
+    /// stays readable because only `private*.asc` and `secret*.asc` are refused.
+    #[test]
+    fn secret_leaves_issue_523_near_misses_alone() {
+        for path in [
+            "README.md",
+            "src/auth.rs",
+            "auth.rs",
+            "auth.json.md",
+            "author.json",
+            "docs/authors.json",
+            "oauth.json",
+            "settings.xml",
+            "app/settings.xml",
+            "m2/settings.xml",
+            "docs/.m2/readme.md",
+            "config.json",
+            "docs/config.json",
+            "app/config.json",
+            ".mc/config.yml",
+            ".mc/config.json.md",
+            "docs/mc/config.json",
+            "docs/a.asc",
+            "docs/signing.asc",
+            "keys/public.asc",
+            "public.asc",
+            "private.asc.md",
+            "docs/private-notes.md",
+            "docs/secret-plan.md",
+            "rclone.conf.md",
+            "config/rclone.md",
+            "docs/rclone/rclone.conf.md",
+            ".config/rclone.md",
+            ".config/gcloud/config.json",
+            ".config/gcloud/credentials.db.md",
+            ".config/hub.md",
+            ".config/hubspot.json",
+            "hub/x",
+            "src/hub",
+            ".pip/pip.conf.md",
+            "pip.conf.md",
+            "terraform.rc.md",
+            "src/terraform.rs",
+            "terraformrc.md",
+            "_netrc.md",
+            "gradle.properties.md",
+            "src/gradle.rs",
+            "firebase.json",
+            "firebase-adminsdk.md",
+            "firebase-adminsdk-x.json.md",
+            "service_account_notes.json",
+            "docs/service_account.md",
+            "ssh_host_rsa_key.pub",
+            "ssh_host_notes.md",
+            "kdbx.md",
+            "docs/keepass.md",
+            "notes.kdbx.md",
+            "bash_history.md",
+            ".dev.vars.md",
+            "./README.md",
+            "docs//config.json",
+            "./src/auth.rs",
+            "src/./author.json",
+            "x/../README.md",
+            "a/../b/settings.xml",
+        ] {
+            assert!(!secret(path), "{path} must stay readable");
+        }
+    }
+
     #[test]
     fn generated_trees_stay_excluded_and_unchanged() {
         assert!(excluded("node_modules/x.js"));

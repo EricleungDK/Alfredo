@@ -189,6 +189,101 @@ fn every_credential_file_is_refused_by_each_chat_tool() {
     assert_eq!(everything, "no matches");
 }
 
+/// Credential files that issue #523 adds: a MySQL option file, composer's `auth.json`,
+/// Maven and rclone configs, a KeePass database, shell history and more. Each has a
+/// marker line; case variants and nested directories are included.
+const ISSUE_523_SECRET_FILES: &[&str] = &[
+    ".my.cnf",
+    ".My.Cnf",
+    "db/.my.cnf",
+    "auth.json",
+    "Auth.JSON",
+    "app/auth.json",
+    "_netrc",
+    ".terraformrc",
+    "terraform.rc",
+    "secrets.kdbx",
+    ".bash_history",
+    "gradle.properties",
+    ".m2/settings.xml",
+    ".config/rclone/rclone.conf",
+    ".config/gcloud/credentials.db",
+    ".config/gcloud/access_tokens.db",
+    ".pip/pip.conf",
+    ".mc/config.json",
+    ".config/hub",
+    ".rclone.conf",
+    ".yarnrc.yml",
+    ".dev.vars",
+    "service_account.json",
+    "firebase-adminsdk-x.json",
+    "ssh_host_rsa_key",
+    "private.asc",
+];
+
+/// Issue #523: each credential file of the list is refused by read_file, grep, list_files,
+/// the edit tools, git_commit and `@path`, and its marker never reaches a tool result or
+/// an attached block. The `@path` refusal names the reason.
+#[test]
+fn issue_523_credential_files_are_refused_by_each_chat_tool() {
+    let repo = Repo::plain();
+    for (index, path) in ISSUE_523_SECRET_FILES.iter().enumerate() {
+        repo.write(path, &format!("{}\n", marker(1000 + index)));
+    }
+    for (index, path) in ISSUE_523_SECRET_FILES.iter().enumerate() {
+        let secret = marker(1000 + index);
+
+        let read = repo.run("read_file", json!({"path": path}));
+        assert!(!read.contains(&secret), "read_file {path}: {read}");
+        assert!(read.contains("excluded"), "read_file {path}: {read}");
+
+        let grep = repo.run("grep", json!({"pattern": secret}));
+        assert_eq!(grep, "no matches", "grep {path}");
+
+        let edit = repo
+            .card(
+                "edit_file",
+                json!({"path": path, "old_text": secret, "new_text": "x"}),
+            )
+            .unwrap_err();
+        assert!(edit.contains("excluded"), "edit_file {path}: {edit}");
+        let write = repo
+            .card("write_file", json!({"path": path, "content": "x\n"}))
+            .unwrap_err();
+        assert!(write.contains("excluded"), "write_file {path}: {write}");
+
+        let commit = repo
+            .card("git_commit", json!({"message": "add it", "files": [path]}))
+            .unwrap_err();
+        assert!(
+            commit.contains("by hand") || commit.contains("excluded"),
+            "git_commit {path}: {commit}"
+        );
+
+        let mention = alfredo_tui::chat_mentions::attach(&repo.root, &format!("see @{path}"));
+        assert!(!mention.block.contains(&secret), "@{path}: {mention:?}");
+        assert!(
+            mention
+                .notices
+                .iter()
+                .any(|n| n.starts_with(&format!("@{path}: not attached (excluded"))),
+            "@{path}: {:?}",
+            mention.notices
+        );
+    }
+
+    let listing = repo.run("list_files", json!({}));
+    assert!(listing.lines().any(|line| line == "README.md"), "{listing}");
+    for path in ISSUE_523_SECRET_FILES {
+        assert!(
+            !listing.lines().any(|line| line.eq_ignore_ascii_case(path)),
+            "list_files shows {path}: {listing}"
+        );
+    }
+    let everything = repo.run("grep", json!({"pattern": "SECRET-MARKER-1"}));
+    assert_eq!(everything, "no matches");
+}
+
 /// Issue #471: common credential files that were not on the list (a registry token,
 /// a Terraform state, a cloud or vault token, a service-account key) are never read
 /// through `resolve`, so read_file, grep and list_files cannot return them.
@@ -236,6 +331,47 @@ fn common_credential_files_are_excluded_from_read_tools() {
         readable.is_empty(),
         "readable credential files: {readable:?}"
     );
+}
+
+/// Issue #523 negative guard: the names the new list adds are matched exactly, so
+/// ordinary files that share a stem or sit outside the named directories stay readable.
+/// `docs/*.asc` stays readable because only `private*.asc` and `secret*.asc` are refused.
+#[test]
+fn issue_523_ordinary_files_near_the_new_names_stay_readable() {
+    let root = std::env::temp_dir().join(format!("secret-523-near-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let names = [
+        "README.md",
+        "src/auth.rs",
+        "author.json",
+        "docs/authors.json",
+        "settings.xml",
+        "app/settings.xml",
+        "config.json",
+        "docs/config.json",
+        ".mc/config.yml",
+        "docs/a.asc",
+        "docs/signing.asc",
+        "keys/public.asc",
+        "docs/private-notes.md",
+        ".config/hub.md",
+        ".config/gcloud/config.json",
+        "docs/.m2/readme.md",
+        "gradle.properties.md",
+        "service_account_notes.json",
+    ];
+    let mut blocked = vec![];
+    for n in names {
+        let p = root.join(n);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "plain\n").unwrap();
+        if alfredo_tui::chat_tools::resolve(&root, n).is_err() {
+            blocked.push(n);
+        }
+    }
+    assert!(blocked.is_empty(), "ordinary files refused: {blocked:?}");
 }
 
 /// Issue #471 negative guard: ordinary files whose names only look like the new
