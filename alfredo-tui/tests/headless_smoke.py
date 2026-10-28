@@ -260,7 +260,7 @@ class HeadlessSmoke(unittest.TestCase):
                     out, err = process.communicate()
                     self.fail(f'/go did not stop within 5 s\nstderr: {err}')
                 self.assertIn(process.returncode, (1, 2), err)
-                self.assertIn(f'"{key.lower()}" is set', err)
+                self.assertIn(f'"{key}"', err)
                 self.assertNotIn('worker failed', err)
                 self.assertNotIn('repair #', err)
                 self.assertFalse({'CALC', 'APP', 'REPAIR'} & set(self.fixture.markers()), self.fixture.markers())

@@ -311,7 +311,7 @@ fn doctor_refuses_worktree_scoped_filter_config_before_worker_execution() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(
         text.contains(
-            "FAIL worker workspace: Repository checkout filters/includes need qualification"
+            "FAIL worker workspace: Alfredo will not run in this repository"
         ),
         "{text}"
     );
