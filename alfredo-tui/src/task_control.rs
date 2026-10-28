@@ -161,6 +161,27 @@ pub struct TaskControl {
 /// Rendered outcome lines, or why verified evidence could not be shown.
 pub type OutcomeLines = Arc<Result<Vec<ratatui::text::Line<'static>>, String>>;
 
+/// Whether the main loop should re-read the shared task store now. Another terminal's
+/// `/go` writes the store, so a shown side pane keeps reading it (issue #502); a hidden
+/// pane, no tasks view, no workers and no dispatch means nothing displays the result.
+pub fn background_refresh_due(
+    tasks_visible: bool,
+    workers_len: usize,
+    dispatch: bool,
+    width: u16,
+    since_last: std::time::Duration,
+) -> bool {
+    let pane_shown = width >= crate::ui::PANE_BREAKPOINT;
+    let has_workers = workers_len > 0;
+    (pane_shown || tasks_visible || has_workers || dispatch)
+        && since_last
+            >= if dispatch {
+                std::time::Duration::from_millis(250)
+            } else {
+                std::time::Duration::from_secs(1)
+            }
+}
+
 /// Autopilot focus waits this long after a manual selection move.
 const MANUAL_SELECTION_HOLD: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -1932,6 +1953,88 @@ impl TaskControl {
     }
     pub fn intent_error(&self, intent: &crate::command_intent::Intent) -> Option<String> {
         self.prepared_errors.get(intent.correlation()).cloned()
+    }
+}
+
+#[cfg(test)]
+mod background_refresh_tests {
+    use super::background_refresh_due;
+    use crate::ui::PANE_BREAKPOINT;
+    use std::time::Duration;
+
+    const SECOND: Duration = Duration::from_secs(1);
+    const WIDE: u16 = PANE_BREAKPOINT;
+    const NARROW: u16 = PANE_BREAKPOINT - 1;
+
+    #[test]
+    fn an_idle_chat_terminal_with_the_pane_shown_reads_the_store_once_a_second() {
+        assert!(background_refresh_due(false, 0, false, WIDE, SECOND));
+        assert!(!background_refresh_due(
+            false,
+            0,
+            false,
+            WIDE,
+            Duration::from_millis(999)
+        ));
+    }
+
+    #[test]
+    fn an_idle_terminal_reads_at_most_once_a_second_over_ten_seconds() {
+        let mut last = Duration::ZERO;
+        let mut reads = 0;
+        for tick in 1..=1000u64 {
+            let now = Duration::from_millis(tick * 10);
+            if background_refresh_due(false, 0, false, WIDE, now - last) {
+                reads += 1;
+                last = now;
+            }
+        }
+        assert!((9..=10).contains(&reads), "{reads} reads in 10 s");
+    }
+
+    #[test]
+    fn a_hidden_pane_with_nothing_running_does_not_read_the_store() {
+        assert!(!background_refresh_due(
+            false,
+            0,
+            false,
+            NARROW,
+            Duration::from_secs(60)
+        ));
+    }
+
+    #[test]
+    fn the_pane_shows_exactly_at_the_breakpoint_width() {
+        assert!(!background_refresh_due(false, 0, false, NARROW, SECOND));
+        assert!(background_refresh_due(false, 0, false, WIDE, SECOND));
+        assert!(background_refresh_due(false, 0, false, WIDE + 1, SECOND));
+    }
+
+    #[test]
+    fn running_workers_refresh_and_no_workers_do_not_without_other_reasons() {
+        assert!(!background_refresh_due(false, 0, false, NARROW, SECOND));
+        assert!(background_refresh_due(false, 1, false, NARROW, SECOND));
+        assert!(background_refresh_due(false, 3, false, NARROW, SECOND));
+    }
+
+    #[test]
+    fn the_tasks_view_workers_and_dispatch_still_refresh_without_the_pane() {
+        assert!(background_refresh_due(true, 0, false, NARROW, SECOND));
+        assert!(background_refresh_due(false, 1, false, NARROW, SECOND));
+        assert!(background_refresh_due(
+            false,
+            0,
+            true,
+            NARROW,
+            Duration::from_millis(250)
+        ));
+        assert!(!background_refresh_due(
+            false,
+            0,
+            true,
+            NARROW,
+            Duration::from_millis(249)
+        ));
     }
 }
 

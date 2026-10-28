@@ -277,7 +277,8 @@ to save; their diff is kept in the run's evidence. See
 - **"Interactive terminal required"**: run in a real terminal, or use `--headless --go GOAL` for scripts.
 - **"Another alfredo-tui already owns conversation 'default' for this repo"**: another
   terminal owns that conversation set; close it or relaunch with
-  `alfredo-tui --conversation other` (both terminals share the task queue).
+  `alfredo-tui --conversation other` (both terminals share the task queue; a terminal showing its side pane re-reads it every
+  second, so the other terminal's `/go` tasks appear without a keypress).
 
 ### WSL notes
 
