@@ -3827,6 +3827,69 @@ mod host_git_tests {
         ));
     }
 
+    /// Issue #509: the file-valued keys the chat read tier already refuses (#474) also stall
+    /// or redirect the `/go` host git, so the config gate qualifies them.
+    #[test]
+    fn repository_file_keys_need_qualification() {
+        for key in [
+            "core.excludesfile",
+            "core.attributesfile",
+            "mailmap.file",
+            "diff.orderfile",
+        ] {
+            let config = format!("user.name=x\n{key}=/some/file\n");
+            assert_eq!(super::qualification_key(&config), Some(key), "{key}");
+        }
+        assert!(!super::config_needs_qualification(
+            "core.filemode=true\nmailmap.blob=x\ndiff.algorithm=patience\n"
+        ));
+    }
+
+    /// Issue #509: a FIFO named by one of those keys must not reach `git status`, which would
+    /// open it and stall to the 15 s deadline. The gate reads the config (opens nothing), so
+    /// the check refuses at once with the "not checked" marker.
+    #[test]
+    fn uncommitted_changes_refuses_a_fifo_file_key_without_running_status() {
+        for (key, flag) in [
+            ("core.excludesFile", "excludes"),
+            ("core.attributesFile", "attributes"),
+            ("mailmap.file", "mailmap"),
+            ("diff.orderFile", "order"),
+        ] {
+            let root = unique_root(&format!("fifo-{flag}"));
+            fixture_git(&root, &["init", "-q"]);
+            fs::write(root.join("a.txt"), "one\n").unwrap();
+            fixture_git(&root, &["add", "a.txt"]);
+            fixture_git(&root, &["commit", "-qm", "i"]);
+            let fifo = root.join(".git/x.fifo");
+            assert!(std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success());
+            fixture_git(&root, &["config", key, fifo.to_str().unwrap()]);
+            let started = std::time::Instant::now();
+            let changes = uncommitted_changes(&root);
+            let elapsed = started.elapsed();
+            // Release a git that did open the FIFO, so a failing run leaves no child behind.
+            let _ = std::os::unix::fs::OpenOptionsExt::custom_flags(
+                fs::OpenOptions::new().write(true),
+                0o4000, // O_NONBLOCK: fails at once when no git is waiting on the FIFO
+            )
+            .open(&fifo);
+            let _ = fs::remove_dir_all(&root);
+            assert!(
+                elapsed < std::time::Duration::from_secs(3),
+                "{key}: took {elapsed:?}, git status ran against the FIFO"
+            );
+            assert_eq!(
+                changes.map(|(count, _)| count),
+                Some(super::UNCHECKED_CHANGES),
+                "{key}"
+            );
+        }
+    }
+
     /// Review round 2 (#467): a `protocol.allow` or `protocol.<name>.allow` setting can
     /// override the command-line transport policy, so the worker gate qualifies it too.
     #[test]
