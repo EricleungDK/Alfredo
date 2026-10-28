@@ -1723,8 +1723,7 @@ const EDIT_MIN_BYTES: usize = 16 * 1024;
 
 /// Whether any existing approved file is large enough for an EDIT block to help.
 fn edit_wanted(baselines: &std::collections::HashMap<String, String>) -> bool {
-    let _ = (baselines, EDIT_MIN_BYTES);
-    true
+    baselines.values().any(|text| text.len() >= EDIT_MIN_BYTES)
 }
 
 /// The answer-format rules of a worker prompt; the EDIT paragraph only when `edit`.

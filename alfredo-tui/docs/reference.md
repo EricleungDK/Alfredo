@@ -1484,6 +1484,9 @@ new lines
 === END EDIT ===
 ```
 
+The worker prompt describes EDIT blocks only when an approved existing file is 16 KiB or
+larger; an EDIT answer for a smaller file is still accepted and applied.
+
 One or more SEARCH/REPLACE pairs per block, applied in order to the approved file's
 baseline text (CRLF read as LF, as for FILE). Rules:
 

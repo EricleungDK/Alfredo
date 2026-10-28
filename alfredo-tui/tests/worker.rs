@@ -7011,10 +7011,10 @@ async fn blocks_answer_is_requested_without_schema_and_applied_verbatim() {
     let prompt = last_prompt(&request);
     assert!(prompt.contains("=== FILE: <path> ==="), "{prompt}");
     assert!(!prompt.contains("JSON schema"), "{prompt}");
-    // The format is restated after the long source context.
+    // The format is restated after the long source context; this small file gets no EDIT clause.
     assert!(
         prompt.trim_end().ends_with(
-            "Answer only with FILE blocks, one per changed file, each ending with === END FILE ===, or with EDIT blocks for small changes to large files, each ending with === END EDIT ==="
+            "Answer only with FILE blocks, one per changed file, each ending with === END FILE ==="
         ),
         "{prompt}"
     );
