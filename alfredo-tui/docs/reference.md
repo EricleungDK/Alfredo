@@ -2034,6 +2034,8 @@ default false), `timeout_seconds` (1–600, default 120).
   Limit: the Coding Workspace is writable and mounted as is, so if it contains the cargo
   home itself (a workspace at `$HOME`, or a dotfiles repository there), its credentials are
   readable; the hiding applies only when the workspace does not contain `~/.cargo`.
+  Every capability is dropped (`--cap-drop ALL`), so even as root the sandbox cannot remount
+  a read-only bind and write `.git` or the host (#517).
   The card reads `? Approve run_command · run sh test.sh` with
   `cwd . · sandboxed · network off · …` and the exact command.
 - **Escalated.** `escalate: true` runs on the host with your environment and network

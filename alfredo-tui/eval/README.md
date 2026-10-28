@@ -46,6 +46,8 @@ grading runs it under bubblewrap with the same profile the worker uses
 - `bwrap --unshare-all --unshare-net --die-with-parent --new-session` with a tmpfs `/` and a fresh
   `/dev`, `/proc` and `/tmp`. The host home directory, your files and the network are not visible.
 - System directories (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`) are read-only.
+- Every capability is dropped (`--cap-drop ALL`), so a grader run as root cannot remount a read-only
+  directory read-write and write through it (#517).
 - Only the extracted export is bound read-write, and `HOME` points at it. `check.sh` is bound
   read-only at `/grader/check.sh`.
 - The check runs under `prlimit` with the worker's limits: address space 8 GiB, file size 32 MiB,
