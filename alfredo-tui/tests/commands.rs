@@ -118,6 +118,50 @@ fn at_path_typeahead_completes_the_last_word_and_keeps_the_rest() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn at_path_repo(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("alfredo-at-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q", "--template="])
+        .arg(&dir)
+        .status()
+        .unwrap();
+    assert!(init.success());
+    std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+    dir
+}
+
+// Guards a mutant: `selected_is` replaced with `true` (mech R3-5c1e9a07).
+#[test]
+fn at_path_selected_is_only_for_the_exact_typed_word() {
+    let dir = at_path_repo("selected");
+    let picker = Completion::at_path("@sr", &dir).unwrap();
+    assert_eq!(picker.draft(), "@src/main.rs ");
+    assert!(!picker.selected_is("@sr"));
+    assert!(!picker.selected_is("read @src"));
+    assert!(picker.selected_is("@src/main.rs"));
+    assert!(picker.selected_is("read @src/main.rs"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Guards mutants on the cursor-at-end condition (mech R3-8b2f4d13, R3-3a7c6e52).
+#[test]
+fn for_draft_offers_at_path_only_with_the_cursor_at_the_end() {
+    let dir = at_path_repo("cursor");
+    let draft = "read @sr";
+    let at_end = Completion::for_draft(draft, draft.len(), &dir).unwrap();
+    assert!(at_end.live);
+    assert_eq!(at_end.draft(), "read @src/main.rs ");
+    assert!(Completion::for_draft(draft, draft.len() - 1, &dir).is_none());
+    assert!(Completion::for_draft(draft, 0, &dir).is_none());
+    // Slash typeahead does not depend on the cursor or the workspace.
+    let slash = Completion::for_draft("/pla", 2, &dir).unwrap();
+    assert!(slash.choices.iter().any(|c| c.name == "/plan"));
+    assert!(Completion::for_draft("plain", 5, &dir).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn f1_picker_filters_by_typed_text() {
     let mut help = Completion::all();
