@@ -2,8 +2,11 @@
 //! fail because they need files nothing provides, missing check programs, and
 //! unordered tasks writing the same file. Conservative: an argument that cannot
 //! be confidently classified as a repository path is never reported.
-use crate::planner::Plan;
-use std::{collections::BTreeSet, path::Path};
+use crate::{chat_tools::git_read, planner::Plan};
+use std::{cell::OnceCell, collections::BTreeSet, path::Path};
+
+/// Most bytes of git output one lint query reads: a listing of one path or a size.
+const QUERY_LIMIT: usize = 64 << 10;
 
 /// Read-only roots bound into the check sandbox (`worker::check_request`).
 const SANDBOX_ROOTS: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
@@ -279,9 +282,19 @@ pub fn lint(
     findings
 }
 
+/// Whether git may be asked about the plan's workspace. The read tier's refusal (an include
+/// that git would open, a filter driver, a config it cannot read) makes every git answer
+/// unknown: a FIFO include would stall git (#519). Checked once per lint, before its first
+/// git query.
+fn repository_trusted(plan: &Plan) -> bool {
+    plan.scope
+        .as_ref()
+        .is_some_and(|scope| git_read::refuse_filters(&scope.workspace).is_ok())
+}
+
 /// Committed paths at the plan's pinned baseline, from its context and, when
 /// that listing was truncated, from Git. Unknown answers count as present.
-fn committed(plan: &Plan) -> impl Fn(&str) -> bool + '_ {
+fn committed<'a>(plan: &'a Plan, trusted: &'a dyn Fn() -> bool) -> impl Fn(&str) -> bool + 'a {
     move |path: &str| {
         let Some(context) = &plan.context else {
             return true;
@@ -300,54 +313,64 @@ fn committed(plan: &Plan) -> impl Fn(&str) -> bool + '_ {
         let Some(scope) = &plan.scope else {
             return true;
         };
-        std::process::Command::new("/usr/bin/git")
-            .args(crate::worker::HARDENED_GIT_ARGS)
-            .args(crate::worker::LOCAL_ONLY_GIT_ARGS)
-            .arg("-C")
-            .arg(&scope.workspace)
-            .args(["--literal-pathspecs", "ls-tree", "--name-only", "-z"])
-            .arg(&context.baseline)
-            .arg("--")
-            .arg(path)
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .map_or(true, |output| {
-                !output.status.success() || !output.stdout.is_empty()
-            })
+        if !trusted() {
+            return true;
+        }
+        git_read::git_limited(
+            &scope.workspace,
+            &[
+                "--literal-pathspecs",
+                "ls-tree",
+                "--name-only",
+                "-z",
+                context.baseline.as_str(),
+                "--",
+                path,
+            ],
+            QUERY_LIMIT,
+        )
+        .map_or(true, |listing| !listing.is_empty())
     }
 }
 
-/// Findings against the real baseline and check sandbox.
+/// Findings against the real baseline and check sandbox. Host git runs within the read
+/// tier's budget (one shared deadline for the whole lint), after its include and filter
+/// refusal; a refused or timed-out answer counts as unknown (#519).
 pub fn findings(plan: &Plan) -> Vec<String> {
-    lint(
-        plan,
-        &committed(plan),
-        &sandbox_program,
-        &committed_size(plan),
-    )
+    git_read::call_scope(git_read::DEADLINE, || {
+        let checked = OnceCell::new();
+        let trusted = || *checked.get_or_init(|| repository_trusted(plan));
+        let findings = lint(
+            plan,
+            &committed(plan, &trusted),
+            &sandbox_program,
+            &committed_size(plan, &trusted),
+        );
+        findings
+    })
 }
 
 /// Byte size of a committed file at the plan's pinned baseline; `None` when the
 /// plan has no baseline or the path is not a blob there.
-fn committed_size(plan: &Plan) -> impl Fn(&str) -> Option<u64> + '_ {
+fn committed_size<'a>(
+    plan: &'a Plan,
+    trusted: &'a dyn Fn() -> bool,
+) -> impl Fn(&str) -> Option<u64> + 'a {
     move |path: &str| {
         let context = plan.context.as_ref()?;
         let scope = plan.scope.as_ref()?;
-        let output = std::process::Command::new("/usr/bin/git")
-            .args(crate::worker::HARDENED_GIT_ARGS)
-            .args(crate::worker::LOCAL_ONLY_GIT_ARGS)
-            .arg("-C")
-            .arg(&scope.workspace)
-            .args(["--literal-pathspecs", "cat-file", "-s"])
-            .arg(format!("{}:{path}", context.baseline))
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .ok()?;
-        if !output.status.success() {
+        if !trusted() {
             return None;
         }
-        String::from_utf8(output.stdout).ok()?.trim().parse().ok()
+        let object = format!("{}:{path}", context.baseline);
+        git_read::git_limited(
+            &scope.workspace,
+            &["--literal-pathspecs", "cat-file", "-s", &object],
+            QUERY_LIMIT,
+        )
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
     }
 }
