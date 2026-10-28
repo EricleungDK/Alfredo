@@ -19,7 +19,7 @@
 use super::{
     approval::CardKind,
     edit::Change,
-    git_read::{self, ref_arg},
+    git_read::{self, ref_arg, IGNORE_SUBMODULES},
     needed_terminal, text_arg, Tier, Tool, MAX_OUTPUT,
 };
 use serde_json::{json, Value};
@@ -165,14 +165,70 @@ fn state(root: &Path) -> Result<String, String> {
     )?;
     let status = full(
         root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            IGNORE_SUBMODULES,
+        ],
     )?;
+    let gitlinks = staged_gitlinks(root, &[])?;
     let mut hash = Sha256::new();
-    for part in [&head, &branch, &refs, &status, &config, &remotes] {
+    for part in [&head, &branch, &refs, &status, &gitlinks, &config, &remotes] {
         hash.update(part.as_bytes());
         hash.update([0xff]);
     }
     Ok(format!("{:x}", hash.finalize()))
+}
+
+/// The staged submodule pointer changes (gitlinks) under `pathspecs` (the whole index when
+/// empty), as raw `diff --cached` records with both object ids. `status` is run with
+/// `--ignore-submodules=all` (#499), which hides these too; the index-to-HEAD comparison
+/// never opens a submodule, so reading them here keeps the fingerprint, the commit listing,
+/// the secret check and the merge check as aware of them as before. The option is explicit
+/// because the hardened `diff.ignoreSubmodules=all` would hide them from this diff as well.
+/// Never add `-p`/`--patch` here: a patch would enter the submodule.
+fn staged_gitlinks(root: &Path, pathspecs: &[String]) -> Result<String, String> {
+    let mut args = vec![
+        "diff",
+        "--cached",
+        "--no-ext-diff",
+        "--no-renames",
+        "--raw",
+        "--no-abbrev",
+        "-z",
+        "--ignore-submodules=none",
+        "--",
+    ];
+    args.extend(pathspecs.iter().map(String::as_str));
+    let raw = full(root, &args)?;
+    let mut kept = String::new();
+    let mut fields = raw.split('\0').filter(|f| !f.is_empty());
+    while let Some(record) = fields.next() {
+        let Some(path) = fields.next() else { break };
+        let mut modes = record.trim_start_matches(':').split(' ');
+        let is_gitlink = modes.next() == Some("160000") || modes.next() == Some("160000");
+        if is_gitlink {
+            kept.push_str(record);
+            kept.push('\0');
+            kept.push_str(path);
+            kept.push('\0');
+        }
+    }
+    Ok(kept)
+}
+
+/// [`staged_gitlinks`] as `status`-style lines (`M  sub`) for a commit listing.
+fn staged_gitlink_lines(root: &Path, pathspecs: &[String]) -> Result<Vec<String>, String> {
+    let kept = staged_gitlinks(root, pathspecs)?;
+    let mut fields = kept.split('\0').filter(|f| !f.is_empty());
+    let mut lines = Vec::new();
+    while let (Some(record), Some(path)) = (fields.next(), fields.next()) {
+        let letter = record.rsplit(' ').next().unwrap_or("M");
+        lines.push(format!("{letter}  {path}"));
+    }
+    Ok(lines)
 }
 
 /// Card content for a call of this family, or why it is refused before asking.
@@ -492,12 +548,24 @@ fn plan_commit(root: &Path, arguments: &Value) -> Result<CommitPlan, String> {
     let listing = if pathspecs.is_empty() {
         full(
             root,
+            // Name listings only: a patch (-p) here would enter the submodule (#499).
             &["diff", "--cached", "--no-ext-diff", "--name-status", "--"],
         )?
     } else {
-        let mut args = vec!["status", "--porcelain=v1", "--untracked-files=all", "--"];
+        let mut args = vec![
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            IGNORE_SUBMODULES,
+            "--",
+        ];
         args.extend(pathspecs.iter().map(String::as_str));
-        full(root, &args)?
+        let mut listing = full(root, &args)?;
+        for line in staged_gitlink_lines(root, &pathspecs)? {
+            listing.push_str(&line);
+            listing.push('\n');
+        }
+        listing
     };
     if listing.trim().is_empty() {
         return Err(if pathspecs.is_empty() {
@@ -544,6 +612,7 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
+            IGNORE_SUBMODULES,
             "--",
         ];
         args.extend(pathspecs.iter().map(String::as_str));
@@ -559,6 +628,12 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
                 names.extend(entries.next().map(String::from));
             }
         }
+        // `status` hides staged gitlinks (#499); their names are still checked.
+        names.extend(
+            staged_gitlink_lines(root, pathspecs)?
+                .iter()
+                .filter_map(|line| line.get(3..).map(String::from)),
+        );
     }
     // Status shows a rename only when both names are in the pathspec, and the staged
     // name listing above shows a copy as a plain add, so a secret staged under a new
@@ -658,7 +733,14 @@ fn restore_index(root: &Path, index: &str, intent: &[String]) -> String {
 fn intent_to_add(root: &Path) -> Result<Vec<String>, String> {
     let out = full(
         root,
-        &["diff", "--name-only", "--diff-filter=A", "-z", "--"],
+        &[
+            "diff",
+            "--name-only",
+            "--diff-filter=A",
+            "-z",
+            IGNORE_SUBMODULES,
+            "--",
+        ],
     )?;
     Ok(out
         .split('\0')
@@ -811,8 +893,16 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
             ));
         }
     }
-    let dirty = git_read::git(root, &["status", "--porcelain=v1", "--untracked-files=no"])?;
-    if !dirty.trim().is_empty() {
+    let dirty = git_read::git(
+        root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=no",
+            IGNORE_SUBMODULES,
+        ],
+    )?;
+    if !dirty.trim().is_empty() || !staged_gitlinks(root, &[])?.is_empty() {
         return Err(
             "tracked files have uncommitted changes; commit or stash them before merging".into(),
         );
@@ -858,6 +948,7 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
     // `--numstat -z` names every path whole (`--stat` shortens a long or control-byte
     // name to `.../`), and `full` refuses a listing git printed past the read limit
     // rather than trusting its first bytes (issue #269).
+    // Commit-to-commit numbers only: a patch (-p) here would enter the submodule (#499).
     let raw = full(
         root,
         &[
@@ -958,7 +1049,13 @@ fn merge_run(root: &Path, arguments: &Value) -> Result<String, String> {
         }
         let conflicted = git_read::git(
             root,
-            &["diff", "--name-only", "--diff-filter=U", "--no-ext-diff"],
+            &[
+                "diff",
+                "--name-only",
+                "--diff-filter=U",
+                "--no-ext-diff",
+                IGNORE_SUBMODULES,
+            ],
         )
         .unwrap_or_default();
         let aborted = write(root, &["merge", "--abort"], Env::Local);

@@ -1,0 +1,3 @@
+### Fixed
+
+- Host git's uncommitted-changes check (shown at `/go` start) and the write-tier git tools (`git_commit`, `git_switch`, `git_merge`, `git_push` approval fingerprints, commit and merge previews, the commit's intent-to-add diff) pass `--ignore-submodules=all` to `git status` and working-tree `git diff`, so a `submodule.<name>.ignore=none` setting can no longer make git run inside a submodule and apply a filter driver or config include from `.git/modules/<name>/config`. A staged submodule pointer change (gitlink) stays visible to the write-tier fingerprint, commit listing, secret check and merge check through an index-only diff that never opens a submodule.

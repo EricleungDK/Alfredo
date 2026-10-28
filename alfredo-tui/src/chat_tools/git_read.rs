@@ -362,7 +362,7 @@ const FILTER_KEYS_ARGS: [&str; 5] = [
 /// per-submodule `submodule.<name>.ignore=none` in the repository's config or `.gitmodules`;
 /// the command-line option beats both. Git would then run in the submodule and read the
 /// config of `.git/modules/<name>`, which `refuse_filters` does not check.
-const IGNORE_SUBMODULES: &str = "--ignore-submodules=all";
+pub(crate) const IGNORE_SUBMODULES: &str = "--ignore-submodules=all";
 
 const INCLUDES_NOT_RUN: &str =
     "repository config includes another file (include.path or includeIf); this git tool is not run";
