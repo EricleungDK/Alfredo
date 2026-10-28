@@ -308,6 +308,23 @@ fn a_failed_repairs_long_title_still_shows_the_key_error_line_at_100_columns() {
 }
 
 #[test]
+fn the_failure_row_only_appears_when_a_repair_title_was_cut() {
+    let long_hint = format!("Repair #1: {}", "tighten the parser edge cases ".repeat(8));
+    for title in [
+        "Repair #1: autopilot: Check failed (exit 1): AssertionError",
+        long_hint.as_str(),
+    ] {
+        let mut fixture = Fixture::new(vec![
+            task(1, "Make answer return 42", TaskStatus::Failed, vec![], None),
+            task(2, title, TaskStatus::Failed, vec![], Some(1)),
+        ]);
+        fixture.select(2);
+        let text = inspector_text(&fixture, 100);
+        assert!(!text.contains("Failure"), "{title}: {text}");
+    }
+}
+
+#[test]
 fn minimum_size_keeps_selected_tree_row_composer_and_scrollable_exact_inspector() {
     let mut fixture = hierarchy();
     fixture.select(5);

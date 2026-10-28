@@ -2349,6 +2349,13 @@ fn last_failure_line(detail: &str) -> String {
     shorten(&first, LIMIT)
 }
 
+/// The summary line of an autopilot repair's title (`Repair #N: autopilot: <failure>`), as
+/// `Last failure` shows it, so a title cut for width keeps the check's key error line.
+pub(crate) fn title_failure_line(title: &str) -> Option<String> {
+    let (_, detail) = title.split_once(": autopilot: ")?;
+    Some(last_failure_line(detail))
+}
+
 /// Split a `Check ...: <label>: a | b | c` summary into its head and the most
 /// specific output line.
 fn check_head_and_key(summary: &str) -> Option<(&str, String)> {
