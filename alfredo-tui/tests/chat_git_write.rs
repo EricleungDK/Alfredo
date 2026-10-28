@@ -630,6 +630,7 @@ fn submodule_exposed_calls() -> Vec<(&'static str, serde_json::Value)> {
             "git_commit",
             json!({"message": "m", "files": ["README.md"]}),
         ),
+        ("git_commit", json!({"message": "m", "files": ["sub"]})),
         ("git_switch", json!({"branch": "feature/x", "create": true})),
         ("git_merge", json!({"source": "alfredo/go-7"})),
         ("git_push", json!({})),
@@ -663,6 +664,29 @@ fn a_submodule_filter_never_runs_from_a_write_tier_card() {
         }
     }
     assert!(ran.is_empty(), "submodule filter ran from: {ran:#?}");
+}
+
+/// Issue #499: applying an approved commit of named files runs its intent-to-add diff over
+/// the working tree, which must not enter the submodule either.
+#[test]
+fn a_submodule_filter_never_runs_from_an_approved_commit() {
+    let repo = Repo::new();
+    let config = repo_with_ignore_none_submodule(&repo);
+    let marker = repo.base.join("submodule-filter-ran");
+    append(
+        &config,
+        &format!(
+            "[filter \"x\"]\n\tclean = touch {}; cat\n",
+            marker.display()
+        ),
+    );
+    fs::write(repo.root.join("README.md"), "# Demo\nedited\n").unwrap();
+    let committed = repo.approve(
+        "git_commit",
+        json!({"message": "edit readme", "files": ["README.md"]}),
+    );
+    assert!(committed.is_ok(), "{committed:?}");
+    assert!(!marker.exists(), "approved commit ran a submodule filter");
 }
 
 /// Issue #499: a FIFO `include.path` in the submodule's config never holds a write-tier
