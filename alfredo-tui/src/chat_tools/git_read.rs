@@ -1330,6 +1330,42 @@ mod tests {
         assert!(error.contains("includes another file"), "{error}");
     }
 
+    /// Issue #474 (review): the caller's vetted excludes file beats the `/dev/null` default
+    /// of the repository-file overrides, and a file named by the repository config is not read.
+    #[test]
+    fn a_vetted_excludes_file_applies_and_the_repository_one_does_not() {
+        let root = scratch_repo("vetted-excludes", "");
+        let vetted = root.join("vetted-rules");
+        fs::write(&vetted, "vetted.txt\n").unwrap();
+        let repo_rules = root.join("repo-rules");
+        fs::write(&repo_rules, "repo-only.txt\n").unwrap();
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(".git/config"))
+            .unwrap();
+        write!(
+            config,
+            "[core]\n\texcludesFile = {}\n",
+            repo_rules.display()
+        )
+        .unwrap();
+        drop(config);
+        assert_eq!(is_ignored(&root, "vetted.txt", Some(&vetted)), Ok(true));
+        assert_eq!(is_ignored(&root, "vetted.txt", None), Ok(false));
+        assert_eq!(is_ignored(&root, "repo-only.txt", Some(&vetted)), Ok(false));
+        assert_eq!(is_ignored(&root, "repo-only.txt", None), Ok(false));
+        let listing = list_unignored(&root, "", Some(&vetted), 1 << 20).unwrap();
+        assert!(!listing.contains(&"vetted.txt".to_string()));
+        fs::write(root.join("vetted.txt"), "x").unwrap();
+        fs::write(root.join("repo-only.txt"), "x").unwrap();
+        let listing = list_unignored(&root, "", Some(&vetted), 1 << 20).unwrap();
+        assert!(!listing.contains(&"vetted.txt".to_string()), "{listing:?}");
+        assert!(
+            listing.contains(&"repo-only.txt".to_string()),
+            "{listing:?}"
+        );
+    }
+
     /// Issue #312: a copy search past git's rename limit warns on stderr and exits 0. The
     /// complete-listing helper refuses that output, and the same search with `-l0` passes.
     #[test]

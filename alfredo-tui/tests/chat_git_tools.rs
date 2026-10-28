@@ -756,16 +756,15 @@ fn a_worktree_back_reference_fifo_refuses_promptly_and_never_hangs() {
 /// Issue #461: like `dispatch_within`, but the answer must arrive in 3 s. A refusal made
 /// before git runs is immediate; a git process stuck on a FIFO only gives up at 15 s.
 fn dispatch_promptly(root: &Path, tool: &str) -> String {
+    dispatch_promptly_with(root, tool, json!({}))
+}
+
+/// [`dispatch_promptly`] with call arguments.
+fn dispatch_promptly_with(root: &Path, tool: &str, arguments: serde_json::Value) -> String {
     let (sender, receiver) = mpsc::channel();
     let (root, name) = (root.to_path_buf(), tool.to_string());
     std::thread::spawn(move || {
-        let output = chat_tools::dispatch(
-            &root,
-            &ToolCall {
-                name,
-                arguments: json!({}),
-            },
-        );
+        let output = chat_tools::dispatch(&root, &ToolCall { name, arguments });
         let _ = sender.send(output);
     });
     receiver
@@ -1287,6 +1286,51 @@ fn a_fifo_named_by_excludes_attributes_or_mailmap_config_never_stalls() {
             );
         }
     }
+}
+
+/// Issue #474 (review): `diff.orderFile` is read by git on its own whenever a diff has
+/// changes, so a FIFO there stalls `git_status` and both `git_diff` forms unless overridden.
+#[test]
+fn a_fifo_diff_order_file_never_stalls_status_or_diff() {
+    let repo = Repo::new();
+    repo.go_branch();
+    fs::write(repo.root.join("README.md"), "# Demo\nchanged\n").unwrap();
+    git(&repo.root, &["add", "README.md"]);
+    fs::write(repo.root.join("README.md"), "# Demo\nchanged again\n").unwrap();
+    let _release = config_with_fifo(&repo, "order.fifo", "[diff]\n\torderFile = {}\n");
+    for (tool, arguments) in [
+        ("git_status", json!({})),
+        ("git_diff", json!({})),
+        ("git_diff", json!({ "staged": true })),
+        (
+            "git_diff",
+            json!({ "base": "main", "target": "alfredo/go-7" }),
+        ),
+    ] {
+        let output = dispatch_promptly_with(&repo.root, tool, arguments.clone());
+        assert!(
+            !output.contains("time limit") && !output.contains("took longer"),
+            "{tool} {arguments}: {output}"
+        );
+    }
+}
+
+/// Issue #474 (review): `log.mailmap=false` is what keeps a committed `.mailmap` out of
+/// `git_log`, also when the repository config turns `log.mailmap` on.
+#[test]
+fn a_committed_mailmap_is_not_applied_to_git_log() {
+    let repo = Repo::new();
+    fs::write(repo.root.join(".mailmap"), "Mapped <t@e> T <t@e>\n").unwrap();
+    git(&repo.root, &["add", ".mailmap"]);
+    git(&repo.root, &["commit", "-q", "-m", "add mailmap"]);
+    let mut config = fs::read_to_string(repo.root.join(".git/config")).unwrap();
+    config.push_str("[log]\n\tmailmap = true\n");
+    fs::write(repo.root.join(".git/config"), config).unwrap();
+    let output = dispatch_promptly(&repo.root, "git_log");
+    assert!(
+        output.contains("add mailmap") && output.contains(" T: ") && !output.contains("Mapped"),
+        "{output}"
+    );
 }
 
 /// Issue #474 (3): a regular `core.excludesFile` in the repository config does not refuse
