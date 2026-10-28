@@ -442,6 +442,9 @@ fn step(
     last_save: &mut Instant,
 ) -> Result<(), String> {
     work.tasks.poll();
+    for session in &mut work.app.sessions {
+        session.protect_plan_origin(work.tasks.planner.pending_origin());
+    }
     for event in work.tasks.take_control_events() {
         let intent = Intent::Control {
             request: event.request,

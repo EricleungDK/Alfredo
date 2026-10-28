@@ -269,9 +269,14 @@ impl Snapshot {
         Ok(())
     }
     pub fn restore(mut self) -> App {
+        let origin = self
+            .plan_draft
+            .as_ref()
+            .and_then(|draft| draft.origin.clone());
         for session in &mut self.sessions {
             session.restore_history();
             session.restore_commands();
+            session.protect_plan_origin(origin.as_ref());
             if let Some(draft) = &self.plan_draft {
                 let recovered: Vec<_> = session
                     .commands()
