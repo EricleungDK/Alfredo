@@ -47,7 +47,7 @@ use Ollama's own forms (`host:port`, `0.0.0.0`).
 - State lives in `$HOME/.local/state/alfredo` (or `--state-dir` /
   `ALFREDO_STATE_DIR`), outside your repositories. Accepted work also leaves Git
   refs under `refs/alfredo/` and branches named `alfredo/...` in your repository.
-- Current formats: task schema 16, conversation schema 17. Older state is upgraded
+- Current formats: task schema 17, conversation schema 19. Older state is upgraded
   on first write, with an exact backup of the original file. Older binaries may
   refuse newer state: back up the state directory before upgrading, and do not
   delete state to force a downgrade.
