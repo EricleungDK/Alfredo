@@ -153,11 +153,10 @@ pub async fn inspect(
                 return Err(crate::worker::NO_COMMITS.to_string());
             }
             let config = crate::worker::git(workspace, &crate::worker::REPOSITORY_CONFIG_ARGS).await?;
-            if crate::worker::config_needs_qualification(&config) {
-                return Err(
-                    "Repository checkout filters/includes need qualification before worker execution"
-                        .into(),
-                );
+            if let Some(key) = crate::worker::qualification_key(&config) {
+                return Err(format!(
+                    "Repository checkout filters/includes need qualification before worker execution: {key:?} is set"
+                ));
             }
             Ok::<_, String>(root)
         }

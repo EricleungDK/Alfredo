@@ -302,12 +302,14 @@ fn committed(plan: &Plan) -> impl Fn(&str) -> bool + '_ {
         };
         std::process::Command::new("/usr/bin/git")
             .args(crate::worker::HARDENED_GIT_ARGS)
+            .args(crate::worker::LOCAL_ONLY_GIT_ARGS)
             .arg("-C")
             .arg(&scope.workspace)
             .args(["--literal-pathspecs", "ls-tree", "--name-only", "-z"])
             .arg(&context.baseline)
             .arg("--")
             .arg(path)
+            .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .map_or(true, |output| {
@@ -334,10 +336,12 @@ fn committed_size(plan: &Plan) -> impl Fn(&str) -> Option<u64> + '_ {
         let scope = plan.scope.as_ref()?;
         let output = std::process::Command::new("/usr/bin/git")
             .args(crate::worker::HARDENED_GIT_ARGS)
+            .args(crate::worker::LOCAL_ONLY_GIT_ARGS)
             .arg("-C")
             .arg(&scope.workspace)
             .args(["--literal-pathspecs", "cat-file", "-s"])
             .arg(format!("{}:{path}", context.baseline))
+            .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .ok()?;

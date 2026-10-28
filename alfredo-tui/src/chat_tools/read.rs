@@ -177,9 +177,11 @@ pub(crate) fn read_file_within(
     Ok(out)
 }
 
-/// Regular files under `start` in sorted order; symlinks are never followed.
+/// Regular files under `start` (inside the canonical `root`) in sorted order; symlinks are
+/// never followed. Each entry is tested by its workspace-relative path, so a rule scoped to
+/// a parent directory (`.docker/config.json`) applies here as it does in the git listing.
 /// Returns the files and whether the walk stopped early.
-fn walk(start: &Path, limit: usize, skip_noise: bool) -> (Vec<PathBuf>, bool) {
+fn walk(root: &Path, start: &Path, limit: usize, skip_noise: bool) -> (Vec<PathBuf>, bool) {
     let mut files = Vec::new();
     let mut stack = vec![start.to_path_buf()];
     let mut visits = 0;
@@ -199,7 +201,15 @@ fn walk(start: &Path, limit: usize, skip_noise: bool) -> (Vec<PathBuf>, bool) {
                 continue;
             };
             let name = entry.file_name().to_string_lossy().into_owned();
-            if excluded(&name) || (skip_noise && noise(&name.to_lowercase())) {
+            // A path outside `root` cannot be tested by its relative name: skip it.
+            let Ok(relative) = entry
+                .path()
+                .strip_prefix(root)
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            else {
+                continue;
+            };
+            if excluded(&relative) || (skip_noise && noise(&name.to_lowercase())) {
                 continue;
             }
             if kind.is_dir() {
@@ -243,12 +253,12 @@ fn discover(root: &Path, start: &Path, limit: usize) -> (Vec<PathBuf>, bool, Opt
     // for it by name: list it with the plain walk and say so.
     let named = noise(&rel.to_lowercase());
     if named || (!rel.is_empty() && ignored == Ok(true)) {
-        let (files, cut) = walk(start, limit, false);
+        let (files, cut) = walk(&canonical, start, limit, false);
         let note = format!("note: {rel} is ignored (by .gitignore or as a virtualenv or cache directory); listed because you named it");
         return (files, cut, Some(note));
     }
     let Ok(listing) = git_read::list_unignored(root, &rel, excludes.as_deref(), MAX_LISTING) else {
-        let (files, cut) = walk(start, limit, true);
+        let (files, cut) = walk(&canonical, start, limit, true);
         return (files, cut, None);
     };
     let mut paths: Vec<Vec<&str>> = listing

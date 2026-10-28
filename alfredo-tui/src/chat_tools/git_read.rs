@@ -330,16 +330,22 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     git_output(root, args, MAX_OUTPUT * 2).map(|(_, output)| output)
 }
 
-/// Config keys that can run a filter driver, pull in another config file or move the
-/// working tree outside the workspace (`core.worktree`, #309), in every scope git reads
+/// Config keys that can run a filter driver, pull in another config file, move the working
+/// tree outside the workspace (`core.worktree`, #309), or make git lazy-fetch through a
+/// partial clone's promisor and its transport program (#467), in every scope git reads
 /// (includes are followed; no scope flag, as `REPOSITORY_CONFIG_ARGS`). git prints only the
 /// matching key names, so a large config cannot push one out of the output the way it cuts
-/// a full `config --list` (#308).
-const FILTER_KEYS_ARGS: [&str; 4] = [
+/// a full `config --list` (#308). `remote\..+` spans subsections that hold `=`, as
+/// `qualification_key` does.
+/// `--show-scope` labels each line, so the command-line overrides of the hardened environment
+/// (`protocol.allow=never`, which matches the `protocol.allow` key) are skipped: they are
+/// Alfredo's own settings, not the repository's (#467 review round 2).
+const FILTER_KEYS_ARGS: [&str; 5] = [
     "config",
+    "--show-scope",
     "--name-only",
     "--get-regexp",
-    "^(filter|include|includeif)\\.|^core\\.worktree$",
+    "^(filter|include|includeif)\\.|^core\\.(worktree|sshcommand|gitproxy)$|^extensions\\.partialclone$|^remote\\..+\\.(promisor|uploadpack|receivepack)$|^protocol\\.(allow|.+\\.allow)$",
 ];
 
 const INCLUDES_NOT_RUN: &str =
@@ -382,15 +388,34 @@ fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), 
         None => Err(format!(
             "repository config is too large to check for filter drivers; {NOT_RUN}"
         )),
-        // Every listed key is a filter, include or worktree key, so any output refuses.
+        // Every listed key is a qualifying key, so any output refuses; the first three are named.
         Some(status) if status.success() => {
-            if out.is_empty() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "repository config defines filter drivers, includes or core.worktree; {NOT_RUN}"
-                ))
+            let listing = String::from_utf8_lossy(&out);
+            // Each line is `scope<TAB>key`; command-scope lines are Alfredo's own overrides.
+            let keys: Vec<&str> = listing
+                .lines()
+                .filter_map(|line| match line.split_once('\t') {
+                    Some(("command", _)) => None,
+                    Some((_, key)) => Some(key),
+                    None => Some(line),
+                })
+                .collect();
+            if keys.is_empty() {
+                return Ok(());
             }
+            let named: Vec<String> = keys
+                .iter()
+                .take(3)
+                .map(|key| format!("{:?}", key.chars().take(96).collect::<String>()))
+                .collect();
+            let more = match keys.len().saturating_sub(3) {
+                0 => String::new(),
+                count => format!(" and {count} more"),
+            };
+            Err(format!(
+                "repository config sets {}{more}, which git would run or follow (filter drivers, includes, core.worktree, partial-clone or transport settings); {NOT_RUN}",
+                named.join(", ")
+            ))
         }
         // `--get-regexp` exits 1 when no key matches; a broken config exits 128.
         Some(status) if status.code() == Some(1) && out.is_empty() => Ok(()),
@@ -1254,10 +1279,12 @@ pub(crate) fn hardened(command: &mut Command) -> &mut Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_PAGER", "cat")
         .arg("--no-optional-locks")
         .arg("--no-pager")
         .args(crate::worker::HARDENED_GIT_ARGS)
+        .args(crate::worker::LOCAL_ONLY_GIT_ARGS)
         .args(["-c", "diff.external=", "-c", "core.pager=cat"])
 }
 
@@ -1673,5 +1700,160 @@ mod tests {
         .unwrap();
         assert!(status.is_none());
         assert_eq!(out.len(), 4096);
+    }
+
+    /// Issue #467: a partial clone whose missing blob makes git lazy-fetch through
+    /// `remote.origin.uploadpack`, a program the repository chose. The program appends `RAN`
+    /// to the returned marker when it runs, then fails. Returns (workspace, marker).
+    fn partial_clone_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("alfredo-partial-{pid}-{name}"));
+        let marker = std::env::temp_dir().join(format!("alfredo-partial-{pid}-{name}.ran"));
+        let script = std::env::temp_dir().join(format!("alfredo-partial-{pid}-{name}.sh"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_file(&marker);
+        fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&root)
+                .args(["-c", "user.name=T", "-c", "user.email=t@e"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "i"]);
+        let blob = Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "HEAD:a.txt"])
+            .output()
+            .unwrap()
+            .stdout;
+        let blob = String::from_utf8(blob).unwrap().trim().to_string();
+        fs::remove_file(root.join(".git/objects").join(&blob[..2]).join(&blob[2..])).unwrap();
+        fs::write(root.join("a.txt"), "two\n").unwrap();
+        fs::write(
+            &script,
+            format!("#!/bin/sh\necho RAN >> '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let url = root.display().to_string();
+        let uploadpack = script.display().to_string();
+        git(&["config", "core.repositoryformatversion", "1"]);
+        git(&["config", "extensions.partialclone", "origin"]);
+        git(&["config", "remote.origin.url", &url]);
+        git(&["config", "remote.origin.promisor", "true"]);
+        git(&["config", "remote.origin.uploadpack", &uploadpack]);
+        (root, marker)
+    }
+
+    /// The chat git_diff tool, on a partial clone with a missing blob (#467), never runs
+    /// the repository's uploadpack program.
+    #[test]
+    fn git_diff_never_runs_a_partial_clone_uploadpack_program() {
+        let (root, marker) = partial_clone_fixture("diff-tool");
+        let _ = git_diff(&root, &json!({}));
+        assert!(
+            !marker.exists(),
+            "git_diff ran the repository's uploadpack program"
+        );
+    }
+
+    /// The hardened git environment alone (no config gate) never lazy-fetches through the
+    /// partial clone's uploadpack program (#467).
+    #[test]
+    fn hardened_git_diff_never_runs_a_partial_clone_uploadpack_program() {
+        let (root, marker) = partial_clone_fixture("diff-env");
+        let clock = Clock::start(DEADLINE);
+        let command =
+            git_command_within(&root, &["diff", "--stat", "--patch", "--", "."], clock).unwrap();
+        let _ = run_bounded(command, 1 << 20, DEADLINE);
+        assert!(
+            !marker.exists(),
+            "hardened git ran the repository's uploadpack program"
+        );
+    }
+
+    /// The read-tier config gate refuses a partial clone and names the offending key (#467).
+    #[test]
+    fn refuse_filters_refuses_and_names_partial_clone_and_transport_keys() {
+        let (root, marker) = partial_clone_fixture("refuse-names");
+        let error = refuse_filters(&root).unwrap_err();
+        assert!(error.contains("remote.origin.uploadpack"), "{error}");
+        assert!(!marker.exists());
+    }
+
+    /// Review round 2 (#467): a repository's `protocol.<name>.allow` overrides the
+    /// command-line `protocol.allow=never`, so the config gate refuses it by name. The
+    /// unrelated `protocol.version` stays allowed.
+    #[test]
+    fn refuse_filters_refuses_and_names_protocol_allow_overrides() {
+        let root = scratch_repo("protocol-allow", "[protocol \"file\"]\n\tallow = always\n");
+        let error = refuse_filters(&root).unwrap_err();
+        assert!(error.contains("protocol.file.allow"), "{error}");
+        let version = scratch_repo("protocol-version", "[protocol]\n\tversion = 2\n");
+        let verdict = refuse_filters(&version);
+        assert!(verdict.is_ok(), "protocol.version refused: {verdict:?}");
+    }
+
+    /// Review round 2 (#467): `git config KEY VALUE` in `root`.
+    fn set_config(root: &Path, key: &str, value: &str) {
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", key, value])
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    /// Review round 2 (#467), layer isolation: the config gate is bypassed by calling the
+    /// builder directly. A repository `protocol.file.allow=always` overrides the command-line
+    /// protocol policy, so only GIT_NO_LAZY_FETCH from `hardened()` can stop the fetch.
+    /// Deleting that env line makes this fail.
+    #[test]
+    fn hardened_env_alone_stops_a_lazy_fetch_past_a_protocol_override() {
+        let (root, marker) = partial_clone_fixture("layer-env");
+        set_config(&root, "protocol.file.allow", "always");
+        let command = git_command_within(
+            &root,
+            &["diff", "--stat", "--patch", "--", "."],
+            Clock::start(DEADLINE),
+        )
+        .unwrap();
+        let _ = run_bounded(command, 1 << 20, DEADLINE);
+        assert!(
+            !marker.exists(),
+            "hardened git ran the uploadpack program past its environment"
+        );
+    }
+
+    /// Review round 2 (#467), layer isolation: GIT_NO_LAZY_FETCH is removed from the
+    /// `hardened()` command, so only `protocol.allow=never` from it can stop the fetch
+    /// (the fixture sets no protocol override). Deleting that protocol line makes this fail.
+    #[test]
+    fn hardened_protocol_policy_alone_stops_a_lazy_fetch() {
+        let (root, marker) = partial_clone_fixture("layer-protocol");
+        let mut command = git_command_within(
+            &root,
+            &["diff", "--stat", "--patch", "--", "."],
+            Clock::start(DEADLINE),
+        )
+        .unwrap();
+        command.env_remove("GIT_NO_LAZY_FETCH");
+        let _ = run_bounded(command, 1 << 20, DEADLINE);
+        assert!(
+            !marker.exists(),
+            "hardened git ran the uploadpack program past its protocol policy"
+        );
     }
 }

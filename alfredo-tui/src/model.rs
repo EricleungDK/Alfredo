@@ -299,6 +299,17 @@ pub struct Event {
     pub update: Update,
 }
 
+/// The pending plan draft's origin request, held by the session that may own that command.
+/// It is derived runtime state, so it never takes part in session equality.
+#[derive(Clone, Debug, Default)]
+struct PlanOrigin(Option<crate::planner_command::Request>);
+
+impl PartialEq for PlanOrigin {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
@@ -320,6 +331,10 @@ pub struct Session {
     /// `RETIRED_COMMANDS`), so an eviction does not make a repeat admissible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     retired_commands: Vec<String>,
+    /// Origin of the pending plan draft (issue #475): the draft is saved with this command,
+    /// whatever its state, so eviction must keep it. Runtime only, never saved.
+    #[serde(skip)]
+    plan_origin: PlanOrigin,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     sources: std::collections::BTreeMap<usize, ResponseSource>,
     /// User-message indices of cancelled or failed turns the user moved past with
@@ -437,6 +452,7 @@ impl Session {
             task_receipts: Vec::new(),
             commands: Vec::new(),
             retired_commands: Vec::new(),
+            plan_origin: PlanOrigin::default(),
             sources: Default::default(),
             interrupted: Vec::new(),
             status: Status::Ready,
@@ -2102,6 +2118,14 @@ impl Session {
         });
         true
     }
+    /// Name the pending plan draft's origin request (or none once the draft is gone), so
+    /// command-history eviction keeps that command in any state: the draft is saved with
+    /// it, and a save without it is refused (issue #475).
+    pub fn protect_plan_origin(&mut self, origin: Option<&crate::planner_command::Request>) {
+        if self.plan_origin.0.as_ref() != origin {
+            self.plan_origin = PlanOrigin(origin.cloned());
+        }
+    }
     fn evictable(&self, index: usize, latest_dispatch: Option<usize>) -> bool {
         use crate::{
             command_intent::Intent, console_command::CommandState, control_command::Outcome,
@@ -2138,7 +2162,9 @@ impl Session {
         ) || command.intent.selection_request().is_some()
             || matches!(command.intent, Intent::Wayfinder { .. })
             || enabling
-            || named_by_child)
+            || named_by_child
+            || self.plan_origin.0.is_some()
+                && command.intent.planner_request() == self.plan_origin.0.as_ref())
     }
     pub fn task_receipts(&self) -> &[TaskReceiptRef] {
         &self.task_receipts

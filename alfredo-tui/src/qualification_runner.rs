@@ -606,7 +606,9 @@ fn execute(
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
                 .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_NO_LAZY_FETCH", "1")
                 .args(crate::worker::HARDENED_GIT_ARGS)
+                .args(crate::worker::LOCAL_ONLY_GIT_ARGS)
                 .args([
                     "-C",
                     workspace.to_str().ok_or("Invalid fixture path")?,

@@ -840,6 +840,60 @@ async fn gitlink_in_the_baseline_refuses_the_run_before_the_check_starts() {
     assert!(fixture.store.snapshot().unwrap().tasks[0].run.is_none());
 }
 
+/// Issue #470: `/go` calls `uncommitted_changes` at every start. A nested gitfile whose
+/// target holds a FIFO named HEAD makes `git status` block forever; the call must return
+/// within its deadline and report the workspace as not checked, never clean.
+#[test]
+fn uncommitted_changes_returns_promptly_with_a_nested_gitfile_to_a_fifo() {
+    use std::{fs, process::Command, sync::mpsc, time::Duration};
+    let root = std::env::temp_dir().join(format!("nested-fifo-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["-c", "user.name=T", "-c", "user.email=t@e"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success())
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "m"]);
+    fs::create_dir_all(root.join("fifodir")).unwrap();
+    fs::create_dir_all(root.join("sub")).unwrap();
+    let fifo = root.join("fifodir/HEAD");
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(root.join("sub/.git"), "gitdir: ../fifodir\n").unwrap();
+    let (tx, rx) = mpsc::channel();
+    let path = root.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(alfredo_tui::worker::uncommitted_changes(&path));
+    });
+    let received = rx.recv_timeout(Duration::from_secs(20));
+    if received.is_err() {
+        // Unblock the stuck git (its FIFO open now has a writer) so no child is left behind.
+        let unblock = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = fs::OpenOptions::new().write(true).open(unblock);
+        });
+    }
+    let changes = received.expect(
+        "uncommitted_changes (called by /go) did not return within 20 s: host git blocked on the FIFO",
+    );
+    let _ = fs::remove_dir_all(&root);
+    let (count, _) = changes.expect("the workspace is a readable repository with a commit");
+    assert_ne!(
+        count, 0,
+        "a timed-out status check must not report the workspace as clean"
+    );
+}
+
 #[test]
 fn file_policy_rejects_metadata_traversal_duplicates_and_binary_edits() {
     for file in [
@@ -6685,6 +6739,28 @@ fn edit_blocks_meet_the_same_policy_checks_as_file_blocks() {
 }
 
 #[tokio::test]
+async fn worker_prompt_offers_edit_blocks_only_for_a_large_approved_file() {
+    const PARAGRAPH: &str = "For a small change to an existing large file";
+    const CLAUSE: &str = "or with EDIT blocks for small changes to large files";
+    let small = "def answer():\n    return 0\n";
+    let large = format!("{}{small}", "# padding line\n".repeat(1100));
+    assert!(large.len() >= 16 * 1024 && large.len() < 64 * 1024);
+    for (content, edit) in [(small.to_string(), false), (large, true)] {
+        let fixture = unittest_fixture();
+        // The fixture already commits the small calc.py.
+        if edit {
+            commit_files(&fixture, &[("calc.py", &content)]);
+        }
+        let (request, _) = run_captured(&fixture, 1, "def answer():\n    return 42\n", None).await;
+        let prompt = last_prompt(&request);
+        assert_eq!(prompt.contains(PARAGRAPH), edit, "{prompt}");
+        assert_eq!(prompt.contains(CLAUSE), edit, "{prompt}");
+        assert_eq!(prompt.contains("=== END EDIT ==="), edit, "{prompt}");
+        assert!(prompt.contains("=== FILE: <path> ==="), "{prompt}");
+    }
+}
+
+#[tokio::test]
 async fn edit_block_changes_the_tail_of_a_large_file_without_re_emitting_it() {
     let fixture = unittest_fixture();
     let helpers: String = (0..1700)
@@ -6989,10 +7065,10 @@ async fn blocks_answer_is_requested_without_schema_and_applied_verbatim() {
     let prompt = last_prompt(&request);
     assert!(prompt.contains("=== FILE: <path> ==="), "{prompt}");
     assert!(!prompt.contains("JSON schema"), "{prompt}");
-    // The format is restated after the long source context.
+    // The format is restated after the long source context; this small file gets no EDIT clause.
     assert!(
         prompt.trim_end().ends_with(
-            "Answer only with FILE blocks, one per changed file, each ending with === END FILE ===, or with EDIT blocks for small changes to large files, each ending with === END EDIT ==="
+            "Answer only with FILE blocks, one per changed file, each ending with === END FILE ==="
         ),
         "{prompt}"
     );

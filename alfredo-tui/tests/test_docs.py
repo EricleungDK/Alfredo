@@ -94,6 +94,18 @@ class StatusTests(unittest.TestCase):
         self.assertNotIn('`main` does not yet', status)
 
 
+class InstallSchemaTests(unittest.TestCase):
+    def test_install_states_the_schema_versions_the_binary_writes(self):
+        const = re.compile(r'SCHEMA_VERSION: u32 = (\d+)')
+        tasks = const.search((ROOT / 'alfredo-tui/src/tasks.rs').read_text(encoding='utf-8'))
+        convs = const.search((ROOT / 'alfredo-tui/src/conversations.rs').read_text(encoding='utf-8'))
+        self.assertTrue(tasks and convs, 'SCHEMA_VERSION constant not found')
+        install = (ROOT / 'alfredo-tui/INSTALL.md').read_text(encoding='utf-8')
+        stated = re.search(r'task schema (\d+), conversation schema (\d+)', install)
+        self.assertTrue(stated, 'INSTALL.md must state "task schema N, conversation schema M"')
+        self.assertEqual((tasks.group(1), convs.group(1)), stated.groups())
+
+
 class SourceLayoutTests(unittest.TestCase):
     def test_readme_source_layout_names_every_src_module(self):
         readme = (ROOT / 'alfredo-tui/README.md').read_text(encoding='utf-8')
