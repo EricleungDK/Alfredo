@@ -3492,6 +3492,132 @@ fn last_failure_without_an_error_line_ends_with_the_last_output_line() {
     assert!(line.ends_with("boom"), "{line}");
 }
 
+const KEY_LINE: &str = "AssertionError: answer was 41 not 42";
+
+/// Run the failing key-line check with `repairs` repairs and draw the summary at
+/// `width` columns; returns the report and the summary pane's rows (side pane cut off).
+fn failed_key_line_summary(repairs: u32, width: u16) -> (String, Vec<String>) {
+    let fixture = Fixture::new();
+    let server = Server::new(move |request, _| {
+        if planner(request) {
+            return json!({"tasks": [{"title": "Make answer return 42", "acceptance": ["answer() is 42"],
+                "model": "fixture", "dependencies": [], "policy": {"files": ["calc.py"],
+                "check": check("import sys; sys.exit('AssertionError: answer was 41 not 42')")}}]})
+            .to_string();
+        }
+        bad_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Answer", "fixture", repairs, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failed", finished);
+    let report = autopilot.report().unwrap().to_string();
+    let app = alfredo_tui::model::App::new("fixture".into());
+    control.set_visible(true);
+    control.autopilot_report = Some(report.clone());
+    (report, summary_pane_rows(&app, &control, width, 40))
+}
+
+/// The rows of the summary panel: everything right of the side pane, border and padding off.
+fn summary_pane_rows(
+    app: &alfredo_tui::model::App,
+    control: &TaskControl,
+    width: u16,
+    height: u16,
+) -> Vec<String> {
+    let start = alfredo_tui::ui::pane_width(width) as usize + 2;
+    render_rows(app, control, width, height)
+        .iter()
+        .map(|row| {
+            row.chars()
+                .skip(start)
+                .collect::<String>()
+                .trim_end_matches(['│', ' '])
+                .to_string()
+        })
+        .collect()
+}
+
+/// The words of the panel rows from the one starting with `from`, joined across wraps.
+fn wrapped_text(rows: &[String], from: &str) -> String {
+    let at = rows
+        .iter()
+        .position(|row| row.trim_start().starts_with(from))
+        .unwrap_or_else(|| panic!("{from}: {}", rows.join("\n")));
+    let mut text = rows[at].trim_start().to_string();
+    for row in &rows[at + 1..] {
+        // Continuation rows hang under the label; a new row starts shallower.
+        if !row.starts_with("        ") {
+            break;
+        }
+        text.push(' ');
+        text.push_str(row.trim());
+    }
+    text
+}
+
+#[test]
+fn last_failure_row_wraps_so_the_whole_key_line_is_on_screen_at_100_columns() {
+    let (report, rows) = failed_key_line_summary(0, 100);
+    let screen = rows.join("\n");
+    assert!(report.contains(KEY_LINE), "{report}");
+    let text = wrapped_text(&rows, "Last failure:");
+    assert!(text.ends_with(KEY_LINE), "{text}\n{screen}");
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains('…') || !row.contains("Last failure")),
+        "{screen}"
+    );
+    // Continuation rows hang under the row, not at the pane's left edge.
+    let at = rows
+        .iter()
+        .position(|row| row.contains("Last failure:"))
+        .unwrap();
+    assert!(rows[at + 1].starts_with("        "), "{screen}");
+    assert!(!rows[at + 1].contains("Last failure"), "{screen}");
+}
+
+#[test]
+fn no_change_prefix_does_not_push_the_key_line_off_screen_at_100_columns() {
+    let (report, rows) = failed_key_line_summary(1, 100);
+    let screen = rows.join("\n");
+    assert!(
+        report.contains("No change from previous attempt · Check failed"),
+        "{report}"
+    );
+    let text = wrapped_text(&rows, "Last failure:");
+    assert!(text.contains("No change from previous attempt"), "{text}");
+    assert!(text.ends_with(KEY_LINE), "{text}\n{screen}");
+}
+
+#[test]
+fn next_and_detail_rows_wrap_instead_of_clipping_at_100_columns() {
+    let detail = "repair budget exhausted (2/2): the worker kept returning the same file and the check kept failing with the same message each time";
+    let next = "Next: Try a larger model, /repair 4 <hint>, or raise --max-repairs after reading the retained run evidence for every attempt";
+    let report = format!(
+        "✗ Autopilot failed\nShip it\n\nTasks     0/1 accepted\nRepairs   2\nBranch    none\n\n✗ #1  Make answer return 42\n      {detail}\n      {next}"
+    );
+    let fixture = Fixture::new();
+    let server = Server::new(|_, _| String::new());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    control.set_visible(true);
+    control.autopilot_report = Some(report);
+    let app = alfredo_tui::model::App::new("fixture".into());
+    let rows = summary_pane_rows(&app, &control, 100, 30);
+    let screen = rows.join("\n");
+    assert_eq!(
+        wrapped_text(&rows, "repair budget exhausted"),
+        detail,
+        "{screen}"
+    );
+    assert_eq!(wrapped_text(&rows, "Next:"), next, "{screen}");
+    assert!(rows.iter().all(|row| !row.ends_with('…')), "{screen}");
+}
+
 #[test]
 fn planner_prose_is_reported_in_plain_words_without_serde_detail() {
     let fixture = Fixture::new();

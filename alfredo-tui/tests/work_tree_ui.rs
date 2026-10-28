@@ -279,6 +279,34 @@ fn group_selection_removes_stale_task_model_evidence_and_actions() {
     assert!(collapsed.contains("├ work  1/5 done "));
 }
 
+/// The inspector text right of the tree, borders dropped and wrapping joined.
+fn inspector_text(fixture: &Fixture, width: u16) -> String {
+    let buffer = fixture.render(width, 40);
+    let start = ui::pane_width(width) + 1;
+    region(&buffer, start, 2, width - start, 36)
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn a_failed_repairs_long_title_still_shows_the_key_error_line_at_100_columns() {
+    let key = "AssertionError: answer was 41 not 42";
+    for prefix in ["", "No change from previous attempt · "] {
+        let title = format!(
+            "Repair #1: autopilot: {prefix}Check failed (exit 1): stderr: …Traceback (most recent call last) | File \"calc.py\", line 3, in check | assert answer() == 42 | {key}"
+        );
+        let mut fixture = Fixture::new(vec![
+            task(1, "Make answer return 42", TaskStatus::Failed, vec![], None),
+            task(2, &title, TaskStatus::Failed, vec![], Some(1)),
+        ]);
+        fixture.select(2);
+        let text = inspector_text(&fixture, 100);
+        assert!(text.contains(key), "{prefix:?}: {text}");
+    }
+}
+
 #[test]
 fn minimum_size_keeps_selected_tree_row_composer_and_scrollable_exact_inspector() {
     let mut fixture = hierarchy();
