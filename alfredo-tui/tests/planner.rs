@@ -1640,6 +1640,55 @@ fn plan_rejects_hidden_characters_naming_field_and_code_point() {
 }
 
 #[test]
+fn check_argument_line_break_is_named_with_a_fix_and_still_refused() {
+    for value in ["a\nb", "a\rb", "a\r\nb"] {
+        let mut plan = plan();
+        plan.tasks[1].policy.check[2] = value.into();
+        let error = plan.validate().unwrap_err();
+        assert!(
+            error.starts_with("Plan task 2 check argument 3 contains a line break"),
+            "{error}"
+        );
+        assert!(error.contains("script file"), "{error}");
+        assert!(error.contains("one line"), "{error}");
+        assert!(!error.contains("hidden character"), "{error}");
+        assert!(!error.contains("bidirectional"), "{error}");
+    }
+}
+
+#[test]
+fn line_break_message_is_only_for_check_arguments_and_first_hidden_character() {
+    type Edit = fn(&mut Plan);
+    let cases: [(Edit, &str); 5] = [
+        (
+            |p| p.tasks[0].title = "a\nb".into(),
+            "Plan task 1 title contains hidden character U+000A; remove invisible or bidirectional characters",
+        ),
+        (
+            |p| p.tasks[0].acceptance[0] = "a\rb".into(),
+            "Plan task 1 acceptance 1 contains hidden character U+000D; remove invisible or bidirectional characters",
+        ),
+        (
+            |p| p.tasks[1].policy.check[2] = "a\u{202E}\nb".into(),
+            "Plan task 2 check argument 3 contains hidden character U+202E; remove invisible or bidirectional characters",
+        ),
+        (
+            |p| p.tasks[1].policy.check[2] = "a\tb".into(),
+            "Plan task 2 check argument 3 contains hidden character U+0009; remove invisible or bidirectional characters",
+        ),
+        (
+            |p| p.tasks[1].policy.check[2] = "a\u{0085}b".into(),
+            "Plan task 2 check argument 3 contains hidden character U+0085; remove invisible or bidirectional characters",
+        ),
+    ];
+    for (edit, message) in cases {
+        let mut plan = plan();
+        edit(&mut plan);
+        assert_eq!(plan.validate().unwrap_err(), message);
+    }
+}
+
+#[test]
 fn plan_with_non_ascii_letters_still_validates() {
     let mut plan = plan();
     plan.tasks[0].title = "Café résumé 日本語の計算".into();
