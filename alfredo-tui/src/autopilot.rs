@@ -137,6 +137,17 @@ impl Saved {
                 "uncommitted changes not checked (repository filters or includes need qualification) · workers see HEAD {head}"
             ));
         }
+        if *count == crate::worker::UNCHECKED_TIMED_OUT {
+            let seconds = crate::chat_tools::git_read::DEADLINE.as_secs();
+            return Some(format!(
+                "uncommitted changes not checked: git did not answer within {seconds} s (the repository may block git) · workers see HEAD {head}"
+            ));
+        }
+        if *count == crate::worker::UNCHECKED_FAILED {
+            return Some(format!(
+                "uncommitted changes not checked: git could not finish the check (it did not start, its output was too large, or it was cancelled) · workers see HEAD {head}"
+            ));
+        }
         let (noun, verb) = if *count == 1 {
             ("change", "is")
         } else {
@@ -2347,6 +2358,13 @@ fn last_failure_line(detail: &str) -> String {
         return format!("{} {key}", shorten(head.trim_end(), room));
     }
     shorten(&first, LIMIT)
+}
+
+/// The summary line of an autopilot repair's title (`Repair #N: autopilot: <failure>`), as
+/// `Last failure` shows it, so a title cut for width keeps the check's key error line.
+pub(crate) fn title_failure_line(title: &str) -> Option<String> {
+    let (_, detail) = title.split_once(": autopilot: ")?;
+    Some(last_failure_line(detail))
 }
 
 /// Split a `Check ...: <label>: a | b | c` summary into its head and the most

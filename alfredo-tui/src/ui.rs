@@ -1104,10 +1104,21 @@ fn report_lines(report: &str, width: usize, theme: &Theme) -> Vec<Line<'static>>
                 Span::raw(truncate(rest, width.saturating_sub(1))),
             ]));
         } else if line.starts_with("  ") {
-            lines.push(Line::styled(
-                truncate(line, width),
-                Style::default().fg(theme.color(Tone::Dim)),
-            ));
+            // Detail, `Last failure` and `Next` rows wrap onto rows hung two columns
+            // deeper, so a long error line is never cut (issue #479).
+            let body = line.trim_start();
+            let lead = line.len() - body.len();
+            let hang = lead + 2;
+            for (row, chunk) in wrap_words(body, width.saturating_sub(hang).max(12))
+                .into_iter()
+                .enumerate()
+            {
+                let indent = if row == 0 { lead } else { hang };
+                lines.push(Line::styled(
+                    format!("{}{chunk}", " ".repeat(indent)),
+                    Style::default().fg(theme.color(Tone::Dim)),
+                ));
+            }
         } else {
             lines.push(Line::from(line.to_owned()));
         }
