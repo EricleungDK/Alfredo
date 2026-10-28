@@ -263,13 +263,20 @@ fn issue_523_credential_files_are_refused_by_each_chat_tool() {
         let mention = alfredo_tui::chat_mentions::attach(&repo.root, &format!("see @{path}"));
         assert!(!mention.block.contains(&secret), "@{path}: {mention:?}");
         assert!(
-            mention
-                .notices
-                .iter()
-                .any(|n| n.starts_with(&format!("@{path}: not attached (excluded"))),
-            "@{path}: {:?}",
-            mention.notices
+            !mention.files.iter().any(|file| file == path),
+            "@{path} attached: {mention:?}"
         );
+        // A mention with no `.` or `/` is not read as a path, so it gets no notice.
+        if path.contains(['.', '/']) {
+            assert!(
+                mention
+                    .notices
+                    .iter()
+                    .any(|n| n.starts_with(&format!("@{path}: not attached (excluded"))),
+                "@{path}: {:?}",
+                mention.notices
+            );
+        }
     }
 
     let listing = repo.run("list_files", json!({}));

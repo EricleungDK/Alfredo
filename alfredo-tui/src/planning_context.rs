@@ -40,37 +40,75 @@ pub(crate) fn path_valid(path: &str) -> bool {
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
 }
-/// Secret material and Git metadata (issues #312 and the original list). `path` is a
+/// Secret material and Git metadata (issues #312, #471 and #523). `path` is a
 /// `/`-separated path in any case; every rule is tested on each lowercased path component,
 /// so a directory such as `.aws/` or `.ssh/` excludes everything under it.
 ///
+/// Before matching, `.` and empty components are dropped: `.docker//config.json` is read
+/// as `.docker/config.json`. A `..` is also resolved lexically, and the path is a secret
+/// when its raw reading or its resolved reading is one, so `a/.docker/x/../config.json`
+/// is refused and no `..` turns a secret into a plain path.
+///
 /// - Directories: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.azure`, `.password-store`
-///   (everything under them), and `gh` under `.config` (`.config/gh`).
+///   (everything under them), and `gh` under `.config` (`.config/gh`), and `hub` under
+///   `.config` (`.config/hub`).
 /// - Directory-scoped files: `.docker/config.json`, `.cargo/credentials` and
-///   `.cargo/credentials.toml`, `.gem/credentials`. Only those names: `.docker/daemon.json`
-///   and `.cargo/config.toml` stay readable.
-/// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
-///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
+///   `.cargo/credentials.toml`, `.gem/credentials`, `.mc/config.json`, `.m2/settings.xml`,
+///   `.pip/pip.conf`, `.config/rclone/rclone.conf`, `.config/gcloud/credentials.db` and
+///   `.config/gcloud/access_tokens.db`. Only those names: `.docker/daemon.json`,
+///   `.cargo/config.toml` and `.m2/` files other than `settings.xml` stay readable.
+/// - Names: `.env*`, `.npmrc`, `.netrc`, `_netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `.my.cnf`, `.terraformrc`,
+///   `terraform.rc`, `auth.json` (Composer), `.bash_history`, `gradle.properties`,
+///   `.rclone.conf`, `.yarnrc.yml`, `.dev.vars`, `service_account.json`, `kubeconfig`,
 ///   `kubeconfig.yaml`, `kubeconfig.yml`, `application_default_credentials.json`,
 ///   `secrets.y*ml` (starts `secrets.y`, ends `ml`).
 /// - Name prefixes: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa` (private keys and
 ///   their `.pub`/backup siblings; a name that merely starts so is refused too),
 ///   `credentials` with a `.json` ending (`credentials*.json`), `service-account` and
-///   `client_secret` with a `.json` ending (`service-account*.json`, `client_secret*.json`).
+///   `client_secret` with a `.json` ending (`service-account*.json`, `client_secret*.json`),
+///   `firebase-adminsdk-` with a `.json` ending (`firebase-adminsdk-*.json`).
+/// - Globs: `ssh_host_*_key` (starts `ssh_host_`, ends `_key`), `private*.asc` and
+///   `secret*.asc` (starts `private` or `secret`, ends `.asc`). Other `.asc` files, such as
+///   `docs/*.asc`, stay readable.
 /// - Suffixes: `.pem`, `.key`, `.p12`, `.pfx`, `.env`, `.keystore`, `.jks`, `.tfvars`,
-///   `.tfvars.json`, `.tfstate`, `.tfstate.backup`, `.p8`, `.ppk`, `.gpg`.
+///   `.tfvars.json`, `.tfstate`, `.tfstate.backup`, `.p8`, `.ppk`, `.gpg`, `.kdbx`.
 /// - Timestamped Terraform backups: a name containing `.tfstate.` and ending `.backup`
 ///   (`terraform.tfstate.1700000000.backup`).
 ///
 /// Bare `credentials` and `secrets.*` names other than the two above stay readable.
-/// Directory-scoped rules look at the component directly above the name, so a nested
-/// `sub/.docker/config.json` is refused too.
+/// Directory-scoped rules look at the component directly above the name, or at the whole
+/// directory chain for the longer paths, so a nested `sub/.docker/config.json` is refused too.
 pub(crate) fn secret(path: &str) -> bool {
     let lower = path.to_lowercase();
-    let parts: Vec<&str> = lower.split('/').collect();
+    let raw: Vec<&str> = lower
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    secret_components(&raw) || secret_components(&resolve_parent_refs(&raw))
+}
+
+/// `parts` with each `..` resolved against the component before it. A `..` with nothing
+/// to resolve (at the start, or after another `..`) is kept.
+fn resolve_parent_refs<'a>(parts: &[&'a str]) -> Vec<&'a str> {
+    let mut resolved: Vec<&str> = Vec::with_capacity(parts.len());
+    for &part in parts {
+        if part == ".." && resolved.last().is_some_and(|last| *last != "..") {
+            resolved.pop();
+        } else {
+            resolved.push(part);
+        }
+    }
+    resolved
+}
+
+/// Whether one of the normalised, lowercased `parts` is a secret (see [`secret`]).
+fn secret_components(parts: &[&str]) -> bool {
     parts.iter().enumerate().any(|(index, &part)| {
         // The component directly above this one, for the rules scoped to a directory.
         let parent = index.checked_sub(1).map(|up| parts[up]);
+        // The components from the root down to this one, for the rules scoped to a path.
+        let chain = &parts[..=index];
         let json = Path::new(part).extension().is_some_and(|ext| ext == "json");
         matches!(
             part,
@@ -95,20 +133,45 @@ pub(crate) fn secret(path: &str) -> bool {
                 | "kubeconfig.yaml"
                 | "kubeconfig.yml"
                 | "application_default_credentials.json"
-        ) || (parent == Some(".config") && part == "gh")
+                | "_netrc"
+                | ".my.cnf"
+                | ".terraformrc"
+                | "terraform.rc"
+                | "auth.json"
+                | ".bash_history"
+                | "gradle.properties"
+                | ".rclone.conf"
+                | ".yarnrc.yml"
+                | ".dev.vars"
+                | "service_account.json"
+        ) || (parent == Some(".config") && matches!(part, "gh" | "hub"))
             || (parent == Some(".docker") && part == "config.json")
             || (parent == Some(".cargo") && matches!(part, "credentials" | "credentials.toml"))
             || (parent == Some(".gem") && part == "credentials")
+            || chain.ends_with(&[".mc", "config.json"])
+            || chain.ends_with(&[".m2", "settings.xml"])
+            || chain.ends_with(&[".pip", "pip.conf"])
+            || chain.ends_with(&[".config", "rclone", "rclone.conf"])
+            || chain.ends_with(&[".config", "gcloud", "credentials.db"])
+            || chain.ends_with(&[".config", "gcloud", "access_tokens.db"])
             || (part.contains(".tfstate.") && part.ends_with(".backup"))
             || part.starts_with(".env")
             || (part.starts_with("secrets.y") && part.ends_with("ml"))
             || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
                 .iter()
                 .any(|prefix| part.starts_with(prefix))
-            || (["credentials", "service-account", "client_secret"]
-                .iter()
-                .any(|prefix| part.starts_with(prefix))
+            || ([
+                "credentials",
+                "service-account",
+                "client_secret",
+                "firebase-adminsdk-",
+            ]
+            .iter()
+            .any(|prefix| part.starts_with(prefix))
                 && json)
+            || (part.starts_with("ssh_host_") && part.ends_with("_key"))
+            || ((part.starts_with("private") || part.starts_with("secret"))
+                && part.ends_with(".asc"))
             || [
                 ".pem",
                 ".key",
@@ -124,6 +187,7 @@ pub(crate) fn secret(path: &str) -> bool {
                 ".p8",
                 ".ppk",
                 ".gpg",
+                ".kdbx",
             ]
             .iter()
             .any(|suffix| part.ends_with(suffix))
