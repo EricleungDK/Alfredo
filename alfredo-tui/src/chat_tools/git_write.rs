@@ -19,7 +19,7 @@
 use super::{
     approval::CardKind,
     edit::Change,
-    git_read::{self, ref_arg},
+    git_read::{self, ref_arg, IGNORE_SUBMODULES},
     needed_terminal, text_arg, Tier, Tool, MAX_OUTPUT,
 };
 use serde_json::{json, Value};
@@ -165,7 +165,13 @@ fn state(root: &Path) -> Result<String, String> {
     )?;
     let status = full(
         root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            IGNORE_SUBMODULES,
+        ],
     )?;
     let mut hash = Sha256::new();
     for part in [&head, &branch, &refs, &status, &config, &remotes] {
@@ -495,7 +501,13 @@ fn plan_commit(root: &Path, arguments: &Value) -> Result<CommitPlan, String> {
             &["diff", "--cached", "--no-ext-diff", "--name-status", "--"],
         )?
     } else {
-        let mut args = vec!["status", "--porcelain=v1", "--untracked-files=all", "--"];
+        let mut args = vec![
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            IGNORE_SUBMODULES,
+            "--",
+        ];
         args.extend(pathspecs.iter().map(String::as_str));
         full(root, &args)?
     };
@@ -544,6 +556,7 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
             "--porcelain=v1",
             "-z",
             "--untracked-files=all",
+            IGNORE_SUBMODULES,
             "--",
         ];
         args.extend(pathspecs.iter().map(String::as_str));
@@ -658,7 +671,14 @@ fn restore_index(root: &Path, index: &str, intent: &[String]) -> String {
 fn intent_to_add(root: &Path) -> Result<Vec<String>, String> {
     let out = full(
         root,
-        &["diff", "--name-only", "--diff-filter=A", "-z", "--"],
+        &[
+            "diff",
+            "--name-only",
+            "--diff-filter=A",
+            "-z",
+            IGNORE_SUBMODULES,
+            "--",
+        ],
     )?;
     Ok(out
         .split('\0')
@@ -811,7 +831,15 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
             ));
         }
     }
-    let dirty = git_read::git(root, &["status", "--porcelain=v1", "--untracked-files=no"])?;
+    let dirty = git_read::git(
+        root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=no",
+            IGNORE_SUBMODULES,
+        ],
+    )?;
     if !dirty.trim().is_empty() {
         return Err(
             "tracked files have uncommitted changes; commit or stash them before merging".into(),
@@ -958,7 +986,13 @@ fn merge_run(root: &Path, arguments: &Value) -> Result<String, String> {
         }
         let conflicted = git_read::git(
             root,
-            &["diff", "--name-only", "--diff-filter=U", "--no-ext-diff"],
+            &[
+                "diff",
+                "--name-only",
+                "--diff-filter=U",
+                "--no-ext-diff",
+                IGNORE_SUBMODULES,
+            ],
         )
         .unwrap_or_default();
         let aborted = write(root, &["merge", "--abort"], Env::Local);

@@ -976,7 +976,14 @@ fn uncommitted_changes_within(workspace: &Path) -> Option<(u32, String)> {
     }
     let status = match git_blocking(
         workspace,
-        &["status", "--porcelain", "--untracked-files=all"],
+        // The superproject-only config check above cannot see a submodule's own config, which
+        // `submodule.<name>.ignore=none` would make git read and run filters from (#499).
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        ],
     ) {
         Ok(status) if status.success => status,
         // git ran but could not report (a corrupt index, for example): the tree is not
