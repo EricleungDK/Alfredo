@@ -110,6 +110,11 @@ impl Plan {
     fn reject_hidden_text(&self) -> Result<(), String> {
         fn scan(field: &str, value: &str) -> Result<(), String> {
             match value.chars().find(|c| crate::dashboard::hidden(*c)) {
+                // Same refusal, clearer text: a multi-line check argument is a common
+                // planner mistake and the generic message does not say how to fix it.
+                Some('\n' | '\r') if field.contains(" check argument ") => Err(format!(
+                    "Plan {field} contains a line break; put the code in a script file listed in the task's files, or write it on one line"
+                )),
                 Some(c) => Err(format!(
                     "Plan {field} contains hidden character U+{:04X}; remove invisible or bidirectional characters",
                     c as u32
