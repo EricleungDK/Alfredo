@@ -2178,7 +2178,16 @@ size limit, and it is kept in memory only (not restored after a restart).
   quoted form (`@"my file.txt"`, `@'...'`, `` @`...` ``) says `quoted paths and paths with
   spaces are not supported`, even when the file exists. Rename the file or mention a
   space-free path.
-- Not included: directory mentions, Tab completion of paths, mentions in `/go` goals or
+- Completion: typing `@fragment` as the last word (cursor at the end) opens a `Files`
+  list of up to 8 paths, prefix matches first, then substring matches (case-insensitive,
+  no fuzzy ranking). Tab or Enter fills the path and a space, Esc closes it and keeps the
+  text. Only paths the rules above would attach are listed: each candidate comes from the
+  `list_files` discovery (ignore rules, no symlinks, at most 5000 files) and passes the same
+  check as an attachment (at most 64 are checked, all within 0.75 s, so a slow repository
+  lists less rather than stalling the prompt), so secrets, ignored, binary and oversize files, symlinks and
+  paths with spaces, names a mention would cut or read differently (trailing `.`, `?`)
+  and names with invisible characters never appear; an exact match is listed first. Nothing is attached until the prompt is submitted.
+- Not included: directory mentions, mentions in `/go` goals or
   commands. `@wayfinder REQUEST` is unchanged. Planner and worker references still use
   committed HEAD content.
 

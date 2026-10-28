@@ -683,6 +683,53 @@ class ModelPicker(unittest.TestCase):
             finally:
                 terminal.close()
 
+    def test_at_path_typeahead_lists_attachable_files_and_fills_on_tab_or_enter(self):
+        # Issue #481: typing @fragment lists files @path would attach; Tab/Enter fill, Esc keeps text.
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-at-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-at-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            Path(repo, 'README.md').write_text('hi\n')
+            Path(repo, 'notes.txt').write_text('hi\n')
+            Path(repo, 'rea.env').write_text('SECRET=1\n')
+            Path(repo, 'rea dme.txt').write_text('hi\n')
+            subprocess.run(git + ['add', '-f', '.'], check=True)
+            subprocess.run(git + ['commit', '-q', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'see @rea')
+                terminal.wait_for('Files ·')
+                terminal.wait_for('@README.md')
+                self.assertNotIn('rea.env', terminal.screen())
+                self.assertNotIn('rea dme', terminal.screen())
+                terminal.write(b'\t')
+                terminal.wait_for('see @README.md ▏')
+                terminal.wait_gone('Files ·')
+                terminal.write(b'\x15@not')
+                terminal.wait_for('Files ·')
+                terminal.write(b'\x1b')
+                terminal.wait_gone('Files ·')
+                terminal.wait_for('@not▏')
+                terminal.write(b'\x7f\x7f\x7f\x7f\x15@not')
+                terminal.wait_for('Files ·')
+                terminal.write(b'\r')
+                terminal.wait_for('@notes.txt ▏')
+                terminal.wait_gone('Files ·')
+                # A lone Backspace must edit the draft and refresh the popup.
+                terminal.write(b'\x15@notes.txtx')
+                terminal.wait_for('@notes.txtx▏')
+                terminal.wait_gone('Files ·')
+                terminal.write(b'\x7f')
+                terminal.wait_for('Files ·')
+                terminal.wait_for('@notes.txt▏')
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+
     def test_ctrl_j_and_alt_enter_insert_newlines_and_readline_motions_edit_the_draft(self):
         # Issue #351: ordinary terminals send Ctrl+J (LF) and Alt+Enter (ESC CR), never Shift+Enter.
         binary = Path(os.environ.get('ALFREDO_TUI_BINARY',

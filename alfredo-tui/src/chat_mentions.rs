@@ -256,7 +256,11 @@ fn ignored_untracked(root: &Path, relative: &str, check_failed: &mut bool) -> bo
         .arg(root)
         .args(["check-ignore", "-q", "--"])
         .arg(relative);
-    match git_read::run_bounded(command, 1024, IGNORE_DEADLINE) {
+    match git_read::run_bounded(
+        command,
+        1024,
+        IGNORE_DEADLINE.min(git_read::call_clock().left()),
+    ) {
         Ok((Some(status), _, _)) if matches!(status.code(), Some(0 | 1)) => {
             status.code() != Some(1)
         }
@@ -305,6 +309,96 @@ fn cut_at_space(root: &Path, path: &str) -> bool {
             .flatten()
             .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
     })
+}
+
+/// Most paths a completion lists.
+pub const COMPLETE_SHOW: usize = 8;
+/// Most ranked candidates one completion vets; every vetted one costs a git call and a read.
+pub const COMPLETE_EXAMINE: usize = 64;
+/// Wall-clock budget of one completion, listing and checks together.
+const COMPLETE_DEADLINE: Duration = Duration::from_millis(750);
+/// Most files one completion considers.
+pub const COMPLETE_SCAN: usize = 5_000;
+
+/// Paths the `@path` rules would attach that match `fragment`: prefix matches first, then
+/// substring matches.
+#[must_use]
+pub fn complete(root: &Path, fragment: &str) -> Vec<String> {
+    complete_within(root, fragment, COMPLETE_SCAN)
+}
+
+/// [`complete`] over at most `scan` files. Candidates come from the `list_files`
+/// discovery (ignore rules, no symlinks); each one listed must also pass
+/// [`read_mention`], the check `@path` attachment itself uses, and be one `parse` would
+/// read whole (no space, quote or other separator in it).
+#[must_use]
+pub fn complete_within(root: &Path, fragment: &str, scan: usize) -> Vec<String> {
+    // Every git call and read of the listing draws on one short budget (issues #257, #359).
+    git_read::call_scope(COMPLETE_DEADLINE, || {
+        let odd = |c: char| separator(c) || c.is_control();
+        let needle = fragment
+            .strip_prefix("./")
+            .unwrap_or(fragment)
+            .to_lowercase();
+        let Ok(canonical) = root.canonicalize() else {
+            return Vec::new();
+        };
+        if needle.chars().any(odd) {
+            return Vec::new();
+        }
+        let (files, _, _) = read::discover(root, &canonical, scan);
+        // Only names a mention reads back whole and that draw nothing invisible.
+        let whole = |path: &str| {
+            !path.chars().any(odd)
+                && crate::dashboard::safe_visible(path) == path
+                && matches!(parse(&format!("@{path} ")).as_slice(),
+                    [one] if one.path == path && !one.quoted)
+        };
+        let mut ranked: Vec<(u8, String)> = files
+            .iter()
+            .filter_map(|file| file.strip_prefix(&canonical).ok()?.to_str())
+            .filter(|path| whole(path))
+            .filter_map(|path| {
+                let lower = path.to_lowercase();
+                let rank = if lower == needle {
+                    0
+                } else if lower.starts_with(&needle) {
+                    1
+                } else if lower.contains(&needle) {
+                    2
+                } else {
+                    return None;
+                };
+                Some((rank, path.to_string()))
+            })
+            .collect();
+        ranked.sort_by_key(|(rank, _)| *rank);
+        let mut check_failed = false;
+        vet(
+            ranked.into_iter().map(|(_, path)| path),
+            |path| read_mention(root, path, &mut check_failed).is_ok(),
+            || git_read::call_clock().left().is_zero(),
+        )
+    })
+}
+
+/// The first [`COMPLETE_SHOW`] of the first [`COMPLETE_EXAMINE`] of `ranked` that `accept`
+/// passes; stops early once `expired`.
+fn vet(
+    ranked: impl Iterator<Item = String>,
+    mut accept: impl FnMut(&str) -> bool,
+    expired: impl Fn() -> bool,
+) -> Vec<String> {
+    let mut listed = Vec::new();
+    for path in ranked.take(COMPLETE_EXAMINE) {
+        if listed.len() >= COMPLETE_SHOW || expired() {
+            break;
+        }
+        if accept(&path) {
+            listed.push(path);
+        }
+    }
+    listed
 }
 
 /// Resolve the mentions of `prompt` against the working tree of the workspace at `root`.
@@ -398,5 +492,35 @@ mod tests {
         let out = assemble(&list, |_| Err("not found".into()), |_| false);
         assert_eq!(out.notices, ["@gone.rs: not attached (not found)"]);
         assert!(out.block.is_empty());
+    }
+
+    #[test]
+    fn vetting_examines_a_bounded_number_of_candidates() {
+        let calls = std::cell::Cell::new(0);
+        let many = (0..1000).map(|i| format!("f{i}.txt"));
+        let listed = vet(
+            many,
+            |_| {
+                calls.set(calls.get() + 1);
+                false
+            },
+            || false,
+        );
+        assert!(listed.is_empty());
+        assert_eq!(calls.get(), COMPLETE_EXAMINE);
+    }
+
+    #[test]
+    fn vetting_stops_when_the_time_is_spent() {
+        let calls = std::cell::Cell::new(0);
+        let listed = vet(
+            (0..20).map(|i| format!("f{i}.txt")),
+            |_| {
+                calls.set(calls.get() + 1);
+                true
+            },
+            || calls.get() >= 3,
+        );
+        assert_eq!(listed, ["f0.txt", "f1.txt", "f2.txt"]);
     }
 }

@@ -1,4 +1,4 @@
-use alfredo_tui::chat_mentions::attach;
+use alfredo_tui::chat_mentions::{attach, complete, complete_within};
 use std::{fs, path::Path, process::Command};
 
 fn git(root: &Path, args: &[&str]) {
@@ -315,6 +315,140 @@ fn every_refusal_of_one_prompt_gets_its_own_notice() {
             out.notices
         );
     }
+}
+
+#[test]
+fn completion_ranks_prefix_matches_before_substring_matches() {
+    let dir = tempdir::Dir::new();
+    let root = dir.path();
+    git(root, &["init", "-q", "--template="]);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("README.md"), "hi\n").unwrap();
+    fs::write(root.join("docs/readme.txt"), "hi\n").unwrap();
+    fs::write(root.join("src/area.rs"), "fn a() {}\n").unwrap();
+    fs::write(root.join("other.rs"), "fn b() {}\n").unwrap();
+    assert_eq!(
+        complete(root, "REA"),
+        ["README.md", "docs/readme.txt", "src/area.rs"]
+    );
+    assert_eq!(complete(root, "src/a"), ["src/area.rs"]);
+    assert_eq!(complete(root, "zzz"), Vec::<String>::new());
+}
+
+#[test]
+fn completion_lists_only_what_a_mention_would_attach() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+    fs::write(root.join("ignored.txt"), "x\n").unwrap();
+    fs::write(root.join("huge.txt"), "z".repeat(300 * 1024)).unwrap();
+    fs::write(root.join(".npmrc"), "token\n").unwrap();
+    fs::write(root.join("id_rsa"), "key\n").unwrap();
+    fs::write(root.join("bad utf8.txt"), "x\n").unwrap();
+    fs::write(root.join("latin.txt"), b"\xff\xfe").unwrap();
+    fs::create_dir_all(root.join("real")).unwrap();
+    fs::write(root.join("real/inner.txt"), "x\n").unwrap();
+    std::os::unix::fs::symlink("real", root.join("linked")).unwrap();
+    let listed = complete(root, "");
+    for refused in [
+        ".env",
+        ".npmrc",
+        "id_rsa",
+        "huge.txt",
+        "blob.bin",
+        "link.txt",
+        "ignored.txt",
+        "latin.txt",
+        "linked/inner.txt",
+    ] {
+        assert!(!listed.iter().any(|p| p == refused), "{refused} listed");
+    }
+    assert!(listed.iter().any(|p| p == "calc.py"), "{listed:?}");
+    assert!(listed.iter().any(|p| p == "src/a.rs"), "{listed:?}");
+    // Whatever is listed is attached by the same rules.
+    for path in &listed {
+        assert_eq!(
+            attach(root, &format!("@{path}")).files,
+            std::slice::from_ref(path)
+        );
+    }
+}
+
+#[test]
+fn completion_leaves_out_paths_with_spaces() {
+    let dir = repo();
+    let root = dir.path();
+    fs::write(root.join("my notes.txt"), "x\n").unwrap();
+    fs::create_dir_all(root.join("my dir")).unwrap();
+    fs::write(root.join("my dir/a.txt"), "x\n").unwrap();
+    git(root, &["add", "."]);
+    let listed = complete(root, "");
+    assert!(listed.iter().any(|p| p == "calc.py"), "{listed:?}");
+    assert!(!listed.iter().any(|p| p.contains(' ')), "{listed:?}");
+    assert_eq!(complete(root, "my"), Vec::<String>::new());
+}
+
+#[test]
+fn completion_lists_only_names_a_mention_reads_back_whole() {
+    let dir = tempdir::Dir::new();
+    let root = dir.path();
+    git(root, &["init", "-q", "--template="]);
+    for name in [
+        "ok.rs",
+        "notes.",
+        "why?",
+        "wayfinder",
+        "a.env.",
+        "x.pem.",
+        "zw\u{200b}.rs",
+        "x\u{202e}txt.sr",
+    ] {
+        fs::write(root.join(name), "x\n").unwrap();
+    }
+    assert_eq!(complete(root, ""), ["ok.rs"]);
+}
+
+#[test]
+fn completion_puts_an_exact_match_first() {
+    let dir = tempdir::Dir::new();
+    let root = dir.path();
+    git(root, &["init", "-q", "--template="]);
+    fs::write(root.join("A.rs.bak"), "x\n").unwrap();
+    fs::write(root.join("a.rs"), "x\n").unwrap();
+    assert_eq!(complete(root, "a.rs"), ["a.rs", "A.rs.bak"]);
+}
+
+#[test]
+fn completion_with_a_fifo_gitignore_returns_promptly() {
+    let dir = repo();
+    let status = Command::new("mkfifo")
+        .arg(dir.path().join(".gitignore"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let started = std::time::Instant::now();
+    let _ = complete(dir.path(), "");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}
+
+#[test]
+fn completion_walk_is_capped() {
+    let dir = tempdir::Dir::new();
+    let root = dir.path();
+    git(root, &["init", "-q", "--template="]);
+    for i in 0..12 {
+        fs::write(root.join(format!("f{i:02}.txt")), "x\n").unwrap();
+    }
+    assert_eq!(
+        complete_within(root, "", 3),
+        ["f00.txt", "f01.txt", "f02.txt"]
+    );
+    assert_eq!(complete_within(root, "f1", 3), Vec::<String>::new());
+    assert_eq!(
+        complete(root, "").len(),
+        alfredo_tui::chat_mentions::COMPLETE_SHOW
+    );
 }
 
 #[test]

@@ -2202,8 +2202,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Backspace => {
                             work.app.sessions[index].backspace();
-                            work.app.completion = alfredo_tui::commands::Completion::typeahead(
-                                &work.app.sessions[index].draft,
+                            let session = &work.app.sessions[index];
+                            work.app.completion = alfredo_tui::commands::Completion::for_draft(
+                                &session.draft,
+                                session.cursor(),
+                                work.tasks.workspace(),
                             );
                         }
                         KeyCode::PageUp if work.tasks.agent_shown().is_some() => {
@@ -2238,8 +2241,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
                         {
                             work.app.sessions[index].type_char(ch);
-                            work.app.completion = alfredo_tui::commands::Completion::typeahead(
-                                &work.app.sessions[index].draft,
+                            let session = &work.app.sessions[index];
+                            work.app.completion = alfredo_tui::commands::Completion::for_draft(
+                                &session.draft,
+                                session.cursor(),
+                                work.tasks.workspace(),
                             );
                         }
                         _ => {}
