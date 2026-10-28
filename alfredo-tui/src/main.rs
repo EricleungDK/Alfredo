@@ -994,14 +994,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 work.app.receive_models(result);
                 dirty = true;
             }
-            if (work.tasks.visible || !work.tasks.workers.is_empty() || work.tasks.dispatch.enabled)
-                && last_task_refresh.elapsed()
-                    >= if work.tasks.dispatch.enabled {
-                        Duration::from_millis(250)
-                    } else {
-                        Duration::from_secs(1)
-                    }
-            {
+            if alfredo_tui::task_control::background_refresh_due(
+                work.tasks.visible,
+                work.tasks.workers.len(),
+                work.tasks.dispatch.enabled,
+                terminal.size()?.width,
+                last_task_refresh.elapsed(),
+            ) {
                 // Redraw happens when the refreshed projection differs (`poll`),
                 // worker output arrives (`progress_changed`) or timers tick above.
                 work.tasks.refresh_background(&runtime);

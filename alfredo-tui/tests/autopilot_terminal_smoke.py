@@ -171,9 +171,9 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         return subprocess.run(['git', '-C', str(self.workspace), *args], env=self.git_env, check=True,
                               timeout=10, capture_output=True, text=True).stdout.strip()
 
-    def terminal(self, resume, env=None):
+    def terminal(self, resume, env=None, conversation='default'):
         terminal = Terminal(self.binary, self.fixture.endpoint, self.workspace, self.state,
-                            'autopilot', resume=resume, env=env)
+                            'autopilot', resume=resume, env=env, conversation=conversation)
         self.terminals.append(terminal)
         self.screen_has(terminal, 'ALFREDO')
         return terminal
@@ -265,6 +265,19 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertEqual(self.git('status', '--porcelain'), '')
         self.assertEqual((self.workspace / 'calc.py').read_text(), 'def answer():\n    return 0\n')
         self.quit(terminal)
+
+    def test_an_idle_second_terminal_in_chat_view_shows_the_tasks_another_terminal_wrote(self):
+        self.fixture.single_task = True
+        first = self.terminal(resume=False)
+        second = self.terminal(resume=True, conversation='other')
+        self.assertNotIn('#1', second.screen())
+        first.send('/go add b\r')
+        self.screen_has(first, 'git switch alfredo/go-', 60)
+        # No key on the second terminal: its side pane must pick the tasks up by itself.
+        self.wait_until('second terminal side pane lists the first terminal tasks',
+                        lambda: '#1' in second.screen(), 3)
+        self.quit(second)
+        self.quit(first)
 
     def test_rejected_commands_explain_themselves_and_never_concatenate_with_the_next_command(self):
         terminal = self.terminal(resume=False)
