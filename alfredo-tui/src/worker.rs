@@ -3467,6 +3467,122 @@ mod host_git_tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// A repository with submodule `sub` whose superproject config sets
+    /// `submodule.sub.ignore=none` and whose submodule has a stat-dirty file under a
+    /// `* filter=x` attribute. Returns the superproject root and the submodule's own config
+    /// (`.git/modules/sub/config`), which no superproject-level check reads (#499).
+    fn submodule_ignore_none_repo(name: &str, dirty_submodule: bool) -> (PathBuf, PathBuf) {
+        let base = unique_root(name);
+        let source = base.join("source");
+        let root = base.join("repo");
+        for dir in [&source, &root] {
+            fs::create_dir_all(dir).unwrap();
+            fixture_git(dir, &["init", "-q", "-b", "main"]);
+        }
+        fs::write(source.join("lib.txt"), "lib\n").unwrap();
+        fixture_git(&source, &["add", "."]);
+        fixture_git(&source, &["commit", "-q", "-m", "sub initial"]);
+        fs::write(root.join("README.md"), "# Demo\n").unwrap();
+        fixture_git(&root, &["add", "."]);
+        fixture_git(&root, &["commit", "-q", "-m", "initial"]);
+        let url = source.display().to_string();
+        fixture_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &url,
+                "sub",
+            ],
+        );
+        fixture_git(&root, &["commit", "-q", "-m", "add submodule"]);
+        if dirty_submodule {
+            fixture_git(&root, &["config", "submodule.sub.ignore", "none"]);
+            fs::write(root.join("sub/.gitattributes"), "* filter=x\n").unwrap();
+            // Same size, different mtime: git must read the content, so run the clean filter.
+            let changed = root.join("sub/lib.txt");
+            fs::write(&changed, "bil\n").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&changed)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+                .unwrap();
+        }
+        fs::write(root.join("README.md"), "# Demo\nchanged\n").unwrap();
+        let config = root.join(".git/modules/sub/config");
+        (root, config)
+    }
+
+    /// Issue #499: `submodule.<name>.ignore=none` in the superproject beats
+    /// `diff.ignoreSubmodules`, and git then runs inside the submodule under the config of
+    /// `.git/modules/<name>`, which the qualification check does not read. A clean filter
+    /// there must not run from the automatic uncommitted-changes check.
+    #[test]
+    fn uncommitted_changes_never_runs_a_submodule_filter() {
+        let (root, config) = submodule_ignore_none_repo("sub-filter", true);
+        let marker = root.parent().unwrap().join("submodule-filter-ran");
+        let mut text = fs::read_to_string(&config).unwrap();
+        text.push_str(&format!(
+            "[filter \"x\"]\n\tclean = touch {}; cat\n",
+            marker.display()
+        ));
+        fs::write(&config, text).unwrap();
+
+        let changes = uncommitted_changes(&root);
+
+        assert!(
+            !marker.exists(),
+            "host-side git ran a submodule's clean filter"
+        );
+        assert_eq!(changes.map(|(count, _)| count), Some(1));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Issue #499: a FIFO `include.path` in the submodule's config must not stall the check
+    /// past its time limit. On timeout the test opens the FIFO itself so git is released.
+    #[test]
+    fn uncommitted_changes_never_stalls_on_a_submodule_fifo_include() {
+        let (root, config) = submodule_ignore_none_repo("sub-fifo", true);
+        let fifo = root.parent().unwrap().join("include-fifo");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let mut text = fs::read_to_string(&config).unwrap();
+        text.push_str(&format!("[include]\n\tpath = {}\n", fifo.display()));
+        fs::write(&config, text).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let workspace = root.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(uncommitted_changes(&workspace));
+        });
+        let outcome = receiver.recv_timeout(std::time::Duration::from_secs(3));
+        if outcome.is_err() {
+            // Release a git that is blocked reading the FIFO, then fail.
+            drop(fs::OpenOptions::new().write(true).open(&fifo));
+        }
+        let changes = outcome.expect("uncommitted_changes stalled on a submodule FIFO include");
+        assert_eq!(changes.map(|(count, _)| count), Some(1));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Issue #499: an ordinary submodule repository still reports its superproject changes.
+    #[test]
+    fn uncommitted_changes_still_reports_changes_in_a_submodule_repository() {
+        let (root, _) = submodule_ignore_none_repo("sub-ordinary", false);
+        fs::write(root.join("new.txt"), "new\n").unwrap();
+
+        let changes = uncommitted_changes(&root);
+
+        assert_eq!(changes.map(|(count, _)| count), Some(2));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
     /// Runs `git` in a fixture repository, with the identity the fixtures need.
     fn fixture_git(dir: &Path, args: &[&str]) {
         assert!(

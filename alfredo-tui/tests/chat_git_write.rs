@@ -561,6 +561,174 @@ fn merge_card_shows_source_target_commits_and_files_then_merges() {
     assert_eq!(repo.branch(), "main");
 }
 
+/// Issue #499: the repo gets submodule `sub` with `submodule.sub.ignore=none` in the
+/// superproject config and a stat-dirty file under a `* filter=x` attribute in the
+/// submodule. Returns the submodule's own config (`.git/modules/sub/config`), which no
+/// superproject-level check reads.
+fn repo_with_ignore_none_submodule(repo: &Repo) -> PathBuf {
+    let source = repo.base.join("sub-source");
+    fs::create_dir_all(&source).unwrap();
+    git(&source, &["init", "-q", "-b", "main"]);
+    fs::write(source.join("lib.txt"), "lib\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-q", "-m", "sub initial"]);
+    let url = source.display().to_string();
+    git(
+        &repo.root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &url,
+            "sub",
+        ],
+    );
+    // The committed `.gitmodules` sets the per-submodule override. Write-tier git refuses an
+    // initialised submodule's keys in `.git/config`, so those are unset to reach the
+    // status and diff calls this fixture is about.
+    git(
+        &repo.root,
+        &[
+            "config",
+            "-f",
+            ".gitmodules",
+            "submodule.sub.ignore",
+            "none",
+        ],
+    );
+    git(&repo.root, &["add", ".gitmodules"]);
+    git(&repo.root, &["commit", "-q", "-m", "add submodule"]);
+    for key in ["submodule.sub.url", "submodule.sub.active"] {
+        git(&repo.root, &["config", "--unset", key]);
+    }
+    fs::write(repo.root.join("sub/.gitattributes"), "* filter=x\n").unwrap();
+    // Same size, different mtime: git must read the content (and so run the clean filter).
+    let changed = repo.root.join("sub/lib.txt");
+    fs::write(&changed, "bil\n").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&changed)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+        .unwrap();
+    repo.root.join(".git/modules/sub/config")
+}
+
+fn append(path: &Path, text: &str) {
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    write!(file, "{text}").unwrap();
+}
+
+/// Every write-tier call whose preview or fingerprint runs `git status` or a working-tree
+/// `git diff`: commit (staged and with files), switch, merge and push.
+fn submodule_exposed_calls() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("git_commit", json!({"message": "m"})),
+        (
+            "git_commit",
+            json!({"message": "m", "files": ["README.md"]}),
+        ),
+        ("git_switch", json!({"branch": "feature/x", "create": true})),
+        ("git_merge", json!({"source": "alfredo/go-7"})),
+        ("git_push", json!({})),
+    ]
+}
+
+/// Issue #499: no submodule clean filter runs from any write-tier card (the approval
+/// fingerprint, the commit listings, `plan_merge`'s dirty check, the intent-to-add diff).
+#[test]
+fn a_submodule_filter_never_runs_from_a_write_tier_card() {
+    let repo = Repo::new();
+    repo.go_branch();
+    let config = repo_with_ignore_none_submodule(&repo);
+    let marker = repo.base.join("submodule-filter-ran");
+    append(
+        &config,
+        &format!(
+            "[filter \"x\"]\n\tclean = touch {}; cat\n",
+            marker.display()
+        ),
+    );
+    let mut ran = Vec::new();
+    for (tool, arguments) in submodule_exposed_calls() {
+        let _ = fs::remove_file(&marker);
+        let outcome = repo.card(tool, arguments.clone());
+        if marker.exists() {
+            ran.push(format!(
+                "{tool} {arguments}: {:?}",
+                outcome.map(|c| c.summary)
+            ));
+        }
+    }
+    assert!(ran.is_empty(), "submodule filter ran from: {ran:#?}");
+}
+
+/// Issue #499: a FIFO `include.path` in the submodule's config never holds a write-tier
+/// card past three seconds. On timeout the test opens the FIFO so git is released.
+#[test]
+fn a_submodule_config_fifo_include_never_stalls_a_write_tier_card() {
+    let repo = Repo::new();
+    repo.go_branch();
+    let config = repo_with_ignore_none_submodule(&repo);
+    let fifo = repo.base.join("sub-include-fifo");
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    append(
+        &config,
+        &format!("[include]\n\tpath = {}\n", fifo.display()),
+    );
+    for (tool, arguments) in submodule_exposed_calls() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (root, name, args) = (repo.root.clone(), tool.to_string(), arguments.clone());
+        std::thread::spawn(move || {
+            let _ = sender.send(approval::card(&root, &call(&name, args)).map(|card| card.summary));
+        });
+        let outcome = receiver.recv_timeout(Duration::from_secs(3));
+        if outcome.is_err() {
+            // Release a git that is blocked reading the FIFO, then fail.
+            drop(fs::OpenOptions::new().write(true).open(&fifo));
+        }
+        assert!(
+            outcome.is_ok(),
+            "{tool} {arguments} stalled on the submodule's FIFO include"
+        );
+    }
+}
+
+/// Issue #499: an ordinary submodule repository still previews and commits its
+/// superproject changes.
+#[test]
+fn an_ordinary_submodule_repository_still_commits_its_superproject_changes() {
+    let repo = Repo::new();
+    repo_with_ignore_none_submodule(&repo);
+    git(
+        &repo.root,
+        &[
+            "config",
+            "-f",
+            ".gitmodules",
+            "--unset",
+            "submodule.sub.ignore",
+        ],
+    );
+    fs::remove_file(repo.root.join("sub/.gitattributes")).unwrap();
+    fs::write(repo.root.join("README.md"), "# Demo\nchanged\n").unwrap();
+    let card = repo
+        .card(
+            "git_commit",
+            json!({"message": "update readme", "files": ["README.md"]}),
+        )
+        .unwrap();
+    assert!(card.preview.contains("README.md"), "{}", card.preview);
+    approval::apply(&repo.root, &card).unwrap();
+    assert!(git(&repo.root, &["log", "-1", "--format=%s"]).contains("update readme"));
+}
+
 #[test]
 fn merge_into_another_target_is_refused_until_switched() {
     let repo = Repo::new();
