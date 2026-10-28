@@ -564,7 +564,7 @@ def alfredo_trial(task, index, options):
             terminal.pump()
             if time.monotonic() > deadline:
                 raise EvalError('Alfredo never drew its header within 30 s')
-            time.sleep(0.01)
+            time.sleep(0.0005)
         trial['cold_start_ms'] = round((time.monotonic() - spawned) * 1000, 1)
 
         goal = ' '.join(task['goal'].split())
