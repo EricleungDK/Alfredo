@@ -1031,6 +1031,89 @@ async fn approved_check_cannot_reach_host_files_network_or_rewrite_git_identity(
     assert_eq!(fs::read_to_string(marker).unwrap(), "private");
 }
 
+/// #518: `git diff --name-only` without `--no-renames` prints only the new side of a rename.
+/// A check that copies an unapproved tracked file to an approved new name and deletes the
+/// original must be refused, not saved as a rename of the approved file.
+#[tokio::test]
+async fn check_that_renames_an_unapproved_tracked_file_onto_an_approved_name_is_refused() {
+    let fixture = Fixture::new();
+    let body: String = (1..=100).map(|line| format!("{line}\n")).collect();
+    commit_files(&fixture, &[("unapproved_src.txt", &body)]);
+    let code = "import os, shutil; shutil.copyfile('unapproved_src.txt', 'approved_new.txt'); os.remove('unapproved_src.txt'); print('CHECK_OK')";
+    fixture.action(Action::Permit {
+        task: 1,
+        policy: WorkPolicy {
+            files: vec!["approved_new.txt".into()],
+            check: vec![
+                "/usr/bin/python3".into(),
+                "-B".into(),
+                "-c".into(),
+                code.into(),
+            ],
+        },
+    });
+    fixture.action(Action::Approve { task: 1 });
+    let (provider, server, _) =
+        server_with_source(one_file("approved_new.txt", &body), Duration::ZERO, "");
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "rename-hides-deletion".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed, "{detail}");
+    assert_eq!(
+        detail,
+        "Check modified tracked files outside approved paths; changes retained for inspection"
+    );
+}
+
+/// #518: a tracked file whose name holds a newline, deleted by the check, is refused even
+/// though each line of that name is an approved path. The guard reads NUL-terminated names,
+/// so the name stays one path.
+#[tokio::test]
+async fn check_that_deletes_a_tracked_file_named_with_a_newline_is_refused() {
+    let fixture = Fixture::new();
+    let name = "approved_new.txt\napproved_new.txt";
+    commit_files(&fixture, &[(name, "tracked\n")]);
+    let code = "import os; os.remove('approved_new.txt\\napproved_new.txt'); print('CHECK_OK')";
+    fixture.action(Action::Permit {
+        task: 1,
+        policy: WorkPolicy {
+            files: vec!["approved_new.txt".into()],
+            check: vec![
+                "/usr/bin/python3".into(),
+                "-B".into(),
+                "-c".into(),
+                code.into(),
+            ],
+        },
+    });
+    fixture.action(Action::Approve { task: 1 });
+    let (provider, server, _) =
+        server_with_source(one_file("approved_new.txt", "x\n"), Duration::ZERO, "");
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "newline-name-deletion".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed, "{detail}");
+    assert_eq!(
+        detail,
+        "Check modified tracked files outside approved paths; changes retained for inspection"
+    );
+}
 #[test]
 fn terminal_shows_waiting_worker_and_cancellation_until_durable_result() {
     use alfredo_tui::{model::App, task_control::TaskControl, ui};
