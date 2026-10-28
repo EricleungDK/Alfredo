@@ -245,6 +245,23 @@ pub(crate) fn discover(
     root: &Path,
     start: &Path,
     limit: usize,
+) -> Result<(Vec<PathBuf>, bool, Option<String>), String> {
+    // A work-tree rule file that git would block on refuses the listing by name, and no plain
+    // walk stands in for it: the walk would list and search the files the rules hide (issue #521).
+    crate::chat_tools::git_read::call_scope(crate::chat_tools::git_read::DEADLINE, || {
+        match crate::chat_tools::git_read::refuse_rule_files(root) {
+            Err(error) if crate::chat_tools::git_read::refuses_listing(&error) => Err(error),
+            // Any other failure (git cannot read this workspace) keeps the plain walk fallback.
+            _ => Ok(discover_listed(root, start, limit)),
+        }
+    })
+}
+
+/// [`discover`] after the rule-file check: the git listing, or the plain walk when git cannot list.
+fn discover_listed(
+    root: &Path,
+    start: &Path,
+    limit: usize,
 ) -> (Vec<PathBuf>, bool, Option<String>) {
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let rel = start
@@ -497,7 +514,7 @@ fn list_files(root: &Path, arguments: &Value) -> Result<String, String> {
     } else {
         MAX_ENTRIES
     };
-    let (mut files, mut cut, note) = discover(root, &full, limit);
+    let (mut files, mut cut, note) = discover(root, &full, limit)?;
     if let Some(glob) = &glob {
         files.retain(|file| glob.matches(&display(root, file)));
         if files.len() > MAX_ENTRIES {
@@ -564,7 +581,7 @@ fn grep_within(
     let (mut files, mut cut, note) = if full.is_file() {
         (vec![full], false, None)
     } else {
-        discover(root, &full, MAX_VISITS)
+        discover(root, &full, MAX_VISITS)?
     };
     if let Some(glob) = &glob {
         files.retain(|file| glob.matches(&display(root, file)));

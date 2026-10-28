@@ -937,7 +937,10 @@ fn uncommitted_changes_refuses_a_fifo_gitignore_promptly() {
         elapsed < Duration::from_secs(2),
         "uncommitted_changes (called by /go) took {elapsed:?}"
     );
-    assert_eq!(changes.map(|(count, _)| count), Some(u32::MAX));
+    assert_eq!(
+        changes.map(|(count, _)| count),
+        Some(alfredo_tui::worker::UNCHECKED_RULE_FILE)
+    );
 }
 
 #[test]

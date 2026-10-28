@@ -1789,11 +1789,12 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   A FIFO, socket or device named `.gitignore`, `.gitattributes` or `.gitmodules` anywhere in the
   work tree (any depth, including untracked directories) makes git block on it, so
   `git_status` and working-tree or staged `git_diff` are refused at once with an error that
-  names the entry (#521); a symbolic link of that name is not refused, because git does not
-  follow links for these files. `list_files` and `grep` do not wait for the stall, but their
-  listing falls back to the plain walk without the ignore rules (the fallback a git failure
-  already uses). The uncommitted-changes check that `/go` runs at start refuses the same way and
-  is reported as not checked.
+  names the entry (#521); `list_files` and `grep` refuse the same way, and never fall back to
+  the plain walk past such an entry. The uncommitted-changes check that `/go` runs at start
+  refuses too, and its start notice names the entry. A symbolic link of that name is not
+  refused, because git does not follow links for these files. An ignored directory is not
+  walked for this check (git never opens the rule files inside one), so a FIFO there does
+  not refuse.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to. Results are also budgeted to the room left. With
   `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt

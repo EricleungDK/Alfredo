@@ -552,6 +552,16 @@ pub(crate) fn refuse_includes(root: &Path, refusal: &str) -> Result<(), String> 
 /// A FIFO, socket or device under one of these names blocks the git call that opens it.
 const RULE_FILES: [&str; 3] = [".gitignore", ".gitattributes", ".gitmodules"];
 
+/// The start of the refusal naming a rule file that is not an ordinary file.
+const RULE_FILE_NAMED: &str = "the workspace has ";
+
+/// Whether `error` (from [`refuse_rule_files`]) is a refusal the listing must not fall back past:
+/// a named rule file, or a check that ran out of time.
+pub(crate) fn refuses_listing(error: &str) -> bool {
+    error == RULE_FILES_UNCHECKED
+        || (error.starts_with(RULE_FILE_NAMED) && error.contains("not an ordinary file"))
+}
+
 const RULE_FILES_UNCHECKED: &str = "the workspace's ignore and attribute files could not be checked within the call's time limit; git tools refuse";
 
 thread_local! {
@@ -586,39 +596,128 @@ pub(crate) fn refuse_rule_files(root: &Path) -> Result<(), String> {
     result
 }
 
-/// [`refuse_rule_files`] walking `root` within `clock`. Entries are typed without following
-/// links (`DirEntry::file_type`), so a symbolic link is never descended into.
+/// [`refuse_rule_files`] walking `root` within `clock`, one level of directories at a time.
+/// Git reads a directory's rule files only when it visits that directory, and it never visits an
+/// untracked directory that an ignore rule excludes, so the walk does not enter those either
+/// (issue #521). Entries are typed without following links (`DirEntry::file_type`).
 fn rule_files_within(root: &Path, clock: Clock) -> Result<(), String> {
     let unchecked = || RULE_FILES_UNCHECKED.to_string();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        if clock.left().is_zero() {
-            return Err(unchecked());
-        }
-        for entry in fs::read_dir(&dir).map_err(|_| unchecked())? {
-            let entry = entry.map_err(|_| unchecked())?;
-            let kind = entry.file_type().map_err(|_| unchecked())?;
-            let name = entry.file_name();
-            if kind.is_dir() {
-                if !(dir.as_path() == root && name.to_str() == Some(".git")) {
-                    pending.push(entry.path());
+    // No `.git` at the root: git does not run in this workspace, so there are no rules to check
+    // (the plain walk of a non-repository lists it, as before).
+    if matches!(fs::symlink_metadata(root.join(".git")), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(());
+    }
+    // The git calls below would open an include target, and a FIFO there stalls them (#465).
+    refuse_includes(root, INCLUDES_NOT_RUN)?;
+    // Relative paths of the directories of the current level, their parents already checked.
+    let mut level = vec![PathBuf::new()];
+    while !level.is_empty() {
+        let mut dirs = Vec::new();
+        for rel in &level {
+            if clock.left().is_zero() {
+                return Err(unchecked());
+            }
+            for entry in fs::read_dir(root.join(rel)).map_err(|_| unchecked())? {
+                let entry = entry.map_err(|_| unchecked())?;
+                let kind = entry.file_type().map_err(|_| unchecked())?;
+                let name = entry.file_name();
+                if kind.is_dir() {
+                    if !(rel.as_os_str().is_empty() && name.to_str() == Some(".git")) {
+                        dirs.push(rel.join(&name));
+                    }
+                } else if !kind.is_file()
+                    && !kind.is_symlink()
+                    && name.to_str().is_some_and(|name| RULE_FILES.contains(&name))
+                {
+                    let relative = rel.join(&name);
+                    return Err(format!(
+                        "{RULE_FILE_NAMED}{} that is not an ordinary file (a FIFO, socket or device); git tools refuse",
+                        crate::dashboard::safe_visible(&relative.to_string_lossy())
+                    ));
                 }
-            } else if !kind.is_file()
-                && !kind.is_symlink()
-                && name.to_str().is_some_and(|name| RULE_FILES.contains(&name))
-            {
-                let relative = entry.path().strip_prefix(root).map_or_else(
-                    |_| name.to_string_lossy().into_owned(),
-                    |path| path.to_string_lossy().into_owned(),
-                );
-                return Err(format!(
-                    "the workspace has {} that is not an ordinary file (a FIFO, socket or device); git tools refuse",
-                    crate::dashboard::safe_visible(&relative)
-                ));
+            }
+        }
+        level = descended(root, dirs, clock)?;
+    }
+    Ok(())
+}
+
+/// Directories per `check-ignore` or `ls-files` call of the rule-file walk.
+const WALK_BATCH: usize = 256;
+/// Most output bytes of one walk call; a cut listing is taken as "has entries" (walk more).
+const WALK_OUTPUT: usize = 1 << 20;
+
+/// The directories among `dirs` (one level, whose parents are already checked) that git visits:
+/// untracked ones no ignore rule excludes, and ignored ones that hold tracked files. An ignored
+/// untracked directory is dropped, since git never opens the rule files inside it. A directory
+/// whose name cannot be passed to git is kept. Fails closed when git does not answer.
+fn descended(root: &Path, dirs: Vec<PathBuf>, clock: Clock) -> Result<Vec<PathBuf>, String> {
+    let unchecked = || RULE_FILES_UNCHECKED.to_string();
+    let mut kept = Vec::new();
+    let mut checkable = Vec::new();
+    for dir in dirs {
+        match dir.to_str() {
+            Some(text) if !text.contains('\n') => checkable.push(dir),
+            _ => kept.push(dir),
+        }
+    }
+    let mut ignored = Vec::new();
+    for chunk in checkable.chunks(WALK_BATCH) {
+        // Without a trailing slash: `check-ignore` on `dir/` loads `dir/.gitignore` and would
+        // block on a FIFO there, while the bare name still matches directory-only patterns.
+        let shown: Vec<String> = chunk
+            .iter()
+            .map(|dir| format!("./{}", dir.to_string_lossy()))
+            .collect();
+        let mut args: Vec<&str> = vec!["check-ignore", "--"];
+        args.extend(shown.iter().map(String::as_str));
+        let (status, out) = run_walk_git(root, &args, clock)?;
+        // Exit 0: some path is ignored; 1: none is; anything else is no answer.
+        match status.and_then(|status| status.code()) {
+            Some(0 | 1) => {}
+            _ => return Err(unchecked()),
+        }
+        let text = String::from_utf8_lossy(&out);
+        let hits: HashSet<&str> = text.lines().collect();
+        for (dir, shown) in chunk.iter().zip(&shown) {
+            if hits.contains(shown.as_str()) {
+                ignored.push(dir.clone());
+            } else {
+                kept.push(dir.clone());
             }
         }
     }
-    Ok(())
+    for chunk in ignored.chunks(WALK_BATCH) {
+        let pathspecs: Vec<String> = chunk
+            .iter()
+            .map(|dir| format!(":(literal){}", dir.to_string_lossy()))
+            .collect();
+        let mut args: Vec<&str> = vec!["ls-files", "-z", "--cached", "--"];
+        args.extend(pathspecs.iter().map(String::as_str));
+        let (status, out) = run_walk_git(root, &args, clock)?;
+        match status {
+            // Cut: the output held entries, so the directories are entered.
+            None => kept.extend(chunk.iter().cloned()),
+            Some(status) if !status.success() => return Err(unchecked()),
+            // Some tracked file lies under these: git reads their rule files.
+            Some(_) if !out.is_empty() => kept.extend(chunk.iter().cloned()),
+            Some(_) => {}
+        }
+    }
+    Ok(kept)
+}
+
+/// One git call of the rule-file walk, verified and bounded like every other call: its exit
+/// status (`None` when its output was cut at [`WALK_OUTPUT`]) and its output.
+fn run_walk_git(
+    root: &Path,
+    args: &[&str],
+    clock: Clock,
+) -> Result<(Option<ExitStatus>, Vec<u8>), String> {
+    let command = git_command_within(root, args, clock)?;
+    let (status, out, _) = run_bounded(command, WALK_OUTPUT, clock.left())?;
+    Ok((status, out))
 }
 
 /// [`git`] reading at most `limit` bytes of stdout. A listing past `limit` is an error,

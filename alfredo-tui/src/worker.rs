@@ -950,6 +950,20 @@ pub(crate) const UNCHECKED_TIMED_OUT: u32 = u32::MAX - 1;
 /// reason (did not start, output too large, cancelled). Also a marker (#470 review).
 pub(crate) const UNCHECKED_FAILED: u32 = u32::MAX - 2;
 
+/// The `dirty` count recorded when a work-tree `.gitignore`, `.gitattributes` or `.gitmodules` is
+/// not an ordinary file (a FIFO, socket or device) that git would block on (issue #521). The
+/// refusal text comes from [`rule_file_refusal`]; the marker is not a count.
+pub const UNCHECKED_RULE_FILE: u32 = u32::MAX - 4;
+
+/// Why the uncommitted-changes check refuses `workspace` for a work-tree rule file, naming the
+/// entry; `None` when no such refusal applies (issue #521).
+#[must_use]
+pub fn rule_file_refusal(workspace: &Path) -> Option<String> {
+    git_read::call_scope(git_read::DEADLINE, || {
+        git_read::refuse_rule_files(workspace).err()
+    })
+}
+
 /// Number of uncommitted changes (tracked modifications and untracked,
 /// non-ignored files) and the short HEAD they are not based on. Read-only
 /// (`GIT_OPTIONAL_LOCKS=0`; no index refresh is written). `None` when the
@@ -984,7 +998,7 @@ fn uncommitted_changes_within(workspace: &Path) -> Option<(u32, String)> {
     // A `.gitignore` or `.gitattributes` that is a FIFO blocks `git status` to its limit: refused
     // at once instead (issue #521). The marker says "not checked"; it is not a count.
     if git_read::refuse_rule_files(workspace).is_err() {
-        return Some((UNCHECKED_CHANGES, head));
+        return Some((UNCHECKED_RULE_FILE, head));
     }
     let status = match git_blocking(
         workspace,

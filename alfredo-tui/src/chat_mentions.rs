@@ -364,10 +364,15 @@ fn complete_timed_within(root: &Path, fragment: &str, scan: usize) -> (Vec<Strin
             return (Vec::new(), false);
         }
         // Refused at once, before the listing and its git calls (issue #521).
-        if git_read::refuse_rule_files(root).is_err() {
+        if git_read::refuse_rule_files(root)
+            .err()
+            .is_some_and(|error| git_read::refuses_listing(&error))
+        {
             return (Vec::new(), true);
         }
-        let (files, _, _) = read::discover(root, &canonical, scan);
+        let Ok((files, _, _)) = read::discover(root, &canonical, scan) else {
+            return (Vec::new(), true);
+        };
         // Only names a mention reads back whole and that draw nothing invisible.
         let whole = |path: &str| {
             !path.chars().any(odd)

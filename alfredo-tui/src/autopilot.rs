@@ -111,6 +111,10 @@ struct Saved {
     /// HEAD workers were based on. Absent for clean trees and in older state files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dirty: Option<(u32, String)>,
+    /// Why the uncommitted-changes check refused (a work-tree rule file that is not an ordinary
+    /// file, issue #521), named in the start notice. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dirty_refusal: Option<String>,
     /// The `--on-finish` hook was started for this finish (at most once per
     /// finish; cleared when follow-up work reopens the run).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -135,6 +139,15 @@ impl Saved {
         if *count == crate::worker::UNCHECKED_CHANGES {
             return Some(format!(
                 "uncommitted changes not checked (repository filters or includes need qualification) · workers see HEAD {head}"
+            ));
+        }
+        if *count == crate::worker::UNCHECKED_RULE_FILE {
+            let why = self
+                .dirty_refusal
+                .as_deref()
+                .unwrap_or("a work-tree ignore or attribute file is not an ordinary file");
+            return Some(format!(
+                "uncommitted changes not checked: {why} · workers see HEAD {head}"
             ));
         }
         if *count == crate::worker::UNCHECKED_TIMED_OUT {
@@ -847,6 +860,12 @@ impl Autopilot {
         )[..16]
             .to_string();
         let ids = plan.clone().unwrap_or_default();
+        let dirty = crate::worker::uncommitted_changes(tasks.workspace());
+        // The refused entry is named in the start notice (issue #521).
+        let dirty_refusal = dirty
+            .as_ref()
+            .filter(|(count, _)| *count == crate::worker::UNCHECKED_RULE_FILE)
+            .and_then(|_| crate::worker::rule_file_refusal(tasks.workspace()));
         self.saved = Some(Saved {
             version: VERSION,
             id,
@@ -873,7 +892,8 @@ impl Autopilot {
             stale: false,
             done: 0,
             total: 0,
-            dirty: crate::worker::uncommitted_changes(tasks.workspace()),
+            dirty,
+            dirty_refusal,
             hook_fired: false,
             finished_through: None,
             limits: BTreeMap::new(),
