@@ -97,6 +97,12 @@ fn at_path_typeahead_completes_the_last_word_and_keeps_the_rest() {
     let dir = std::env::temp_dir().join(format!("alfredo-at-path-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q", "--template="])
+        .arg(&dir)
+        .status()
+        .unwrap();
+    assert!(init.success());
     std::fs::write(dir.join("README.md"), "hi\n").unwrap();
     std::fs::write(dir.join("notes.txt"), "hi\n").unwrap();
     let picker = Completion::at_path("please read @REA", &dir).unwrap();
