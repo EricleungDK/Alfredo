@@ -343,6 +343,136 @@ fn filter_and_include_keys_in_other_spellings_or_scopes_are_refused() {
     assert!(output.contains("filter drivers"), "worktree: {output}");
 }
 
+/// Issue #496: a repository with a committed submodule `sub` whose per-submodule
+/// `submodule.sub.ignore=none` (set in the superproject's `.git/config`) overrides the
+/// global `diff.ignoreSubmodules=all`, so git would run `status` inside `sub` and read the
+/// submodule's own config (`.git/modules/sub/config`), which no gate checks. Returns the
+/// submodule's own config path; `README.md` of the superproject is left clean.
+fn repo_with_ignore_none_submodule(repo: &Repo) -> PathBuf {
+    let source = repo.base.join("sub-source");
+    fs::create_dir_all(&source).unwrap();
+    git(&source, &["init", "-q", "-b", "main"]);
+    fs::write(source.join("lib.txt"), "lib\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-q", "-m", "sub initial"]);
+    let url = source.display().to_string();
+    git(
+        &repo.root,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &url,
+            "sub",
+        ],
+    );
+    git(&repo.root, &["commit", "-q", "-m", "add submodule"]);
+    git(&repo.root, &["config", "submodule.sub.ignore", "none"]);
+    // A modified, tracked file in the submodule that a `* filter=x` attribute applies to.
+    fs::write(repo.root.join("sub/.gitattributes"), "* filter=x\n").unwrap();
+    // Same size, different mtime: git must read the content (and so run the clean filter) to
+    // know whether the file changed.
+    let changed = repo.root.join("sub/lib.txt");
+    fs::write(&changed, "bil\n").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&changed)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+        .unwrap();
+    repo.root.join(".git/modules/sub/config")
+}
+
+fn append(path: &Path, text: &str) {
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    write!(file, "{text}").unwrap();
+}
+
+/// Every working-tree-reading form of the two tools that run git over the working tree.
+fn submodule_exposed_calls() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("git_status", json!({})),
+        ("git_diff", json!({})),
+        ("git_diff", json!({"path": "sub"})),
+        ("git_diff", json!({"base": "HEAD"})),
+        ("git_diff", json!({"staged": true})),
+        ("git_diff", json!({"staged": true, "base": "HEAD"})),
+        ("git_diff", json!({"base": "HEAD", "target": "HEAD"})),
+    ]
+}
+
+#[test]
+fn a_submodule_filter_never_runs_even_with_ignore_none() {
+    let repo = Repo::new();
+    let config = repo_with_ignore_none_submodule(&repo);
+    let marker = repo.base.join("submodule-filter-ran");
+    append(
+        &config,
+        &format!(
+            "[filter \"x\"]\n\tclean = touch {}; cat\n",
+            marker.display()
+        ),
+    );
+    for (tool, arguments) in submodule_exposed_calls() {
+        let _ = fs::remove_file(&marker);
+        let output = repo.run(tool, arguments.clone());
+        assert!(
+            !marker.exists(),
+            "{tool} {arguments}: submodule filter ran: {output}"
+        );
+    }
+}
+
+#[test]
+fn a_submodule_config_fifo_include_never_stalls_status_or_diff() {
+    let repo = Repo::new();
+    let config = repo_with_ignore_none_submodule(&repo);
+    let fifo = repo.base.join("sub-include-fifo");
+    mkfifo(&fifo);
+    append(
+        &config,
+        &format!("[include]\n\tpath = {}\n", fifo.display()),
+    );
+    for (tool, arguments) in submodule_exposed_calls() {
+        let (sender, receiver) = mpsc::channel();
+        let (root, name, args) = (repo.root.clone(), tool.to_string(), arguments.clone());
+        std::thread::spawn(move || {
+            let output = chat_tools::dispatch(
+                &root,
+                &ToolCall {
+                    name,
+                    arguments: args,
+                },
+            );
+            let _ = sender.send(output);
+        });
+        receiver
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap_or_else(|_| {
+                panic!("{tool} {arguments} stalled on the submodule's FIFO include")
+            });
+    }
+}
+
+#[test]
+fn an_ordinary_submodule_still_gives_status_and_diff() {
+    let repo = Repo::new();
+    repo_with_ignore_none_submodule(&repo);
+    git(&repo.root, &["config", "--unset", "submodule.sub.ignore"]);
+    fs::remove_file(repo.root.join("sub/.gitattributes")).unwrap();
+    fs::write(repo.root.join("README.md"), "# Demo\nchanged\n").unwrap();
+    let status = repo.run("git_status", json!({}));
+    assert!(!status.starts_with("error: "), "{status}");
+    assert!(status.contains("M README.md"), "{status}");
+    let diff = repo.run("git_diff", json!({}));
+    assert!(!diff.starts_with("error: "), "{diff}");
+    assert!(diff.contains("+changed"), "{diff}");
+    let ignored = repo.run("git_diff", json!({"base": "HEAD"}));
+    assert!(ignored.contains("+changed"), "{ignored}");
+}
+
 #[test]
 fn padding_without_a_filter_does_not_block_git_status() {
     let repo = Repo::new();
