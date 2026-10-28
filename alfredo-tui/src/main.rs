@@ -536,6 +536,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 last_timing_draw = std::time::Instant::now();
             }
             dirty |= work.tasks.poll();
+            for session in &mut work.app.sessions {
+                session.protect_plan_origin(work.tasks.planner.pending_origin());
+            }
             dirty |= work.tasks.progress_changed();
             dirty |= work.tasks.follow_running_task();
             dirty |= work.app.health.changed();

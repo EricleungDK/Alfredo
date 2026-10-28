@@ -501,6 +501,13 @@ impl Planner {
             })
         }
     }
+    /// Origin command of the pending draft, if one is pending.
+    pub fn pending_origin(&self) -> Option<&crate::planner_command::Request> {
+        match &self.previous {
+            Some(previous) => previous.origin.as_ref(),
+            None => self.draft.as_ref().and(self.draft_origin.as_ref()),
+        }
+    }
     pub fn restore(&mut self, saved: SavedDraft) -> Result<(), String> {
         saved.validate()?;
         self.cancel();
