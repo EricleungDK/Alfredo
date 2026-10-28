@@ -520,11 +520,16 @@ fn reaches_submodule(root: &Path, pathspecs: &[String]) -> Result<bool, String> 
         })
         .collect();
     Ok(pathspecs.iter().any(|spec| {
+        // Git drops `.` and empty components (`deps/.` is `deps`, `deps/./inner` is
+        // `deps/inner`), so the comparison does too.
         let path = spec
             .strip_prefix(":(literal)")
             .unwrap_or(spec)
-            .trim_end_matches('/')
-            .to_lowercase();
+            .to_lowercase()
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .collect::<Vec<_>>()
+            .join("/");
         links.iter().any(|link| {
             *link == path
                 || link.starts_with(&format!("{path}/"))
@@ -935,10 +940,6 @@ fn plan_switch(root: &Path, arguments: &Value) -> Result<SwitchPlan, String> {
         .to_string();
     let create = flag(arguments, "create")?;
     refuse_repository_config(root)?;
-    if !create {
-        // A branch created at the current commit changes no file, so it opens no submodule.
-        refuse_submodule_ignore_override(root, &[&branch])?;
-    }
     let exists = local_branch_exists(root, &branch);
     if create {
         if exists {
@@ -952,6 +953,11 @@ fn plan_switch(root: &Path, arguments: &Value) -> Result<SwitchPlan, String> {
         return Err(format!(
             "no local branch {branch} (create=true makes it at the current commit)"
         ));
+    } else {
+        // `switch --no-guess` checks out refs/heads/<branch>, so that is the tree read; a
+        // tag or other ref of the same name must not stand in for it. A branch created at
+        // the current commit changes no file, so it opens no submodule.
+        refuse_submodule_ignore_override(root, &[&format!("refs/heads/{branch}")])?;
     }
     let from = match current_branch(root) {
         Ok(name) => name,
@@ -1633,47 +1639,6 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    /// #516: only a `submodule.<name>.ignore` other than `all` is an override; the name is
-    /// repository content and may hold anything.
-    #[test]
-    fn only_a_non_all_submodule_ignore_value_is_an_override() {
-        for value in ["none", "dirty", "untracked", "", "ALLX", "false"] {
-            let error = check_ignore_entry("submodule.sub.ignore", value).unwrap_err();
-            assert!(
-                error.contains(".gitmodules") && error.contains("ignore"),
-                "{error}"
-            );
-        }
-        for value in ["all", " ALL ", "All"] {
-            assert!(check_ignore_entry("submodule.sub.ignore", value).is_ok());
-        }
-        for key in [
-            "submodule.sub.url",
-            "submodule.sub.update",
-            "core.ignore",
-            "ignore",
-        ] {
-            assert!(check_ignore_entry(key, "none").is_ok(), "{key}");
-        }
-        // Odd names: dots, `=`, spaces and a very long name are shown cut, never executed.
-        let name = format!("submodule.a.b=c d{}.IGNORE", "x".repeat(500));
-        let error = check_ignore_entry(&name, "none").unwrap_err();
-        assert!(error.len() < 600, "{}", error.len());
-    }
-
-    #[test]
-    fn a_global_or_gitmodules_listing_with_an_override_is_refused_in_any_scope() {
-        let config = "global\0submodule.s.ignore\nnone\0local\0core.bare\nfalse\0";
-        assert!(check_ignore_config(config).is_err());
-        let fine = "global\0user.name\nA\0local\0submodule.s.ignore\nall\0";
-        assert!(check_ignore_config(fine).is_ok());
-        assert!(
-            check_ignore_listing("submodule.s.path\nsub\0submodule.s.ignore\ndirty\0").is_err()
-        );
-        assert!(check_ignore_listing("submodule.s.path\nsub\0submodule.s.ignore\nall\0").is_ok());
-        assert!(check_ignore_listing("").is_ok());
-    }
-
     #[test]
     fn remote_urls_lose_their_credentials() {
         assert_eq!(
@@ -1751,6 +1716,47 @@ mod tests {
             "***@github.com:o/r.git"
         );
         assert_eq!(redacted("/tmp/r\u{1b}[2J.git"), "/tmp/r\\u{1b}[2J.git");
+    }
+
+    /// #516: only a `submodule.<name>.ignore` other than `all` is an override; the name is
+    /// repository content and may hold anything.
+    #[test]
+    fn only_a_non_all_submodule_ignore_value_is_an_override() {
+        for value in ["none", "dirty", "untracked", "", "ALLX", "false"] {
+            let error = check_ignore_entry("submodule.sub.ignore", value).unwrap_err();
+            assert!(
+                error.contains(".gitmodules") && error.contains("ignore"),
+                "{error}"
+            );
+        }
+        for value in ["all", " ALL ", "All"] {
+            assert!(check_ignore_entry("submodule.sub.ignore", value).is_ok());
+        }
+        for key in [
+            "submodule.sub.url",
+            "submodule.sub.update",
+            "core.ignore",
+            "ignore",
+        ] {
+            assert!(check_ignore_entry(key, "none").is_ok(), "{key}");
+        }
+        // Odd names: dots, `=`, spaces and a very long name are shown cut, never executed.
+        let name = format!("submodule.a.b=c d{}.IGNORE", "x".repeat(500));
+        let error = check_ignore_entry(&name, "none").unwrap_err();
+        assert!(error.len() < 600, "{}", error.len());
+    }
+
+    #[test]
+    fn a_global_or_gitmodules_listing_with_an_override_is_refused_in_any_scope() {
+        let config = "global\0submodule.s.ignore\nnone\0local\0core.bare\nfalse\0";
+        assert!(check_ignore_config(config).is_err());
+        let fine = "global\0user.name\nA\0local\0submodule.s.ignore\nall\0";
+        assert!(check_ignore_config(fine).is_ok());
+        assert!(
+            check_ignore_listing("submodule.s.path\nsub\0submodule.s.ignore\ndirty\0").is_err()
+        );
+        assert!(check_ignore_listing("submodule.s.path\nsub\0submodule.s.ignore\nall\0").is_ok());
+        assert!(check_ignore_listing("").is_ok());
     }
 
     #[test]
