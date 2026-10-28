@@ -307,6 +307,24 @@ fn cut_at_space(root: &Path, path: &str) -> bool {
     })
 }
 
+/// Most paths a completion lists.
+pub const COMPLETE_SHOW: usize = 8;
+/// Most files one completion considers.
+pub const COMPLETE_SCAN: usize = 5_000;
+
+/// Paths the `@path` rules would attach that match `fragment`: prefix matches first, then
+/// substring matches.
+#[must_use]
+pub fn complete(root: &Path, fragment: &str) -> Vec<String> {
+    complete_within(root, fragment, COMPLETE_SCAN)
+}
+
+/// [`complete`] over at most `scan` files.
+#[must_use]
+pub fn complete_within(_root: &Path, _fragment: &str, _scan: usize) -> Vec<String> {
+    Vec::new()
+}
+
 /// Resolve the mentions of `prompt` against the working tree of the workspace at `root`.
 #[must_use]
 pub fn attach(root: &Path, prompt: &str) -> Attachment {

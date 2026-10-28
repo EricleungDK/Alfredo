@@ -93,6 +93,26 @@ fn slash_typeahead_lists_prefix_then_substring_matches_with_usage() {
 }
 
 #[test]
+fn at_path_typeahead_completes_the_last_word_and_keeps_the_rest() {
+    let dir = std::env::temp_dir().join(format!("alfredo-at-path-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("README.md"), "hi\n").unwrap();
+    std::fs::write(dir.join("notes.txt"), "hi\n").unwrap();
+    let picker = Completion::at_path("please read @REA", &dir).unwrap();
+    assert!(picker.live);
+    let names: Vec<_> = picker.choices.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["@README.md"]);
+    assert_eq!(picker.draft(), "please read @README.md ");
+    // Not at a word start, no match, or not an `@` word: nothing opens.
+    assert!(Completion::at_path("mail a@REA", &dir).is_none());
+    assert!(Completion::at_path("@zzz", &dir).is_none());
+    assert!(Completion::at_path("read REA", &dir).is_none());
+    assert!(Completion::at_path("@\"REA", &dir).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn f1_picker_filters_by_typed_text() {
     let mut help = Completion::all();
     let total = help.choices.len();

@@ -276,6 +276,11 @@ impl Completion {
         completion.live = true;
         Some(completion)
     }
+    /// Live `@path` type-ahead for the last word of `draft` (the cursor at its end).
+    #[must_use]
+    pub fn at_path(_draft: &str, _root: &std::path::Path) -> Option<Self> {
+        None
+    }
     /// Sets the F1 filter; with text the catalog shows one `Matches` group, prefix first.
     pub fn set_query(&mut self, query: String) {
         let mut all = Self::all();
