@@ -319,10 +319,48 @@ pub fn complete(root: &Path, fragment: &str) -> Vec<String> {
     complete_within(root, fragment, COMPLETE_SCAN)
 }
 
-/// [`complete`] over at most `scan` files.
+/// [`complete`] over at most `scan` files. Candidates come from the `list_files`
+/// discovery (ignore rules, no symlinks); each one listed must also pass
+/// [`read_mention`], the check `@path` attachment itself uses, and be one `parse` would
+/// read whole (no space, quote or other separator in it).
 #[must_use]
-pub fn complete_within(_root: &Path, _fragment: &str, _scan: usize) -> Vec<String> {
-    Vec::new()
+pub fn complete_within(root: &Path, fragment: &str, scan: usize) -> Vec<String> {
+    let odd = |c: char| separator(c) || c.is_control();
+    let needle = fragment
+        .strip_prefix("./")
+        .unwrap_or(fragment)
+        .to_lowercase();
+    let Ok(canonical) = root.canonicalize() else {
+        return Vec::new();
+    };
+    if needle.chars().any(odd) {
+        return Vec::new();
+    }
+    let (files, _, _) = read::discover(root, &canonical, scan);
+    let mut ranked: Vec<(u8, String)> = files
+        .iter()
+        .filter_map(|file| file.strip_prefix(&canonical).ok()?.to_str())
+        .filter(|path| !path.chars().any(odd))
+        .filter_map(|path| {
+            let lower = path.to_lowercase();
+            let rank = if lower.starts_with(&needle) {
+                0
+            } else if lower.contains(&needle) {
+                1
+            } else {
+                return None;
+            };
+            Some((rank, path.to_string()))
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    let mut check_failed = false;
+    ranked
+        .into_iter()
+        .map(|(_, path)| path)
+        .filter(|path| read_mention(root, path, &mut check_failed).is_ok())
+        .take(COMPLETE_SHOW)
+        .collect()
 }
 
 /// Resolve the mentions of `prompt` against the working tree of the workspace at `root`.

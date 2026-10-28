@@ -231,7 +231,11 @@ const MAX_LISTING: usize = 16 << 20;
 /// itself ignored. In a git workspace git's ignore rules decide (tracked files stay);
 /// otherwise, or when git cannot list, the plain [`walk`] is the fallback. [`excluded`]
 /// and [`noise`] always apply on top, so ignore files can only hide more.
-fn discover(root: &Path, start: &Path, limit: usize) -> (Vec<PathBuf>, bool, Option<String>) {
+pub(crate) fn discover(
+    root: &Path,
+    start: &Path,
+    limit: usize,
+) -> (Vec<PathBuf>, bool, Option<String>) {
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let rel = start
         .strip_prefix(&canonical)

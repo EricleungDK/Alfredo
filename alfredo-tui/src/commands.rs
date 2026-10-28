@@ -224,6 +224,8 @@ pub struct Completion {
     pub selected: usize,
     /// Opened by typing `/`: Tab fills like Enter, and the prompt keeps the focus.
     pub live: bool,
+    /// Lists `@path` files rather than commands.
+    pub files: bool,
     /// The F1 catalog (grouped, or `Matches` once a filter is typed).
     pub help: bool,
     /// Type-to-filter text of the F1 catalog.
@@ -235,6 +237,7 @@ impl Completion {
             choices,
             selected: 0,
             live: false,
+            files: false,
             help: false,
             query: String::new(),
         })
@@ -278,8 +281,27 @@ impl Completion {
     }
     /// Live `@path` type-ahead for the last word of `draft` (the cursor at its end).
     #[must_use]
-    pub fn at_path(_draft: &str, _root: &std::path::Path) -> Option<Self> {
-        None
+    pub fn at_path(draft: &str, root: &std::path::Path) -> Option<Self> {
+        let start = draft
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(0, |(at, c)| at + c.len_utf8());
+        let fragment = draft[start..].strip_prefix('@')?;
+        let mut completion = Self::from_choices(
+            crate::chat_mentions::complete(root, fragment)
+                .into_iter()
+                .map(|path| Choice {
+                    name: format!("@{path}"),
+                    description: "file",
+                    group: None,
+                    draft: format!("{}@{path} ", &draft[..start]),
+                })
+                .collect(),
+        )?;
+        completion.live = true;
+        completion.files = true;
+        Some(completion)
     }
     /// Sets the F1 filter; with text the catalog shows one `Matches` group, prefix first.
     pub fn set_query(&mut self, query: String) {
@@ -405,6 +427,7 @@ impl Completion {
             choices,
             selected: 0,
             live: false,
+            files: false,
             help: true,
             query: String::new(),
         }
@@ -426,6 +449,6 @@ impl Completion {
     pub fn selected_is(&self, draft: &str) -> bool {
         self.choices
             .get(self.selected)
-            .is_some_and(|c| c.name == draft.trim())
+            .is_some_and(|c| draft.trim().rsplit(char::is_whitespace).next() == Some(&c.name))
     }
 }

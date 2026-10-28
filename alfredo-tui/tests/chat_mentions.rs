@@ -342,6 +342,7 @@ fn completion_lists_only_what_a_mention_would_attach() {
     let root = dir.path();
     fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
     fs::write(root.join("ignored.txt"), "x\n").unwrap();
+    fs::write(root.join("huge.txt"), "z".repeat(300 * 1024)).unwrap();
     fs::write(root.join(".npmrc"), "token\n").unwrap();
     fs::write(root.join("id_rsa"), "key\n").unwrap();
     fs::write(root.join("bad utf8.txt"), "x\n").unwrap();
@@ -354,7 +355,7 @@ fn completion_lists_only_what_a_mention_would_attach() {
         ".env",
         ".npmrc",
         "id_rsa",
-        "big.txt",
+        "huge.txt",
         "blob.bin",
         "link.txt",
         "ignored.txt",

@@ -2202,7 +2202,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             work.app.sessions[index].backspace();
                             work.app.completion = alfredo_tui::commands::Completion::typeahead(
                                 &work.app.sessions[index].draft,
-                            );
+                            )
+                            .or_else(|| {
+                                let session = &work.app.sessions[index];
+                                (session.cursor() == session.draft.len())
+                                    .then(|| {
+                                        alfredo_tui::commands::Completion::at_path(
+                                            &session.draft,
+                                            work.tasks.workspace(),
+                                        )
+                                    })
+                                    .flatten()
+                            });
                         }
                         KeyCode::PageUp if work.tasks.agent_shown().is_some() => {
                             work.tasks.agent_shown().unwrap().scroll_rows(-10)
@@ -2238,7 +2249,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             work.app.sessions[index].type_char(ch);
                             work.app.completion = alfredo_tui::commands::Completion::typeahead(
                                 &work.app.sessions[index].draft,
-                            );
+                            )
+                            .or_else(|| {
+                                let session = &work.app.sessions[index];
+                                (session.cursor() == session.draft.len())
+                                    .then(|| {
+                                        alfredo_tui::commands::Completion::at_path(
+                                            &session.draft,
+                                            work.tasks.workspace(),
+                                        )
+                                    })
+                                    .flatten()
+                            });
                         }
                         _ => {}
                     }

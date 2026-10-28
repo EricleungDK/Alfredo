@@ -1022,7 +1022,9 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
             List::new(items)
                 .block(frame_block(
                     area,
-                    if completion.live {
+                    if completion.files {
+                        " Files · ↑↓ choose · Enter/Tab fills draft · Esc close ".into()
+                    } else if completion.live {
                         " Commands · ↑↓ choose · Enter/Tab fills draft · Esc close ".into()
                     } else {
                         " Complete · ↑↓ choose · Enter fills draft · Esc close ".into()
