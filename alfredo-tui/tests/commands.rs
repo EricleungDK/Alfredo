@@ -76,6 +76,12 @@ fn slash_typeahead_lists_prefix_then_substring_matches_with_usage() {
         .description
         .contains("GOAL"));
     assert_eq!(Completion::typeahead("/pla").unwrap().draft(), "/plan ");
+    // Issue #482: `/exit` and `/quit` are listed as quitting like Ctrl+Q.
+    for (typed, name) in [("/qu", "/quit"), ("/ex", "/exit")] {
+        let picker = Completion::typeahead(typed).unwrap();
+        assert_eq!(picker.choices[0].name, name, "{typed}");
+        assert!(picker.choices[0].description.contains("Ctrl+Q"), "{typed}");
+    }
     // An exact name leads, so Enter on a fully typed `/model` still submits it.
     let exact = Completion::typeahead("/model").unwrap();
     assert!(exact.selected_is("/model") && exact.choices.len() > 1);
@@ -176,6 +182,20 @@ fn f1_picker_filters_by_typed_text() {
     help.set_query(String::new());
     assert_eq!(help.choices.len(), total);
     assert!(help.help && !help.live);
+    // Issue #482: the F1 catalog lists both quit aliases, described as quitting (Ctrl+Q).
+    let help = Completion::all();
+    for name in ["/exit", "/quit"] {
+        let choice = help
+            .choices
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("{name} missing from F1"));
+        assert!(
+            choice.description.contains("Ctrl+Q"),
+            "{name}: {}",
+            choice.description
+        );
+    }
 }
 
 #[test]

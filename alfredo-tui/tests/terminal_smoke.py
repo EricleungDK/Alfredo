@@ -422,6 +422,25 @@ class ChatHarnessContext(unittest.TestCase):
                 server.shutdown()
 
 
+    def test_slash_quit_and_slash_exit_quit_like_ctrl_q(self):
+        # Issue #482: both aliases leave through the Ctrl+Q path and exit 0, not "Unknown command".
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        for command in (b'/quit', b'/exit'):
+            with tempfile.TemporaryDirectory(prefix='alfredo-quit-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-quit-repo-') as repo:
+                git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+                subprocess.run(git + ['init', '-q', '--template='], check=True)
+                subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+                env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+                terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], repo, env)
+                try:
+                    terminal.wait_for('◈ ○ chat 1')
+                    terminal.write(command + b'\r')
+                    self.assertEqual(terminal.process.wait(timeout=5), 0, command)
+                    self.assertNotIn('Unknown command', terminal.screen())
+                finally:
+                    terminal.close()
+
     def test_ctrl_c_cancels_a_running_turn_keeps_the_draft_and_quits_only_when_idle(self):
         # Issue #345: Ctrl+C mid-turn acts like Esc (stop the reply, keep the draft and the
         # session); idle, it quits as before. The draft also survives the quit.
