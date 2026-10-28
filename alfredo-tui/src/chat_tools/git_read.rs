@@ -1832,6 +1832,19 @@ mod tests {
         assert!(took < Duration::from_millis(1500), "{took:?}");
     }
 
+    /// Issue #520: a child that writes more than 4 KiB to stderr and exits 0 succeeds, and
+    /// only the first 4 KiB of its stderr is kept. Closing the pipe at the cap would kill the
+    /// child with SIGPIPE (signal 13) instead, as a warning-heavy `git diff` was killed.
+    #[test]
+    fn stderr_past_4_kib_is_drained_and_the_command_still_succeeds() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec head -c 200000 /dev/zero >&2"]);
+        let (status, out, error) = run_bounded(command, 4096, DEADLINE).unwrap();
+        assert!(status.is_some_and(|status| status.success()), "{status:?}");
+        assert!(out.is_empty());
+        assert_eq!(error.len(), 4096);
+    }
+
     /// Issue #500: a command that exits at once must not pay a fixed polling floor; the
     /// cold start runs several bounded git calls before the first frame. The old fixed 5 ms
     /// sleep put a floor of 5 ms under every run however idle the box, and load only adds
