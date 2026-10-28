@@ -148,10 +148,13 @@ def grading_refusal(unsafe_unsandboxed=False):
 
 
 def sandbox_argv(export, check, bwrap, prlimit):
-    """The bwrap argv that runs one check.sh: only `export` is writable, the host home and network are gone."""
+    """The bwrap argv that runs one check.sh: only `export` is writable, the host home and network are gone.
+
+    `--cap-drop ALL` keeps a root grader from regaining CAP_SYS_ADMIN in the namespace (#517).
+    """
     export = str(export)
     argv = [bwrap, '--die-with-parent', '--new-session', '--unshare-all', '--unshare-net',
-            '--tmpfs', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
+            '--cap-drop', 'ALL', '--tmpfs', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
     for system in ('/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc'):
         if Path(system).exists():
             argv += ['--ro-bind', system, system]
