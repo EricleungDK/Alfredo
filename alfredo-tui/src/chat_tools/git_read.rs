@@ -97,6 +97,7 @@ fn git_branch(root: &Path, arguments: &Value) -> Result<String, String> {
 }
 
 fn branch_output(root: &Path, _: &Value) -> Result<String, String> {
+    refuse_includes(root, INCLUDES_NOT_RUN)?;
     let current = match git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
         Ok(name) => name.trim().to_string(),
         Err(_) => format!(
@@ -603,10 +604,27 @@ fn hardened_command(root: &Path) -> Result<Command, String> {
     let mut command = Command::new("/usr/bin/git");
     hardened(&mut command)
         .env("GIT_CEILING_DIRECTORIES", ceiling)
+        .args(REPOSITORY_FILE_KEYS)
         .arg("-C")
         .arg(root);
     Ok(command)
 }
+
+/// Overrides for the config keys through which the repository's own config names a file git
+/// opens by itself (issue #474): an attributes file, a mailmap, an excludes file. Any of them
+/// can be a FIFO or device that stalls the call to its time limit. They are emptied, so
+/// the repository's choice is never opened; a caller that vets an excludes file passes its own
+/// `-c core.excludesFile=` after these, which wins.
+const REPOSITORY_FILE_KEYS: [&str; 8] = [
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "core.excludesFile=/dev/null",
+    "-c",
+    "mailmap.file=/dev/null",
+    "-c",
+    "log.mailmap=false",
+];
 
 /// Tracked and untracked-but-not-ignored files under `rel` (a workspace-relative `/` path,
 /// empty for the whole workspace), as git lists them: `.gitignore` files at any depth,
@@ -647,6 +665,9 @@ pub(crate) fn list_unignored(
 
 /// Whether git ignores the untracked path `rel` (a tracked path is never ignored).
 pub(crate) fn is_ignored(root: &Path, rel: &str, excludes: Option<&Path>) -> Result<bool, String> {
+    // The verification below reads the config with its includes; a FIFO target would stall it
+    // (issue #474).
+    refuse_includes(root, INCLUDES_NOT_RUN)?;
     let config = excludes.map(|path| format!("core.excludesFile={}", path.display()));
     // check-ignore rejects `--literal-pathspecs`; the `./` prefix keeps a directory named
     // like pathspec magic (`:(top)`) a plain path.

@@ -1290,7 +1290,7 @@ fn a_fifo_named_by_excludes_attributes_or_mailmap_config_never_stalls() {
 }
 
 /// Issue #474 (3): a regular `core.excludesFile` in the repository config does not refuse
-/// `git_status`.
+/// `git_status`; git does not read it (the tools override the key), which the listing shows.
 #[test]
 fn a_regular_excludes_file_does_not_refuse_git_status() {
     let repo = Repo::new();
@@ -1307,6 +1307,11 @@ fn a_regular_excludes_file_does_not_refuse_git_status() {
         output.contains("clean") && !output.starts_with("error:"),
         "{output}"
     );
+    // Documented behaviour change: the file named by the repository config is not read, so
+    // what it would hide is listed.
+    fs::write(repo.root.join("ignored.txt"), "x\n").unwrap();
+    let output = dispatch_promptly(&repo.root, "git_status");
+    assert!(output.contains("?? ignored.txt"), "{output}");
 }
 
 /// Issue #465 (review): a symlinked hook (`ln -s ../../hook.sh .git/hooks/pre-commit`, common
