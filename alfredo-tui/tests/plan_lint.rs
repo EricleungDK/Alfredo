@@ -18,7 +18,7 @@ use std::{
         mpsc, Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 fn step(files: &[&str], check: &[&str], dependencies: &[u64]) -> Step {
@@ -97,6 +97,151 @@ fn own_files_transitive_dependencies_and_committed_paths_satisfy_checks() {
         step(&["lib/x.js"], &["node", "lib"], &[]),
     ]);
     assert_eq!(lint(&plan), Vec::<String>::new());
+}
+
+/// A scratch repository with one empty commit; `config` is appended to its `.git/config`.
+/// Returns the directory and the commit (the plan baseline).
+fn repository(name: &str, config: &str) -> (PathBuf, String) {
+    let root =
+        std::env::temp_dir().join(format!("alfredo-plan-lint-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    run(&["init", "-q"]);
+    run(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.invalid",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "base",
+    ]);
+    let head = run(&["rev-parse", "HEAD"]);
+    if !config.is_empty() {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(".git/config"))
+            .unwrap()
+            .write_all(config.as_bytes())
+            .unwrap();
+    }
+    (root, head)
+}
+
+/// A plan whose baseline listing was truncated (300 paths, 1 shown), so the lint asks git
+/// about every file the listing does not show.
+fn scoped_plan(root: &Path, baseline: &str, files: &[&str], check: &[&str]) -> Plan {
+    let mut draft = plan(vec![step(files, check, &[])]);
+    draft.context = Some(RepositoryContext {
+        baseline: baseline.into(),
+        paths: vec!["README.md".into()],
+        omitted_paths: 300,
+        sources: vec![],
+        omitted_sources: 0,
+        listing_truncated: false,
+    });
+    draft.scope = Some(Box::new(Binding {
+        workspace: root.into(),
+        revision: 1,
+        draft_revision: 1,
+        brief: None,
+        confirmed: false,
+    }));
+    draft
+}
+
+/// Opens `fifo` for writing, without blocking, until `done` is set. A git that
+/// blocks reading the FIFO in open() then goes on, so no git process is left stuck.
+fn release_fifo_until(fifo: PathBuf, done: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !done.load(Ordering::SeqCst) {
+            let _ = fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo);
+            thread::sleep(Duration::from_millis(5));
+        }
+    })
+}
+
+#[test]
+fn a_config_include_fifo_never_hangs_the_lint() {
+    let (root, baseline) = repository("include-fifo", "");
+    let fifo = root.join("blocked.config");
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    fs::OpenOptions::new()
+        .append(true)
+        .open(root.join(".git/config"))
+        .unwrap()
+        .write_all(format!("[include]\n\tpath = {}\n", fifo.display()).as_bytes())
+        .unwrap();
+    // `notes.txt` is a file the listing does not show: the lint sizes it with git.
+    let draft = scoped_plan(&root, &baseline, &["notes.txt"], &["sh", "run.sh"]);
+    let (sender, receiver) = mpsc::channel();
+    let started = Instant::now();
+    thread::spawn(move || {
+        let _ = sender.send(plan_lint::findings(&draft));
+    });
+    let answer = receiver.recv_timeout(Duration::from_secs(20));
+    let elapsed = started.elapsed();
+    // Only a stalled lint is released; a lint that returned in time never touched the FIFO.
+    let done = Arc::new(AtomicBool::new(false));
+    let releaser = release_fifo_until(fifo, done.clone());
+    if answer.is_err() {
+        // Let the stalled lint finish, so no git is left blocked on the FIFO.
+        let _ = receiver.recv_timeout(Duration::from_secs(20));
+    }
+    done.store(true, Ordering::SeqCst);
+    releaser.join().unwrap();
+    let findings = answer.expect("plan_lint::findings blocked on a FIFO include (#519)");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "lint took {elapsed:?}; git must be refused, not waited for"
+    );
+    // Unknown answers count as present, so nothing is reported.
+    assert_eq!(findings, Vec::<String>::new());
+}
+
+#[test]
+fn a_repository_config_with_filter_drivers_leaves_git_answers_unknown() {
+    let (plain, plain_head) = repository("filter-control", "");
+    let control = plan_lint::findings(&scoped_plan(
+        &plain,
+        &plain_head,
+        &["out.txt"],
+        &["sh", "missing/run.sh"],
+    ));
+    // Control: without the filter the missing check file is reported, so the lint does run.
+    assert_eq!(control.len(), 1, "{control:?}");
+    assert!(
+        control[0].starts_with("Task 1 check references missing/run.sh,"),
+        "{control:?}"
+    );
+    let (filtered, filtered_head) =
+        repository("filter-config", "[filter \"lfs\"]\n\tclean = cat\n");
+    let findings = plan_lint::findings(&scoped_plan(
+        &filtered,
+        &filtered_head,
+        &["out.txt"],
+        &["sh", "missing/run.sh"],
+    ));
+    assert_eq!(findings, Vec::<String>::new());
 }
 
 #[test]
@@ -317,143 +462,4 @@ fn file_the_plan_creates_is_not_sized_and_is_not_flagged() {
         Vec::<String>::new(),
         "exactly 64 KiB is within the bound"
     );
-}
-
-/// A scratch repository with one empty commit; `config` is appended to its `.git/config`.
-/// Returns the directory and the commit (the plan baseline).
-fn repository(name: &str, config: &str) -> (PathBuf, String) {
-    let root =
-        std::env::temp_dir().join(format!("alfredo-plan-lint-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap();
-    let run = |args: &[&str]| {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{args:?}: {output:?}");
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    };
-    run(&["init", "-q"]);
-    run(&[
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@example.invalid",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "base",
-    ]);
-    let head = run(&["rev-parse", "HEAD"]);
-    if !config.is_empty() {
-        fs::OpenOptions::new()
-            .append(true)
-            .open(root.join(".git/config"))
-            .unwrap()
-            .write_all(config.as_bytes())
-            .unwrap();
-    }
-    (root, head)
-}
-
-/// A plan whose baseline listing was truncated (300 paths, 1 shown), so the lint asks git
-/// about every file the listing does not show.
-fn scoped_plan(root: &Path, baseline: &str, files: &[&str], check: &[&str]) -> Plan {
-    let mut draft = plan(vec![step(files, check, &[])]);
-    draft.context = Some(RepositoryContext {
-        baseline: baseline.into(),
-        paths: vec!["README.md".into()],
-        omitted_paths: 300,
-        sources: vec![],
-        omitted_sources: 0,
-        listing_truncated: false,
-    });
-    draft.scope = Some(Box::new(Binding {
-        workspace: root.into(),
-        revision: 1,
-        draft_revision: 1,
-        brief: None,
-        confirmed: false,
-    }));
-    draft
-}
-
-/// Opens `fifo` for writing, without blocking, until `done` is set. A git that
-/// blocks reading the FIFO in open() then goes on, so no git process is left stuck.
-fn release_fifo_until(fifo: PathBuf, done: Arc<AtomicBool>) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        while !done.load(Ordering::SeqCst) {
-            let _ = fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&fifo);
-            thread::sleep(Duration::from_millis(5));
-        }
-    })
-}
-
-#[test]
-fn a_config_include_fifo_never_hangs_the_lint() {
-    let (root, baseline) = repository("include-fifo", "");
-    let fifo = root.join("blocked.config");
-    assert!(Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .unwrap()
-        .success());
-    fs::OpenOptions::new()
-        .append(true)
-        .open(root.join(".git/config"))
-        .unwrap()
-        .write_all(format!("[include]\n\tpath = {}\n", fifo.display()).as_bytes())
-        .unwrap();
-    // `notes.txt` is a file the listing does not show: the lint sizes it with git.
-    let draft = scoped_plan(&root, &baseline, &["notes.txt"], &["sh", "run.sh"]);
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = sender.send(plan_lint::findings(&draft));
-    });
-    let answer = receiver.recv_timeout(Duration::from_secs(20));
-    // Only a stalled lint is released; a lint that returned in time never touched the FIFO.
-    let done = Arc::new(AtomicBool::new(false));
-    let releaser = release_fifo_until(fifo, done.clone());
-    if answer.is_err() {
-        // Let the stalled lint finish, so no git is left blocked on the FIFO.
-        let _ = receiver.recv_timeout(Duration::from_secs(20));
-    }
-    done.store(true, Ordering::SeqCst);
-    releaser.join().unwrap();
-    let findings = answer.expect("plan_lint::findings blocked on a FIFO include (#519)");
-    // Unknown answers count as present, so nothing is reported.
-    assert_eq!(findings, Vec::<String>::new());
-}
-
-#[test]
-fn a_repository_config_with_filter_drivers_leaves_git_answers_unknown() {
-    let (plain, plain_head) = repository("filter-control", "");
-    let control = plan_lint::findings(&scoped_plan(
-        &plain,
-        &plain_head,
-        &["out.txt"],
-        &["sh", "missing/run.sh"],
-    ));
-    // Control: without the filter the missing check file is reported, so the lint does run.
-    assert_eq!(control.len(), 1, "{control:?}");
-    assert!(
-        control[0].starts_with("Task 1 check references missing/run.sh,"),
-        "{control:?}"
-    );
-    let (filtered, filtered_head) =
-        repository("filter-config", "[filter \"lfs\"]\n\tclean = cat\n");
-    let findings = plan_lint::findings(&scoped_plan(
-        &filtered,
-        &filtered_head,
-        &["out.txt"],
-        &["sh", "missing/run.sh"],
-    ));
-    assert_eq!(findings, Vec::<String>::new());
 }

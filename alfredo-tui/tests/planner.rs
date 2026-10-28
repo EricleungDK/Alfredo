@@ -1760,6 +1760,47 @@ fn manual_plan_shows_validation_warnings_without_blocking_save() {
     assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 2);
 }
 
+/// The draft panel is drawn on every frame, so its view must not run the lint (git may
+/// stall, #519): the first view shows the findings as pending, and `poll` brings them.
+#[test]
+fn plan_view_does_not_run_the_lint_on_the_draw_path() {
+    let mut draft = plan();
+    draft.tasks[0].policy.check = vec!["alfredo-no-such-tool-x9".into(), "run".into()];
+    let mut planner = Planner::default();
+    planner
+        .restore(SavedDraft {
+            plan: draft,
+            revision: 1,
+            origin: None,
+        })
+        .unwrap();
+    let first = planner.view();
+    assert!(
+        first.contains("Validation warnings · checking"),
+        "first view must not carry findings computed on the draw path: {first}"
+    );
+    assert!(
+        !first.contains("is not available in the check sandbox"),
+        "{first}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !planner
+        .view()
+        .contains("is not available in the check sandbox")
+    {
+        planner.poll();
+        assert!(Instant::now() < deadline, "findings never arrived");
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        planner
+            .view()
+            .contains("Validation warnings · /plan-save still allowed"),
+        "{}",
+        planner.view()
+    );
+}
+
 /// Mirrors the console route for `/plan-cancel`: a durable planner command when
 /// there is something to bind, otherwise the plain controller command.
 fn console_plan_cancel(
@@ -1895,45 +1936,4 @@ fn plan_cancel_of_an_inflight_generation_stops_it_and_clears_the_binding() {
         .unwrap()
         .is_none());
     let _ = server.join();
-}
-
-/// The draft panel is drawn on every frame, so its view must not run the lint (git may
-/// stall, #519): the first view shows the findings as pending, and `poll` brings them.
-#[test]
-fn plan_view_does_not_run_the_lint_on_the_draw_path() {
-    let mut draft = plan();
-    draft.tasks[0].policy.check = vec!["alfredo-no-such-tool-x9".into(), "run".into()];
-    let mut planner = Planner::default();
-    planner
-        .restore(SavedDraft {
-            plan: draft,
-            revision: 1,
-            origin: None,
-        })
-        .unwrap();
-    let first = planner.view();
-    assert!(
-        first.contains("Validation warnings · checking"),
-        "first view must not carry findings computed on the draw path: {first}"
-    );
-    assert!(
-        !first.contains("is not available in the check sandbox"),
-        "{first}"
-    );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !planner
-        .view()
-        .contains("is not available in the check sandbox")
-    {
-        planner.poll();
-        assert!(Instant::now() < deadline, "findings never arrived");
-        thread::sleep(Duration::from_millis(2));
-    }
-    assert!(
-        planner
-            .view()
-            .contains("Validation warnings · /plan-save still allowed"),
-        "{}",
-        planner.view()
-    );
 }
