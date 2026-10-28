@@ -1158,6 +1158,80 @@ fn git_log_refuses_a_config_include_before_git_runs() {
     }
 }
 
+/// Issue #497: a partial clone (`extensions.partialClone`, a promisor remote whose
+/// `uploadpack` is a program the repository chose) with `object` missing from the store.
+/// Returns the repo and the marker file the program would create.
+fn partial_clone_repo(missing: &str) -> (Repo, PathBuf) {
+    let repo = Repo::new();
+    repo.go_branch();
+    let object = |spec: &str| git(&repo.root, &["rev-parse", spec]).trim().to_string();
+    let id = match missing {
+        "commit" => object("alfredo/go-7"),
+        "blob" => object("alfredo/go-7:README.md"),
+        _ => object("main:README.md"),
+    };
+    let loose = repo.root.join(".git/objects").join(&id[..2]).join(&id[2..]);
+    fs::remove_file(&loose).unwrap();
+    fs::write(repo.root.join("README.md"), "# Demo\nedited\n").unwrap();
+    let marker = repo.base.join("X");
+    let script = repo.base.join("uploadpack.sh");
+    fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let url = repo.root.display().to_string();
+    for (key, value) in [
+        ("core.repositoryformatversion", "1"),
+        ("extensions.partialclone", "origin"),
+        ("remote.origin.url", url.as_str()),
+        ("remote.origin.promisor", "true"),
+        ("remote.origin.uploadpack", script.to_str().unwrap()),
+    ] {
+        git(&repo.root, &["config", key, value]);
+    }
+    (repo, marker)
+}
+
+/// Issue #497: no read-tier git tool runs the repository's `remote.origin.uploadpack`
+/// program through a partial-clone lazy fetch, and each answers with an error naming the
+/// cause within 3 s.
+#[test]
+fn no_read_tier_tool_runs_a_partial_clone_uploadpack_program() {
+    let calls = [
+        ("git_status", json!({}), "blob-main"),
+        ("git_diff", json!({}), "blob-main"),
+        (
+            "git_diff",
+            json!({"base": "main", "target": "alfredo/go-7"}),
+            "blob",
+        ),
+        ("git_diff", json!({"base": "main"}), "blob"),
+        ("git_log", json!({"ref": "alfredo/go-7"}), "commit"),
+        ("git_branch", json!({}), "commit"),
+        ("list_files", json!({}), "blob-main"),
+        ("grep", json!({"pattern": "Demo"}), "blob-main"),
+    ];
+    for (tool, arguments, missing) in calls {
+        let (repo, marker) = partial_clone_repo(missing);
+        let output = dispatch_promptly_with(&repo.root, tool, arguments.clone());
+        assert!(
+            !marker.exists(),
+            "{tool} {arguments} ran the repository's uploadpack program: {output}"
+        );
+        if tool.starts_with("git_") {
+            assert!(
+                output.starts_with("error:") && output.contains("uploadpack"),
+                "{tool} {arguments}: {output}"
+            );
+        }
+    }
+}
+
 /// Issue #465 (mutation review): the include refusal says so, and a config git cannot read
 /// at all fails closed with its own message rather than the include one.
 #[test]
