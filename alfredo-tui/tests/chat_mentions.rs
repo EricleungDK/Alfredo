@@ -368,7 +368,10 @@ fn completion_lists_only_what_a_mention_would_attach() {
     assert!(listed.iter().any(|p| p == "src/a.rs"), "{listed:?}");
     // Whatever is listed is attached by the same rules.
     for path in &listed {
-        assert_eq!(attach(root, &format!("@{path}")).files, [path.clone()]);
+        assert_eq!(
+            attach(root, &format!("@{path}")).files,
+            std::slice::from_ref(path)
+        );
     }
 }
 
