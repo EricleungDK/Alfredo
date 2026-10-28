@@ -922,6 +922,72 @@ fn git_works_sandboxed_in_a_linked_worktree() {
     let _ = fs::remove_dir_all(base);
 }
 
+/// Issue #522: a workspace with no root `.git` gets no repository from a sandboxed command.
+/// `git init` or a hand-built `.git` directory must not survive the run, and the chat git
+/// tools must still refuse the workspace afterwards.
+#[test]
+fn a_sandboxed_command_cannot_create_a_repository_in_a_workspace_without_one() {
+    if !sandbox_works() {
+        return;
+    }
+    let commands = [
+        "git init -q . ; echo END",
+        "mkdir -p .git/objects .git/refs && printf 'ref: refs/heads/main\\n' > .git/HEAD ; echo END",
+        "git init -q --bare . ; echo END",
+    ];
+    for command in commands {
+        let root = workspace("no-repo-created");
+        let card = approval::card(&root, &call(json!({ "command": command }))).unwrap();
+        let result = approval::apply(&root, &card).unwrap();
+        assert!(result.contains("END"), "{command}: {result}");
+        let status = chat_tools::dispatch(
+            &root,
+            &ToolCall {
+                name: "git_status".into(),
+                arguments: json!({}),
+            },
+        );
+        assert!(status.starts_with("error: "), "{command}: {status}");
+        // Nothing is left on the host: no `.git` entry of any kind.
+        assert!(
+            fs::symlink_metadata(root.join(".git")).is_err(),
+            "{command}: a .git entry was left in the workspace"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #522: two sandboxed runs at once in a workspace with no `.git`. The run that ends
+/// first must not take the placeholder from the other, which still runs `git init`
+/// afterwards; neither run leaves a repository or a placeholder behind.
+#[test]
+fn overlapping_sandboxed_runs_in_a_workspace_without_git_stay_masked() {
+    if !sandbox_works() {
+        return;
+    }
+    let root = workspace("overlap");
+    let spawn = |command: &str| {
+        let root = root.clone();
+        let call = call(json!({ "command": command }));
+        std::thread::spawn(move || {
+            let card = approval::card(&root, &call).unwrap();
+            approval::apply(&root, &card).unwrap()
+        })
+    };
+    let late = spawn("sleep 1.2; git init -q . ; echo LATE_END rc=$?");
+    let early = spawn("sleep 0.2; echo EARLY_END");
+    let early = early.join().unwrap();
+    let late = late.join().unwrap();
+    assert!(early.contains("EARLY_END"), "{early}");
+    assert!(late.contains("LATE_END"), "{late}");
+    assert!(!late.contains("rc=0"), "git init succeeded: {late}");
+    assert!(
+        fs::symlink_metadata(root.join(".git")).is_err(),
+        "a .git entry was left in the workspace"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #359: a workspace whose `.git` leads to another repository, by a gitfile or by a
 /// `commondir` file behind a gitfile, gets that repository's config and objects neither
 /// bound into the sandbox nor readable from it.
