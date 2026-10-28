@@ -32,8 +32,9 @@ pub const MAX_PROTOCOL_LINE_BYTES: usize = 16 * 1024 * 1024;
 const TRUSTED_EXECUTABLE_ROOTS: [&str; 4] = ["/usr/bin", "/usr/sbin", "/bin", "/sbin"];
 /// Bubblewrap namespace and session isolation shared by every prepared argv
 /// (worker check/run requests and the run boundary). Order is part of the
-/// prepared argv shape.
-pub(crate) const SANDBOX_ISOLATION_FLAGS: [&str; 8] = [
+/// prepared argv shape. `--cap-drop ALL` is a pair: as uid 0, bwrap otherwise keeps
+/// CAP_SYS_ADMIN and a sandboxed command can remount its read-only binds (#517).
+pub(crate) const SANDBOX_ISOLATION_FLAGS: [&str; 10] = [
     "--die-with-parent",
     "--new-session",
     "--unshare-user",
@@ -42,6 +43,8 @@ pub(crate) const SANDBOX_ISOLATION_FLAGS: [&str; 8] = [
     "--unshare-ipc",
     "--unshare-uts",
     "--unshare-cgroup-try",
+    "--cap-drop",
+    "ALL",
 ];
 const IMPLICIT_READONLY_ROOTS: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
 const PROTECTED_READONLY_ROOTS: [&str; 7] =
@@ -1947,7 +1950,25 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
     while index < prefix.len() {
         let argument = prefix[index].as_str();
         match argument {
-            _ if SANDBOX_ISOLATION_FLAGS.contains(&argument) => {
+            // The capability drop is a pair; its value is checked here, not by the
+            // membership arm below, so a bare `ALL` never counts as a flag.
+            "--cap-drop" => {
+                let value = prefix.get(index + 1).ok_or_else(|| {
+                    StructuredFailure::new(
+                        "contract-failure",
+                        "Bubblewrap capability drop is incomplete",
+                    )
+                })?;
+                if value != "ALL" {
+                    return Err(StructuredFailure::new(
+                        "contract-failure",
+                        "Bubblewrap capability drop must drop ALL capabilities",
+                    ));
+                }
+                *flags.entry(argument).or_default() += 1;
+                index += 2;
+            }
+            _ if SANDBOX_ISOLATION_FLAGS.contains(&argument) && argument != "ALL" => {
                 *flags.entry(argument).or_default() += 1;
                 index += 1;
             }
@@ -2058,6 +2079,7 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
         "--unshare-pid",
         "--unshare-net",
         "--unshare-ipc",
+        "--cap-drop",
     ] {
         if flags.get(flag).copied() != Some(1) {
             return Err(StructuredFailure::new(
@@ -2302,9 +2324,11 @@ mod tests {
     #[test]
     fn python_and_rust_use_the_same_request_digest_and_normalized_receipt_shape() {
         let request = test_request("shadow-rust-digest");
+        // The argv carries `--cap-drop ALL` (#517). Removing that pair from the canonical
+        // JSON gives the previous digest 97ccfdc9..., which the pair alone accounts for.
         assert_eq!(
             request.request_digest().unwrap(),
-            "97ccfdc93c126e6a7f7af0ab75b6976f48791b19ec38f69dbb7a4ac993531e7d"
+            "0ccc61823f1063ed77522f31cc654e0853c79c2c4f8ffca5b16cba7cdee26503"
         );
         let receipt = RustExecutionProvider::with_test_outcome(ProcessOutcome {
             status: ProcessOutcomeStatus::Completed,
@@ -2494,9 +2518,10 @@ mod tests {
             .argv
             .retain(|argument| argument != "--cap-drop" && argument != "ALL");
         let at = new_session(&narrowed);
-        narrowed
-            .argv
-            .splice(at..at, ["--cap-drop".to_owned(), "CAP_SYS_ADMIN".to_owned()]);
+        narrowed.argv.splice(
+            at..at,
+            ["--cap-drop".to_owned(), "CAP_SYS_ADMIN".to_owned()],
+        );
         let failure = RustExecutionProvider::validate_request(&narrowed)
             .expect_err("--cap-drop of one capability must be refused");
         assert_eq!(failure.code, "contract-failure");
@@ -3169,6 +3194,8 @@ mod tests {
             "--unshare-ipc".to_owned(),
             "--unshare-uts".to_owned(),
             "--unshare-cgroup-try".to_owned(),
+            "--cap-drop".to_owned(),
+            "ALL".to_owned(),
             "--tmpfs".to_owned(),
             "/".to_owned(),
             "--dev".to_owned(),
@@ -3257,6 +3284,8 @@ mod tests {
                 "--unshare-ipc".to_owned(),
                 "--unshare-uts".to_owned(),
                 "--unshare-cgroup-try".to_owned(),
+                "--cap-drop".to_owned(),
+                "ALL".to_owned(),
                 "--tmpfs".to_owned(),
                 "/".to_owned(),
                 "--dev".to_owned(),
