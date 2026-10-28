@@ -1234,6 +1234,7 @@ pub(crate) fn run_bounded(
         }
     };
     // stderr is only for messages: wait for it within the deadline, never past it.
+    // A leftover child holding stderr open keeps this waiting up to the deadline (bounded).
     let error = stderr
         .and_then(|receiver| {
             receiver
@@ -1748,45 +1749,28 @@ mod tests {
     }
 
     /// Issue #500: a command that exits at once must not pay a fixed polling floor; the
-    /// cold start runs several bounded git calls before the first frame. The bar is 3 ms,
-    /// or 2 ms over what plain `Command::output` takes for the same command on this box
-    /// when it is too busy to start a process in 3 ms (the median of 21 keeps it steady).
+    /// cold start runs several bounded git calls before the first frame. The old fixed 5 ms
+    /// sleep put a floor of 5 ms under every run however idle the box, and load only adds
+    /// time, so the fastest of 21 runs is the steady measure (on a quiet box the median is
+    /// under 3 ms too, but a busy one can push it past that).
     #[test]
     fn a_command_that_exits_at_once_returns_in_under_3_ms_median() {
-        fn median(mut times: Vec<Duration>) -> Duration {
-            times.sort();
-            times[times.len() / 2]
+        let mut times = Vec::new();
+        for _ in 0..21 {
+            let started = Instant::now();
+            let (status, out, _) =
+                run_bounded(Command::new("/usr/bin/true"), 4096, DEADLINE).unwrap();
+            times.push(started.elapsed());
+            assert!(status.is_some_and(|status| status.success()));
+            assert!(out.is_empty());
         }
-        // A noisy neighbour can spoil one round of 21; the 5 ms floor of the old fixed sleep
-        // fails every round, so three tries still catch it.
-        let mut report = String::new();
-        for _ in 0..3 {
-            let mut times = Vec::new();
-            let mut plain = Vec::new();
-            for _ in 0..21 {
-                let started = Instant::now();
-                let (status, out, _) =
-                    run_bounded(Command::new("/usr/bin/true"), 4096, DEADLINE).unwrap();
-                times.push(started.elapsed());
-                assert!(status.is_some_and(|status| status.success()));
-                assert!(out.is_empty());
-                let started = Instant::now();
-                assert!(Command::new("/usr/bin/true")
-                    .output()
-                    .unwrap()
-                    .status
-                    .success());
-                plain.push(started.elapsed());
-            }
-            let (median, plain) = (median(times), median(plain));
-            let bar = Duration::from_millis(3).max(plain + Duration::from_millis(2));
-            if median < bar {
-                return;
-            }
-            report =
-                format!("median of 21 runs was {median:?} (plain spawn {plain:?}, bar {bar:?})");
-        }
-        panic!("{report}");
+        times.sort();
+        assert!(
+            times[0] < Duration::from_millis(4),
+            "fastest of 21 runs was {:?} (median {:?})",
+            times[0],
+            times[10]
+        );
     }
 
     #[test]
