@@ -2457,6 +2457,90 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_isolation_drops_every_capability_as_a_pair() {
+        // Issue #517: as uid 0, bwrap keeps CAP_SYS_ADMIN without this pair, and a
+        // sandboxed command can remount a read-only bind rw and write the host.
+        assert!(
+            SANDBOX_ISOLATION_FLAGS
+                .windows(2)
+                .any(|pair| pair == ["--cap-drop", "ALL"]),
+            "SANDBOX_ISOLATION_FLAGS must drop every capability: {SANDBOX_ISOLATION_FLAGS:?}"
+        );
+    }
+
+    #[test]
+    fn validation_refuses_prepared_argv_without_capability_drop() {
+        // Attack argv: the prepared prefix without `--cap-drop ALL` (root keeps
+        // CAP_SYS_ADMIN), with `--cap-drop` narrowed to one capability, and with a
+        // bare `ALL` standing in for the pair.
+        let new_session = |request: &ExecutionRequest| {
+            request
+                .argv
+                .iter()
+                .position(|argument| argument == "--new-session")
+                .expect("test request should start a new session")
+        };
+
+        let mut without = test_request("shadow-rust-no-cap-drop");
+        without
+            .argv
+            .retain(|argument| argument != "--cap-drop" && argument != "ALL");
+        let failure = RustExecutionProvider::validate_request(&without)
+            .expect_err("a prepared argv without --cap-drop ALL must be refused");
+        assert_eq!(failure.code, "contract-failure");
+
+        let mut narrowed = test_request("shadow-rust-narrow-cap-drop");
+        narrowed
+            .argv
+            .retain(|argument| argument != "--cap-drop" && argument != "ALL");
+        let at = new_session(&narrowed);
+        narrowed
+            .argv
+            .splice(at..at, ["--cap-drop".to_owned(), "CAP_SYS_ADMIN".to_owned()]);
+        let failure = RustExecutionProvider::validate_request(&narrowed)
+            .expect_err("--cap-drop of one capability must be refused");
+        assert_eq!(failure.code, "contract-failure");
+
+        let mut bare = test_request("shadow-rust-bare-all");
+        bare.argv
+            .retain(|argument| argument != "--cap-drop" && argument != "ALL");
+        let at = new_session(&bare);
+        bare.argv.insert(at, "ALL".to_owned());
+        let failure = RustExecutionProvider::validate_request(&bare)
+            .expect_err("a bare ALL without --cap-drop must be refused");
+        assert_eq!(failure.code, "contract-failure");
+    }
+
+    #[test]
+    fn worker_sandbox_argv_drops_every_capability_before_the_command() {
+        // The argv the worker checks and the chat run_command sandbox share (the chat
+        // sandbox appends only its read-only extras and the shell wrapper).
+        let limits = ExecutionLimits {
+            timeout_seconds: 60.0,
+            output_limit_bytes: 4096,
+            address_space_bytes: 8 * 1024 * 1024 * 1024,
+            file_size_bytes: 32 * 1024 * 1024,
+            open_file_limit: 1024,
+            process_count_limit: 128,
+            descendant_grace_seconds: 1.0,
+        };
+        for gitfile in [None, Some("/tmp/alfredo-cap-drop/.git")] {
+            let argv = crate::worker::sandbox_argv("/tmp/alfredo-cap-drop", gitfile, &limits);
+            let separator = argv
+                .iter()
+                .position(|argument| argument == "--")
+                .expect("sandbox argv has a command boundary");
+            let prefix = &argv[..separator];
+            assert!(
+                prefix
+                    .windows(2)
+                    .any(|pair| pair[0] == "--cap-drop" && pair[1] == "ALL"),
+                "worker sandbox argv must drop every capability before --: {prefix:?}"
+            );
+        }
+    }
+
+    #[test]
     fn request_schema_resources_and_undeclared_mounts_fail_closed() {
         let request = test_request("shadow-rust-schema");
         let mut value = serde_json::to_value(&request).expect("request should encode");
