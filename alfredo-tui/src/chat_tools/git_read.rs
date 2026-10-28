@@ -6,7 +6,7 @@ use super::{excluded, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
 use std::os::unix::fs::FileTypeExt;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::HashSet,
     fs,
     io::Read,
@@ -81,6 +81,7 @@ fn git_status(root: &Path, arguments: &Value) -> Result<String, String> {
 
 fn status_output(root: &Path, _: &Value) -> Result<String, String> {
     refuse_filters(root)?;
+    refuse_rule_files(root)?;
     let output = git(
         root,
         &[
@@ -185,6 +186,7 @@ fn diff_output(root: &Path, arguments: &Value) -> Result<String, String> {
     }
     if target.is_none() {
         refuse_filters(root)?;
+        refuse_rule_files(root)?;
     } else {
         refuse_partial_clone(root)?;
     }
@@ -545,6 +547,80 @@ pub(crate) fn refuse_includes(root: &Path, refusal: &str) -> Result<(), String> 
     }
 }
 
+/// Work-tree files git reads as rules (issue #521): git opens `.gitignore` and
+/// `.gitattributes` in each directory it visits or checks, and `.gitmodules` in the work tree.
+/// A FIFO, socket or device under one of these names blocks the git call that opens it.
+const RULE_FILES: [&str; 3] = [".gitignore", ".gitattributes", ".gitmodules"];
+
+const RULE_FILES_UNCHECKED: &str = "the workspace's ignore and attribute files could not be checked within the call's time limit; git tools refuse";
+
+thread_local! {
+    /// The rule-file check of the running call, with the root it checked: one walk per call,
+    /// not one per git call of that call (issue #521). Cleared when the call ends.
+    static RULE_FILES_CHECKED: RefCell<Option<(PathBuf, Result<(), String>)>> = const { RefCell::new(None) };
+}
+
+/// Refuses when a `.gitignore`, `.gitattributes` or `.gitmodules` at any depth of the work tree
+/// is a FIFO, socket or device (issue #521). Git would block on it to the time limit, and the
+/// refusal names it. A symbolic link is not refused: git opens rule files without following
+/// links, so a link cannot block it. The walk covers every directory except the top-level
+/// `.git`, and is charged to the call's time limit: running out is a refusal, never a partial
+/// check. Within one call the walk runs once per workspace.
+pub(crate) fn refuse_rule_files(root: &Path) -> Result<(), String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Coding Workspace is not available".to_string())?;
+    let scoped = CALL_CLOCK.with(Cell::get).is_some();
+    if scoped {
+        let memo = RULE_FILES_CHECKED.with(|memo| memo.borrow().clone());
+        if let Some((checked, result)) = memo {
+            if checked == root {
+                return result;
+            }
+        }
+    }
+    let result = rule_files_within(&root, call_clock());
+    if scoped {
+        RULE_FILES_CHECKED.with(|memo| *memo.borrow_mut() = Some((root, result.clone())));
+    }
+    result
+}
+
+/// [`refuse_rule_files`] walking `root` within `clock`. Entries are typed without following
+/// links (`DirEntry::file_type`), so a symbolic link is never descended into.
+fn rule_files_within(root: &Path, clock: Clock) -> Result<(), String> {
+    let unchecked = || RULE_FILES_UNCHECKED.to_string();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if clock.left().is_zero() {
+            return Err(unchecked());
+        }
+        for entry in fs::read_dir(&dir).map_err(|_| unchecked())? {
+            let entry = entry.map_err(|_| unchecked())?;
+            let kind = entry.file_type().map_err(|_| unchecked())?;
+            let name = entry.file_name();
+            if kind.is_dir() {
+                if !(dir.as_path() == root && name.to_str() == Some(".git")) {
+                    pending.push(entry.path());
+                }
+            } else if !kind.is_file()
+                && !kind.is_symlink()
+                && name.to_str().is_some_and(|name| RULE_FILES.contains(&name))
+            {
+                let relative = entry.path().strip_prefix(root).map_or_else(
+                    |_| name.to_string_lossy().into_owned(),
+                    |path| path.to_string_lossy().into_owned(),
+                );
+                return Err(format!(
+                    "the workspace has {} that is not an ordinary file (a FIFO, socket or device); git tools refuse",
+                    crate::dashboard::safe_visible(&relative)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// [`git`] reading at most `limit` bytes of stdout. A listing past `limit` is an error,
 /// never a prefix: a caller that decides on the listing (a secret check, a gate) must see
 /// all of it or nothing.
@@ -671,6 +747,7 @@ struct LeaveCallScope;
 impl Drop for LeaveCallScope {
     fn drop(&mut self) {
         CALL_CLOCK.with(|clock| clock.set(None));
+        RULE_FILES_CHECKED.with(|memo| *memo.borrow_mut() = None);
     }
 }
 
@@ -753,6 +830,7 @@ pub(crate) fn list_unignored(
     limit: usize,
 ) -> Result<Vec<String>, String> {
     refuse_filters(root)?;
+    refuse_rule_files(root)?;
     let config = excludes.map(|path| format!("core.excludesFile={}", path.display()));
     let mut args = vec!["--literal-pathspecs"];
     if let Some(config) = &config {
@@ -781,6 +859,7 @@ pub(crate) fn is_ignored(root: &Path, rel: &str, excludes: Option<&Path>) -> Res
     // The verification below reads the config with its includes; a FIFO target would stall it
     // (issue #474).
     refuse_includes(root, INCLUDES_NOT_RUN)?;
+    refuse_rule_files(root)?;
     let config = excludes.map(|path| format!("core.excludesFile={}", path.display()));
     // check-ignore rejects `--literal-pathspecs`; the `./` prefix keeps a directory named
     // like pathspec magic (`:(top)`) a plain path.

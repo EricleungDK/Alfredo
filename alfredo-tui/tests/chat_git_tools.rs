@@ -868,7 +868,11 @@ fn a_fifo_rule_file_in_the_work_tree_refuses_promptly_by_name() {
                 output.contains(entry) && output.contains("not an ordinary file"),
                 "{entry} {tool} must name the entry: {output}"
             );
-            assert!(started.elapsed() < limit, "{entry} {tool}: {:?}", started.elapsed());
+            assert!(
+                started.elapsed() < limit,
+                "{entry} {tool}: {:?}",
+                started.elapsed()
+            );
         }
     }
 }

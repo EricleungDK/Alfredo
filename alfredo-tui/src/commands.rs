@@ -1,4 +1,17 @@
 //! Discoverable command drafts. Completing a command never executes it.
+use std::{
+    cell::Cell,
+    time::{Duration, Instant},
+};
+
+/// How long `@path` completion makes no git call after git gave up on a listing (issue #521).
+const COMPLETION_PAUSE: Duration = Duration::from_secs(2);
+
+thread_local! {
+    /// Until when `@path` completion makes no git call (issue #521). Only the UI thread uses it.
+    static PAUSED_UNTIL: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
 pub const COMMANDS: &[(&str, &str)] = &[
     (
         "/workspace",
@@ -328,8 +341,17 @@ impl Completion {
             .find(|(_, c)| c.is_whitespace())
             .map_or(0, |(at, c)| at + c.len_utf8());
         let fragment = draft[start..].strip_prefix('@')?;
+        // This runs on the UI thread at every keystroke. After git gave up on a listing (a rule
+        // file it would block on, or its time limit), no git call for a short while (issue #521).
+        if PAUSED_UNTIL.with(|until| until.get().is_some_and(|until| Instant::now() < until)) {
+            return None;
+        }
+        let (paths, gave_up) = crate::chat_mentions::complete_timed(root, fragment);
+        if gave_up {
+            PAUSED_UNTIL.with(|until| until.set(Some(Instant::now() + COMPLETION_PAUSE)));
+        }
         let mut completion = Self::from_choices(
-            crate::chat_mentions::complete(root, fragment)
+            paths
                 .into_iter()
                 .map(|path| Choice {
                     name: format!("@{path}"),
@@ -490,5 +512,51 @@ impl Completion {
         self.choices
             .get(self.selected)
             .is_some_and(|c| draft.trim().rsplit(char::is_whitespace).next() == Some(&c.name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Completion;
+    use std::{fs, path::PathBuf, process::Command, time::Duration};
+
+    /// Issue #521: `@` completion runs on the UI thread at every keystroke. With a FIFO
+    /// `.gitignore` it lists nothing at once, and then makes no git call for the pause: a file
+    /// that is now a regular `.gitignore` is still not listed during the pause.
+    #[test]
+    fn at_path_with_a_fifo_gitignore_returns_at_once_and_pauses_git() {
+        let root: PathBuf =
+            std::env::temp_dir().join(format!("alfredo-at-path-fifo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
+        fs::write(root.join("b.txt"), "b\n").unwrap();
+        let fifo = root.join(".gitignore");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let started = std::time::Instant::now();
+        let first = Completion::at_path("@b", &root);
+        let elapsed = started.elapsed();
+        // Release a git child that opened the FIFO, then replace it with a regular file.
+        for _ in 0..5 {
+            let _ = fs::OpenOptions::new().read(true).write(true).open(&fifo);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        fs::remove_file(&fifo).unwrap();
+        fs::write(root.join(".gitignore"), "").unwrap();
+        let during_pause = Completion::at_path("@b", &root);
+        let _ = fs::remove_dir_all(&root);
+        assert!(first.is_none(), "a refused listing lists nothing");
+        assert!(elapsed < Duration::from_millis(100), "took {elapsed:?}");
+        assert!(during_pause.is_none(), "git was called during the pause");
     }
 }

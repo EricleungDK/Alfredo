@@ -229,6 +229,8 @@ fn read_mention(root: &Path, path: &str, check_failed: &mut bool) -> Result<Stri
     if metadata.len() > MAX_FILE {
         return Err(format!("file is over {} KiB", MAX_FILE / 1024));
     }
+    // A rule file git would block on is refused by name, before any git call (issue #521).
+    git_read::refuse_rule_files(root)?;
     let relative = crate::chat_tools::display(root, &full);
     if ignored_untracked(root, &relative, check_failed) {
         return Err("ignored by .gitignore and not tracked; refused".into());
@@ -247,7 +249,9 @@ fn read_mention(root: &Path, path: &str, check_failed: &mut bool) -> Result<Stri
 /// timeout or error (`check_failed`), later mentions of the same prompt are refused
 /// without starting git again, so a hostile repository stalls the UI once, not per file.
 fn ignored_untracked(root: &Path, relative: &str, check_failed: &mut bool) -> bool {
-    if *check_failed {
+    // A rule file git would block on: no check-ignore run, which would wait for its limit.
+    if *check_failed || git_read::refuse_rule_files(root).is_err() {
+        *check_failed = true;
         return true;
     }
     let mut command = Command::new("/usr/bin/git");
@@ -333,6 +337,19 @@ pub fn complete(root: &Path, fragment: &str) -> Vec<String> {
 /// read whole (no space, quote or other separator in it).
 #[must_use]
 pub fn complete_within(root: &Path, fragment: &str, scan: usize) -> Vec<String> {
+    complete_timed_within(root, fragment, scan).0
+}
+
+/// [`complete`], and whether git gave up on the listing (see [`complete_timed_within`]).
+#[must_use]
+pub fn complete_timed(root: &Path, fragment: &str) -> (Vec<String>, bool) {
+    complete_timed_within(root, fragment, COMPLETE_SCAN)
+}
+
+/// [`complete_within`], and whether git gave up on the listing: a rule file it would block on
+/// (refused before any git call, issue #521), or the call's time limit spent. The `@`
+/// completion, which runs on the UI thread, then pauses git for a while.
+fn complete_timed_within(root: &Path, fragment: &str, scan: usize) -> (Vec<String>, bool) {
     // Every git call and read of the listing draws on one short budget (issues #257, #359).
     git_read::call_scope(COMPLETE_DEADLINE, || {
         let odd = |c: char| separator(c) || c.is_control();
@@ -341,10 +358,14 @@ pub fn complete_within(root: &Path, fragment: &str, scan: usize) -> Vec<String> 
             .unwrap_or(fragment)
             .to_lowercase();
         let Ok(canonical) = root.canonicalize() else {
-            return Vec::new();
+            return (Vec::new(), false);
         };
         if needle.chars().any(odd) {
-            return Vec::new();
+            return (Vec::new(), false);
+        }
+        // Refused at once, before the listing and its git calls (issue #521).
+        if git_read::refuse_rule_files(root).is_err() {
+            return (Vec::new(), true);
         }
         let (files, _, _) = read::discover(root, &canonical, scan);
         // Only names a mention reads back whole and that draw nothing invisible.
@@ -374,11 +395,12 @@ pub fn complete_within(root: &Path, fragment: &str, scan: usize) -> Vec<String> 
             .collect();
         ranked.sort_by_key(|(rank, _)| *rank);
         let mut check_failed = false;
-        vet(
+        let listed = vet(
             ranked.into_iter().map(|(_, path)| path),
             |path| read_mention(root, path, &mut check_failed).is_ok(),
             || git_read::call_clock().left().is_zero(),
-        )
+        );
+        (listed, git_read::call_clock().left().is_zero())
     })
 }
 
@@ -408,12 +430,15 @@ pub fn attach(root: &Path, prompt: &str) -> Attachment {
     if candidates.is_empty() {
         return Attachment::default();
     }
-    let mut check_failed = false;
-    assemble(
-        &candidates,
-        |path| read_mention(root, path, &mut check_failed),
-        |path| cut_at_space(root, path),
-    )
+    // One call for the whole prompt: the rule-file check runs once for every mention (issue #521).
+    git_read::call_scope(git_read::DEADLINE, || {
+        let mut check_failed = false;
+        assemble(
+            &candidates,
+            |path| read_mention(root, path, &mut check_failed),
+            |path| cut_at_space(root, path),
+        )
+    })
 }
 
 #[cfg(test)]

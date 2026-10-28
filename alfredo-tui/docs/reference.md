@@ -1786,6 +1786,14 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   alternates lines (quoted or whitespace-padded lines are refused) are read as git reads
   them. This start-up check is a best-effort fast path; the 15 s limit is the backstop for
   anything it does not foresee. That newer git opens the alternates file at start-up was inferred from CI.
+  A FIFO, socket or device named `.gitignore`, `.gitattributes` or `.gitmodules` anywhere in the
+  work tree (any depth, including untracked directories) makes git block on it, so
+  `git_status` and working-tree or staged `git_diff` are refused at once with an error that
+  names the entry (#521); a symbolic link of that name is not refused, because git does not
+  follow links for these files. `list_files` and `grep` do not wait for the stall, but their
+  listing falls back to the plain walk without the ignore rules (the fallback a git failure
+  already uses). The uncommitted-changes check that `/go` runs at start refuses the same way and
+  is reported as not checked.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to. Results are also budgeted to the room left. With
   `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt
@@ -2168,6 +2176,10 @@ size limit, and it is kept in memory only (not restored after a restart).
   an untracked file attaches only if Git does not ignore it. The ignore check runs
   hardened with a 3 s deadline and fails closed, so a gitignored untracked file, a Git
   error or a timeout (for example a `.gitignore` that is a FIFO) is refused.
+- A FIFO, socket or device named `.gitignore`, `.gitattributes` or `.gitmodules` in the work
+  tree refuses the mention with a notice that names it, at once (#521). `@` completion, which
+  runs at every keystroke, lists nothing then, and makes no git call for 2 s after git gave up
+  on a listing (a rule-file refusal or the 750 ms budget).
 - Refused, with a notice: secrets (the **Secret files** list under Chat tools (read-only)), `.git`, `node_modules`,
   `target`, `dist`, `vendor`; absolute and `..` paths; any symlink,
   including a symlinked directory in the path and links that stay inside the repository;

@@ -981,6 +981,11 @@ fn uncommitted_changes_within(workspace: &Path) -> Option<(u32, String)> {
     if !qualified {
         return Some((UNCHECKED_CHANGES, head));
     }
+    // A `.gitignore` or `.gitattributes` that is a FIFO blocks `git status` to its limit: refused
+    // at once instead (issue #521). The marker says "not checked"; it is not a count.
+    if git_read::refuse_rule_files(workspace).is_err() {
+        return Some((UNCHECKED_CHANGES, head));
+    }
     let status = match git_blocking(
         workspace,
         // The superproject-only config check above cannot see a submodule's own config, which

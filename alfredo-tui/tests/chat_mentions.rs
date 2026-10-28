@@ -520,7 +520,11 @@ fn a_fifo_gitignore_makes_completion_return_within_100_ms() {
     let dir = repo();
     let root = dir.path();
     let fifo = root.join(".gitignore");
-    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
     fs::write(root.join("b.txt"), "b\n").unwrap();
     let started = std::time::Instant::now();
     let found = complete_within(root, "b", 5000);
@@ -540,7 +544,11 @@ fn a_fifo_gitignore_refuses_an_attachment_by_name_at_once() {
     let dir = repo();
     let root = dir.path();
     let fifo = root.join(".gitignore");
-    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
     fs::write(root.join("b.txt"), "b\n").unwrap();
     let started = std::time::Instant::now();
     let out = attach(root, "@b.txt");
@@ -552,8 +560,9 @@ fn a_fifo_gitignore_refuses_an_attachment_by_name_at_once() {
         "attach took {elapsed:?}"
     );
     assert!(
-        out.notices.iter().any(|notice| notice.contains(".gitignore")
-            && notice.contains("not an ordinary file")),
+        out.notices
+            .iter()
+            .any(|notice| notice.contains(".gitignore") && notice.contains("not an ordinary file")),
         "{:?}",
         out.notices
     );
