@@ -279,6 +279,16 @@ impl Completion {
         completion.live = true;
         Some(completion)
     }
+    /// The completion for a chat draft after an edit: slash typeahead, else `@path`
+    /// completion when the cursor sits at the end of the draft.
+    #[must_use]
+    pub fn for_draft(draft: &str, cursor: usize, workspace: &std::path::Path) -> Option<Self> {
+        Self::typeahead(draft).or_else(|| {
+            (cursor == draft.len())
+                .then(|| Self::at_path(draft, workspace))
+                .flatten()
+        })
+    }
     /// Live `@path` type-ahead for the last word of `draft` (the cursor at its end).
     #[must_use]
     pub fn at_path(draft: &str, root: &std::path::Path) -> Option<Self> {
