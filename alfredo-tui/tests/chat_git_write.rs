@@ -259,6 +259,36 @@ fn commit_selected_files_includes_new_files_and_leaves_others() {
     assert!(status.contains(" M README.md"), "{status}");
 }
 
+/// Issue #520: with `eol=crlf`, `git add` warns once per file, and forty such warnings are more
+/// than 4 KiB of stderr. That used to kill the approved `git add -- <files>` and the commit.
+#[test]
+fn an_approved_commit_of_many_crlf_warning_files_lands() {
+    let repo = Repo::new();
+    fs::write(repo.root.join(".gitattributes"), "* text eol=crlf\n").unwrap();
+    let names: Vec<String> = (0..40)
+        .map(|index| format!("file_with_a_long_name_{index:03}_padding_padding.txt"))
+        .collect();
+    for name in &names {
+        fs::write(repo.root.join(name), "x\n").unwrap();
+    }
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-q", "-m", "lf files"]);
+    for name in &names {
+        fs::write(repo.root.join(name), "x\ny\n").unwrap();
+    }
+    repo.approve(
+        "git_commit",
+        json!({"message": "add y to all", "files": names}),
+    )
+    .unwrap();
+    assert_eq!(
+        git(&repo.root, &["log", "-1", "--format=%s"]).trim(),
+        "add y to all"
+    );
+    let status = git(&repo.root, &["status", "--porcelain"]);
+    assert!(!status.contains("file_with"), "{status}");
+}
+
 #[test]
 fn commit_of_a_directory_holding_secrets_is_refused_before_asking() {
     let repo = Repo::new();
