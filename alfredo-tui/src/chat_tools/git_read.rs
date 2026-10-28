@@ -97,6 +97,7 @@ fn git_branch(root: &Path, arguments: &Value) -> Result<String, String> {
 }
 
 fn branch_output(root: &Path, _: &Value) -> Result<String, String> {
+    refuse_includes(root, INCLUDES_NOT_RUN)?;
     let current = match git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
         Ok(name) => name.trim().to_string(),
         Err(_) => format!(
@@ -628,10 +629,31 @@ fn hardened_command(root: &Path) -> Result<Command, String> {
     let mut command = Command::new("/usr/bin/git");
     hardened(&mut command)
         .env("GIT_CEILING_DIRECTORIES", ceiling)
+        .args(REPOSITORY_FILE_KEYS)
         .arg("-C")
         .arg(root);
     Ok(command)
 }
+
+/// Overrides for the config keys through which the repository's own config names a file git
+/// opens by itself (issue #474): an attributes file, a mailmap, an excludes file, a diff
+/// order file. Any of them
+/// can be a FIFO or device that stalls the call to its time limit. They are pointed at the null device, so
+/// the repository's choice is never opened; a caller that vets an excludes file passes its own
+/// `-c core.excludesFile=` after these, which wins.
+const REPOSITORY_FILE_KEYS: [&str; 10] = [
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "core.excludesFile=/dev/null",
+    "-c",
+    "mailmap.file=/dev/null",
+    "-c",
+    "log.mailmap=false",
+    // An empty value fails ("failed to read orderfile ''"), so the null device it is.
+    "-c",
+    "diff.orderFile=/dev/null",
+];
 
 /// Tracked and untracked-but-not-ignored files under `rel` (a workspace-relative `/` path,
 /// empty for the whole workspace), as git lists them: `.gitignore` files at any depth,
@@ -672,6 +694,9 @@ pub(crate) fn list_unignored(
 
 /// Whether git ignores the untracked path `rel` (a tracked path is never ignored).
 pub(crate) fn is_ignored(root: &Path, rel: &str, excludes: Option<&Path>) -> Result<bool, String> {
+    // The verification below reads the config with its includes; a FIFO target would stall it
+    // (issue #474).
+    refuse_includes(root, INCLUDES_NOT_RUN)?;
     let config = excludes.map(|path| format!("core.excludesFile={}", path.display()));
     // check-ignore rejects `--literal-pathspecs`; the `./` prefix keeps a directory named
     // like pathspec magic (`:(top)`) a plain path.
@@ -1287,6 +1312,89 @@ mod tests {
             .unwrap();
         file.write_all(config.as_bytes()).unwrap();
         root
+    }
+
+    /// Frees git children blocked on `fifo` and kills every git working under `dir`, until none
+    /// has shown up for a few checks in a row: git opens the FIFO again after its first read
+    /// ends, so one wake-up is not enough. Without it a red run leaves `git` blocked for good.
+    fn release_git_blocked_on(fifo: &Path, dir: &Path) {
+        let mut quiet = 0;
+        while quiet < 3 {
+            let _ = fs::OpenOptions::new().read(true).write(true).open(fifo);
+            let killed = Command::new("pkill")
+                .args(["-KILL", "-f", "--"])
+                .arg(format!("-C {}", dir.display()))
+                .status()
+                .is_ok_and(|status| status.success());
+            quiet = if killed { 0 } else { quiet + 1 };
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Issue #474: `is_ignored` (used by `read.rs` discovery) refuses a config with an include
+    /// before git runs, so a FIFO include target neither stalls it nor is ever opened.
+    #[test]
+    fn is_ignored_refuses_a_config_include_before_git_runs() {
+        let root = scratch_repo("ignored-include", "");
+        let fifo = root.join("included.fifo");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(".git/config"))
+            .unwrap();
+        write!(config, "[include]\n\tpath = {}\n", fifo.display()).unwrap();
+        drop(config);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = root.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(is_ignored(&worker, "sub", None));
+        });
+        let answer = receiver.recv_timeout(Duration::from_secs(3));
+        // Release a git child left blocked on the FIFO (a failing run) before checking.
+        release_git_blocked_on(&fifo, &root);
+        let answer = answer.expect("is_ignored was not refused within 3 s");
+        let error = answer.expect_err("a config with an include is refused");
+        assert!(error.contains("includes another file"), "{error}");
+    }
+
+    /// Issue #474 (review): the caller's vetted excludes file beats the `/dev/null` default
+    /// of the repository-file overrides, and a file named by the repository config is not read.
+    #[test]
+    fn a_vetted_excludes_file_applies_and_the_repository_one_does_not() {
+        let root = scratch_repo("vetted-excludes", "");
+        let vetted = root.join("vetted-rules");
+        fs::write(&vetted, "vetted.txt\n").unwrap();
+        let repo_rules = root.join("repo-rules");
+        fs::write(&repo_rules, "repo-only.txt\n").unwrap();
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(".git/config"))
+            .unwrap();
+        write!(
+            config,
+            "[core]\n\texcludesFile = {}\n",
+            repo_rules.display()
+        )
+        .unwrap();
+        drop(config);
+        assert_eq!(is_ignored(&root, "vetted.txt", Some(&vetted)), Ok(true));
+        assert_eq!(is_ignored(&root, "vetted.txt", None), Ok(false));
+        assert_eq!(is_ignored(&root, "repo-only.txt", Some(&vetted)), Ok(false));
+        assert_eq!(is_ignored(&root, "repo-only.txt", None), Ok(false));
+        let listing = list_unignored(&root, "", Some(&vetted), 1 << 20).unwrap();
+        assert!(!listing.contains(&"vetted.txt".to_string()));
+        fs::write(root.join("vetted.txt"), "x").unwrap();
+        fs::write(root.join("repo-only.txt"), "x").unwrap();
+        let listing = list_unignored(&root, "", Some(&vetted), 1 << 20).unwrap();
+        assert!(!listing.contains(&"vetted.txt".to_string()), "{listing:?}");
+        assert!(
+            listing.contains(&"repo-only.txt".to_string()),
+            "{listing:?}"
+        );
     }
 
     /// Issue #312: a copy search past git's rename limit warns on stderr and exits 0. The
