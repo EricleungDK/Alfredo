@@ -256,7 +256,11 @@ fn ignored_untracked(root: &Path, relative: &str, check_failed: &mut bool) -> bo
         .arg(root)
         .args(["check-ignore", "-q", "--"])
         .arg(relative);
-    match git_read::run_bounded(command, 1024, IGNORE_DEADLINE) {
+    match git_read::run_bounded(
+        command,
+        1024,
+        IGNORE_DEADLINE.min(git_read::call_clock().left()),
+    ) {
         Ok((Some(status), _, _)) if matches!(status.code(), Some(0 | 1)) => {
             status.code() != Some(1)
         }
@@ -311,6 +315,8 @@ fn cut_at_space(root: &Path, path: &str) -> bool {
 pub const COMPLETE_SHOW: usize = 8;
 /// Most ranked candidates one completion vets; every vetted one costs a git call and a read.
 pub const COMPLETE_EXAMINE: usize = 64;
+/// Wall-clock budget of one completion, listing and checks together.
+const COMPLETE_DEADLINE: Duration = Duration::from_millis(750);
 /// Most files one completion considers.
 pub const COMPLETE_SCAN: usize = 5_000;
 
@@ -327,53 +333,72 @@ pub fn complete(root: &Path, fragment: &str) -> Vec<String> {
 /// read whole (no space, quote or other separator in it).
 #[must_use]
 pub fn complete_within(root: &Path, fragment: &str, scan: usize) -> Vec<String> {
-    let odd = |c: char| separator(c) || c.is_control();
-    let needle = fragment
-        .strip_prefix("./")
-        .unwrap_or(fragment)
-        .to_lowercase();
-    let Ok(canonical) = root.canonicalize() else {
-        return Vec::new();
-    };
-    if needle.chars().any(odd) {
-        return Vec::new();
-    }
-    let (files, _, _) = read::discover(root, &canonical, scan);
-    let mut ranked: Vec<(u8, String)> = files
-        .iter()
-        .filter_map(|file| file.strip_prefix(&canonical).ok()?.to_str())
-        .filter(|path| !path.chars().any(odd))
-        .filter_map(|path| {
-            let lower = path.to_lowercase();
-            let rank = if lower.starts_with(&needle) {
-                0
-            } else if lower.contains(&needle) {
-                1
-            } else {
-                return None;
-            };
-            Some((rank, path.to_string()))
-        })
-        .collect();
-    ranked.sort_by_key(|(rank, _)| *rank);
-    let mut check_failed = false;
-    vet(
-        ranked.into_iter().map(|(_, path)| path),
-        |path| read_mention(root, path, &mut check_failed).is_ok(),
-        || false,
-    )
+    // Every git call and read of the listing draws on one short budget (issues #257, #359).
+    git_read::call_scope(COMPLETE_DEADLINE, || {
+        let odd = |c: char| separator(c) || c.is_control();
+        let needle = fragment
+            .strip_prefix("./")
+            .unwrap_or(fragment)
+            .to_lowercase();
+        let Ok(canonical) = root.canonicalize() else {
+            return Vec::new();
+        };
+        if needle.chars().any(odd) {
+            return Vec::new();
+        }
+        let (files, _, _) = read::discover(root, &canonical, scan);
+        // Only names a mention reads back whole and that draw nothing invisible.
+        let whole = |path: &str| {
+            !path.chars().any(odd)
+                && crate::dashboard::safe_visible(path) == path
+                && matches!(parse(&format!("@{path} ")).as_slice(),
+                    [one] if one.path == path && !one.quoted)
+        };
+        let mut ranked: Vec<(u8, String)> = files
+            .iter()
+            .filter_map(|file| file.strip_prefix(&canonical).ok()?.to_str())
+            .filter(|path| whole(path))
+            .filter_map(|path| {
+                let lower = path.to_lowercase();
+                let rank = if lower == needle {
+                    0
+                } else if lower.starts_with(&needle) {
+                    1
+                } else if lower.contains(&needle) {
+                    2
+                } else {
+                    return None;
+                };
+                Some((rank, path.to_string()))
+            })
+            .collect();
+        ranked.sort_by_key(|(rank, _)| *rank);
+        let mut check_failed = false;
+        vet(
+            ranked.into_iter().map(|(_, path)| path),
+            |path| read_mention(root, path, &mut check_failed).is_ok(),
+            || git_read::call_clock().left().is_zero(),
+        )
+    })
 }
 
-/// The first [`COMPLETE_SHOW`] of `ranked` that `accept` passes.
+/// The first [`COMPLETE_SHOW`] of the first [`COMPLETE_EXAMINE`] of `ranked` that `accept`
+/// passes; stops early once `expired`.
 fn vet(
     ranked: impl Iterator<Item = String>,
     mut accept: impl FnMut(&str) -> bool,
-    _expired: impl Fn() -> bool,
+    expired: impl Fn() -> bool,
 ) -> Vec<String> {
-    ranked
-        .filter(|path| accept(path))
-        .take(COMPLETE_SHOW)
-        .collect()
+    let mut listed = Vec::new();
+    for path in ranked.take(COMPLETE_EXAMINE) {
+        if listed.len() >= COMPLETE_SHOW || expired() {
+            break;
+        }
+        if accept(&path) {
+            listed.push(path);
+        }
+    }
+    listed
 }
 
 /// Resolve the mentions of `prompt` against the working tree of the workspace at `root`.
