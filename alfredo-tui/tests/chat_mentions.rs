@@ -511,3 +511,58 @@ fn no_head_commit_gives_one_notice() {
     assert!(out.block.is_empty());
     assert_eq!(out.notices.len(), 1);
 }
+
+/// Issue #521: a FIFO `.gitignore` in the work tree blocks git's ignore check. Completion runs
+/// on the UI thread for every `@` keystroke, so it must refuse at once (100 ms, not the 750 ms
+/// budget) and list nothing.
+#[test]
+fn a_fifo_gitignore_makes_completion_return_within_100_ms() {
+    let dir = repo();
+    let root = dir.path();
+    let fifo = root.join(".gitignore");
+    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    fs::write(root.join("b.txt"), "b\n").unwrap();
+    let started = std::time::Instant::now();
+    let found = complete_within(root, "b", 5000);
+    let elapsed = started.elapsed();
+    release(&fifo);
+    assert!(
+        elapsed < std::time::Duration::from_millis(100),
+        "completion took {elapsed:?}"
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// Issue #521: `@path` attachment names the rule file that refused it, and does not wait for
+/// git: a FIFO `.gitignore` is a notice that says so, at once.
+#[test]
+fn a_fifo_gitignore_refuses_an_attachment_by_name_at_once() {
+    let dir = repo();
+    let root = dir.path();
+    let fifo = root.join(".gitignore");
+    assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    fs::write(root.join("b.txt"), "b\n").unwrap();
+    let started = std::time::Instant::now();
+    let out = attach(root, "@b.txt");
+    let elapsed = started.elapsed();
+    release(&fifo);
+    assert!(out.block.is_empty(), "{:?}", out.block);
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "attach took {elapsed:?}"
+    );
+    assert!(
+        out.notices.iter().any(|notice| notice.contains(".gitignore")
+            && notice.contains("not an ordinary file")),
+        "{:?}",
+        out.notices
+    );
+}
+
+/// Frees a git child blocked on `fifo` (see tests/chat_git_tools.rs `release`).
+fn release(fifo: &std::path::Path) {
+    for _ in 0..5 {
+        let _ = fs::OpenOptions::new().read(true).write(true).open(fifo);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+}

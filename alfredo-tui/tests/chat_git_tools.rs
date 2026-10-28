@@ -802,6 +802,130 @@ fn an_alternates_fifo_refuses_promptly_and_never_hangs() {
     }
 }
 
+/// Runs `tool` on its own thread for at most `limit`: its output, or `None` when it has not
+/// returned (git is blocked on a FIFO). The thread is left running; [`release`] frees git.
+fn dispatch_for(
+    root: &Path,
+    tool: &str,
+    arguments: serde_json::Value,
+    limit: Duration,
+) -> Option<String> {
+    let (sender, receiver) = mpsc::channel();
+    let (root, name) = (root.to_path_buf(), tool.to_string());
+    std::thread::spawn(move || {
+        let output = chat_tools::dispatch(&root, &ToolCall { name, arguments });
+        let _ = sender.send(output);
+    });
+    receiver.recv_timeout(limit).ok()
+}
+
+/// Frees git children blocked on `fifo`: opening it for reading and writing never blocks,
+/// and git then reads end-of-file. Repeated, since git may open the FIFO again.
+fn release(fifo: &Path) {
+    for _ in 0..5 {
+        let _ = fs::OpenOptions::new().read(true).write(true).open(fifo);
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+/// Issue #521: a FIFO named `.gitignore`, `.gitattributes` or `.gitmodules` anywhere in the
+/// work tree blocks the git call that reads it, to the 15 s limit. The read-tier tools refuse
+/// at once instead, and the refusal names the entry.
+#[test]
+fn a_fifo_rule_file_in_the_work_tree_refuses_promptly_by_name() {
+    let limit = Duration::from_secs(2);
+    // (entry, where it sits, tools that read it)
+    let cases: [(&str, &str, &[&str]); 5] = [
+        (".gitignore", "root", &["git_status", "git_diff"]),
+        ("sub/.gitattributes", "tracked", &["git_status", "git_diff"]),
+        ("newdir/.gitignore", "untracked", &["git_status"]),
+        (".gitmodules", "root", &["git_status"]),
+        ("sub/.gitignore", "tracked", &["git_status"]),
+    ];
+    for (entry, place, tools) in cases {
+        let repo = Repo::new();
+        if let Some((dir, _)) = entry.rsplit_once('/') {
+            fs::create_dir_all(repo.root.join(dir)).unwrap();
+            if place == "tracked" {
+                // A directory git tracks files in, so it reads that directory's rule files.
+                fs::write(repo.root.join(dir).join("s.txt"), "s\n").unwrap();
+                git(&repo.root, &["add", "."]);
+                git(&repo.root, &["commit", "-q", "-m", "sub"]);
+            }
+        }
+        let fifo = repo.root.join(entry);
+        mkfifo(&fifo);
+        fs::write(repo.root.join("b.txt"), "b\n").unwrap();
+        for tool in tools {
+            let started = std::time::Instant::now();
+            let output = dispatch_for(&repo.root, tool, json!({}), limit);
+            let Some(output) = output else {
+                release(&fifo);
+                panic!("{tool} with a FIFO {entry} did not return within {limit:?}");
+            };
+            assert!(output.starts_with("error:"), "{entry} {tool}: {output}");
+            assert!(
+                output.contains(entry) && output.contains("not an ordinary file"),
+                "{entry} {tool} must name the entry: {output}"
+            );
+            assert!(started.elapsed() < limit, "{entry} {tool}: {:?}", started.elapsed());
+        }
+    }
+}
+
+/// Issue #521: `git_diff` in the work tree reads the same rule files: a FIFO `.gitattributes`
+/// (which stalls `git diff`) is refused by name, and nothing waits for the deadline.
+#[test]
+fn a_fifo_gitattributes_refuses_git_diff_promptly_by_name() {
+    let repo = Repo::new();
+    let fifo = repo.root.join(".gitattributes");
+    mkfifo(&fifo);
+    let output = dispatch_for(&repo.root, "git_diff", json!({}), Duration::from_secs(2));
+    let Some(output) = output else {
+        release(&fifo);
+        panic!("git_diff with a FIFO .gitattributes did not return within 2 s");
+    };
+    assert!(
+        output.starts_with("error:") && output.contains(".gitattributes"),
+        "{output}"
+    );
+}
+
+/// Issue #521: a symbolic link named `.gitignore` to a FIFO is not refused: git opens its rule
+/// files without following links, so the link cannot block it and the status still runs.
+#[test]
+fn a_symlinked_rule_file_to_a_fifo_does_not_refuse_git_status() {
+    let repo = Repo::new();
+    let target = repo.base.join("outside.fifo");
+    mkfifo(&target);
+    std::os::unix::fs::symlink(&target, repo.root.join(".gitignore")).unwrap();
+    let output = dispatch_for(&repo.root, "git_status", json!({}), Duration::from_secs(5))
+        .expect("git_status with a symlinked .gitignore did not return within 5 s");
+    assert!(
+        !output.starts_with("error:") && !output.contains("not an ordinary file"),
+        "{output}"
+    );
+}
+
+/// Issue #521: `list_files` and `grep` discover files through the same git ignore listing. A
+/// FIFO `.gitignore` must not stall them: they return within 2 s.
+#[test]
+fn a_fifo_gitignore_never_stalls_list_files_or_grep() {
+    let repo = Repo::new();
+    let fifo = repo.root.join(".gitignore");
+    mkfifo(&fifo);
+    fs::write(repo.root.join("b.txt"), "needle\n").unwrap();
+    for (tool, arguments) in [
+        ("list_files", json!({})),
+        ("grep", json!({"pattern": "needle"})),
+    ] {
+        if dispatch_for(&repo.root, tool, arguments, Duration::from_secs(2)).is_none() {
+            release(&fifo);
+            panic!("{tool} with a FIFO .gitignore did not return within 2 s");
+        }
+    }
+}
+
 /// Issue #458: git itself reads `HEAD`, `config`, `commondir` and (newer git, at start-up)
 /// `objects/info/alternates` before any tool check could run, and a FIFO there blocks that
 /// read until the call's 15 s limit. The files are type-checked first, so each refuses

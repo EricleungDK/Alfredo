@@ -894,6 +894,52 @@ fn uncommitted_changes_returns_promptly_with_a_nested_gitfile_to_a_fifo() {
     );
 }
 
+/// Issue #521: `/go` start calls `uncommitted_changes`. A FIFO `.gitignore` in the work tree
+/// blocks `git status` to its 15 s limit; the check must refuse at once and report the workspace
+/// as not checked (the unchecked marker `u32::MAX`), never as a count.
+#[test]
+fn uncommitted_changes_refuses_a_fifo_gitignore_promptly() {
+    use std::{fs, process::Command, time::Duration};
+    let root = std::env::temp_dir().join(format!("fifo-gitignore-go-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("sub")).unwrap();
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["-c", "user.name=T", "-c", "user.email=t@e"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success())
+    };
+    git(&["init", "-q"]);
+    fs::write(root.join("a.txt"), "a\n").unwrap();
+    git(&["add", "a.txt"]);
+    git(&["commit", "-q", "-m", "m"]);
+    let fifo = root.join("sub/.gitignore");
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(root.join("b.txt"), "b\n").unwrap();
+    let started = std::time::Instant::now();
+    let changes = alfredo_tui::worker::uncommitted_changes(&root);
+    let elapsed = started.elapsed();
+    // Release a git child that opened the FIFO (a failing run), then clean up.
+    for _ in 0..5 {
+        let _ = fs::OpenOptions::new().read(true).write(true).open(&fifo);
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "uncommitted_changes (called by /go) took {elapsed:?}"
+    );
+    assert_eq!(changes.map(|(count, _)| count), Some(u32::MAX));
+}
+
 #[test]
 fn file_policy_rejects_metadata_traversal_duplicates_and_binary_edits() {
     for file in [
