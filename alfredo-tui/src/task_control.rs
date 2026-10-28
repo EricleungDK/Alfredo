@@ -1957,18 +1957,21 @@ impl TaskControl {
 #[cfg(test)]
 mod background_refresh_tests {
     use super::background_refresh_due;
+    use crate::ui::PANE_BREAKPOINT;
     use std::time::Duration;
 
     const SECOND: Duration = Duration::from_secs(1);
+    const WIDE: u16 = PANE_BREAKPOINT;
+    const NARROW: u16 = PANE_BREAKPOINT - 1;
 
     #[test]
     fn an_idle_chat_terminal_with_the_pane_shown_reads_the_store_once_a_second() {
-        assert!(background_refresh_due(false, false, false, true, SECOND));
+        assert!(background_refresh_due(false, 0, false, WIDE, SECOND));
         assert!(!background_refresh_due(
             false,
+            0,
             false,
-            false,
-            true,
+            WIDE,
             Duration::from_millis(999)
         ));
     }
@@ -1979,7 +1982,7 @@ mod background_refresh_tests {
         let mut reads = 0;
         for tick in 1..=1000u64 {
             let now = Duration::from_millis(tick * 10);
-            if background_refresh_due(false, false, false, true, now - last) {
+            if background_refresh_due(false, 0, false, WIDE, now - last) {
                 reads += 1;
                 last = now;
             }
@@ -1991,29 +1994,43 @@ mod background_refresh_tests {
     fn a_hidden_pane_with_nothing_running_does_not_read_the_store() {
         assert!(!background_refresh_due(
             false,
+            0,
             false,
-            false,
-            false,
+            NARROW,
             Duration::from_secs(60)
         ));
     }
 
     #[test]
+    fn the_pane_shows_exactly_at_the_breakpoint_width() {
+        assert!(!background_refresh_due(false, 0, false, NARROW, SECOND));
+        assert!(background_refresh_due(false, 0, false, WIDE, SECOND));
+        assert!(background_refresh_due(false, 0, false, WIDE + 1, SECOND));
+    }
+
+    #[test]
+    fn running_workers_refresh_and_no_workers_do_not_without_other_reasons() {
+        assert!(!background_refresh_due(false, 0, false, NARROW, SECOND));
+        assert!(background_refresh_due(false, 1, false, NARROW, SECOND));
+        assert!(background_refresh_due(false, 3, false, NARROW, SECOND));
+    }
+
+    #[test]
     fn the_tasks_view_workers_and_dispatch_still_refresh_without_the_pane() {
-        assert!(background_refresh_due(true, false, false, false, SECOND));
-        assert!(background_refresh_due(false, true, false, false, SECOND));
+        assert!(background_refresh_due(true, 0, false, NARROW, SECOND));
+        assert!(background_refresh_due(false, 1, false, NARROW, SECOND));
         assert!(background_refresh_due(
             false,
-            false,
+            0,
             true,
-            false,
+            NARROW,
             Duration::from_millis(250)
         ));
         assert!(!background_refresh_due(
             false,
-            false,
+            0,
             true,
-            false,
+            NARROW,
             Duration::from_millis(249)
         ));
     }
