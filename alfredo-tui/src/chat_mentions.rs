@@ -309,6 +309,8 @@ fn cut_at_space(root: &Path, path: &str) -> bool {
 
 /// Most paths a completion lists.
 pub const COMPLETE_SHOW: usize = 8;
+/// Most ranked candidates one completion vets; every vetted one costs a git call and a read.
+pub const COMPLETE_EXAMINE: usize = 64;
 /// Most files one completion considers.
 pub const COMPLETE_SCAN: usize = 5_000;
 
@@ -355,10 +357,21 @@ pub fn complete_within(root: &Path, fragment: &str, scan: usize) -> Vec<String> 
         .collect();
     ranked.sort_by_key(|(rank, _)| *rank);
     let mut check_failed = false;
+    vet(
+        ranked.into_iter().map(|(_, path)| path),
+        |path| read_mention(root, path, &mut check_failed).is_ok(),
+        || false,
+    )
+}
+
+/// The first [`COMPLETE_SHOW`] of `ranked` that `accept` passes.
+fn vet(
+    ranked: impl Iterator<Item = String>,
+    mut accept: impl FnMut(&str) -> bool,
+    _expired: impl Fn() -> bool,
+) -> Vec<String> {
     ranked
-        .into_iter()
-        .map(|(_, path)| path)
-        .filter(|path| read_mention(root, path, &mut check_failed).is_ok())
+        .filter(|path| accept(path))
         .take(COMPLETE_SHOW)
         .collect()
 }
