@@ -1050,6 +1050,65 @@ fn a_committed_or_staged_ignore_override_is_found_without_a_worktree_file() {
     }
 }
 
+/// Issue #516: an override that only the branch being merged or switched to brings in is
+/// found too, before the card.
+#[test]
+fn an_override_brought_in_by_the_other_branch_is_refused() {
+    for tool in ["git_merge", "git_switch"] {
+        let repo = Repo::new();
+        repo.go_branch();
+        ordinary_submodule_repo(&repo);
+        git(&repo.root, &["checkout", "-q", "-b", "theirs"]);
+        git(
+            &repo.root,
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.sub.ignore",
+                "none",
+            ],
+        );
+        git(&repo.root, &["add", ".gitmodules"]);
+        git(&repo.root, &["commit", "-q", "-m", "override"]);
+        git(&repo.root, &["checkout", "-q", "main"]);
+        let arguments = match tool {
+            "git_merge" => json!({"source": "theirs"}),
+            _ => json!({"branch": "theirs"}),
+        };
+        let error = repo.card(tool, arguments).unwrap_err();
+        assert!(
+            error.contains(".gitmodules") && error.contains("ignore"),
+            "{error}"
+        );
+    }
+}
+
+/// Issue #516: a directory that holds a submodule reaches it.
+#[test]
+fn a_commit_of_a_directory_holding_an_override_submodule_is_refused() {
+    let repo = Repo::new();
+    apply_fixture(&repo);
+    let sha = git(&repo.root, &["rev-parse", "HEAD:sub"]);
+    git(
+        &repo.root,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{},deps/inner", sha.trim()),
+        ],
+    );
+    fs::create_dir_all(repo.root.join("deps")).unwrap();
+    let error = repo
+        .card("git_commit", json!({"message": "m", "files": ["deps"]}))
+        .unwrap_err();
+    assert!(
+        error.contains(".gitmodules") && error.contains("ignore"),
+        "{error}"
+    );
+}
+
 /// Issue #516: a `.gitmodules` that is a FIFO is never opened, and the call is refused.
 #[test]
 fn a_gitmodules_fifo_never_stalls_and_refuses_a_submodule_apply() {
