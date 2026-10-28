@@ -69,8 +69,14 @@ fn a_sandboxed_command_keeps_its_workspace_writable() {
         return;
     }
     let root = workspace("writes");
-    let output = run_command(&root, "echo sandbox-ran && echo made > inside.txt && cat inside.txt");
-    assert!(output.contains("sandbox-ran"), "the command did not run: {output}");
+    let output = run_command(
+        &root,
+        "echo sandbox-ran && echo made > inside.txt && cat inside.txt",
+    );
+    assert!(
+        output.contains("sandbox-ran"),
+        "the command did not run: {output}"
+    );
     assert_eq!(
         fs::read_to_string(root.join("inside.txt")).unwrap().trim(),
         "made",
@@ -98,7 +104,10 @@ fn a_sandboxed_command_cannot_remount_the_git_bind_writable_as_root() {
     );
     // The marker proves the command ran inside the sandbox, so the checks below are
     // not satisfied by a sandbox that never started.
-    assert!(output.contains("sandbox-ran"), "the command did not run: {output}");
+    assert!(
+        output.contains("sandbox-ran"),
+        "the command did not run: {output}"
+    );
     assert!(
         !root.join(".git/escaped").exists(),
         "a sandboxed command wrote through a remounted .git bind: {output}"
