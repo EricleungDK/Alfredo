@@ -123,7 +123,11 @@ impl AtLookup {
     /// The answer of a finished lookup, if it is for the newest request. An older
     /// answer is dropped, and the newest queued request then starts.
     pub fn poll(&mut self, runtime: &Runtime) -> Option<Found> {
-        if !self.running.as_ref().is_some_and(|run| run.handle.is_finished()) {
+        if !self
+            .running
+            .as_ref()
+            .is_some_and(|run| run.handle.is_finished())
+        {
             return None;
         }
         let running = self.running.take()?;

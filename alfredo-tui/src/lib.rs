@@ -99,8 +99,8 @@ pub mod agent_drafts;
 pub mod instruct;
 pub mod on_finish;
 
-pub mod chat_context;
 pub mod at_lookup;
+pub mod chat_context;
 pub mod chat_mentions;
 pub mod chat_tools;
 pub mod project_notes;
