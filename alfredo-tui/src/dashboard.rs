@@ -347,6 +347,8 @@ pub enum Footer {
     Tasks,
     /// The plan draft owns the right pane.
     Plan,
+    /// The plan draft owns the right pane while a manual plan request generates: Esc cancels it.
+    PlanRunning,
     /// An agent view owns the right pane and the prompt.
     Agent,
     /// Chat on the right.
@@ -403,6 +405,15 @@ pub fn footer(context: Footer, turn: Turn, width: usize) -> String {
             ("^Q quit", 0),
         ],
         Footer::Plan => &[
+            ("F6 pane", 1),
+            ("^O raw/tasks", 1),
+            ("F2 chat", 1),
+            ("PgUp/Dn scroll", 2),
+            ("F1 help", 0),
+            ("^Q quit", 0),
+        ],
+        Footer::PlanRunning => &[
+            ("Esc cancel plan", 0),
             ("F6 pane", 1),
             ("^O raw/tasks", 1),
             ("F2 chat", 1),

@@ -39,6 +39,8 @@ class AutopilotServer:
         # Recovery smoke options: one passing task whose first worker request can be held.
         self.single_task = False
         self.hold_calc = None
+        # Issue #504: when set, the planner reply is held until the event is set.
+        self.hold_plan = None
         # Issue #350: one task whose check passes on the baseline; every worker answer echoes calc.py unchanged.
         self.echo_worker = False
         # Issue #283: server counts added to every final frame (empty: the server reports none).
@@ -109,6 +111,8 @@ class AutopilotServer:
                         raise AssertionError(f'Unexpected request: {prompt[:120]!r}')
                     with fixture.lock:
                         fixture.requests.append(marker)
+                    if marker == 'PLAN' and fixture.hold_plan is not None and not fixture.hold_plan.wait(60):
+                        raise AssertionError('Planner reply was never released')
                     if marker == 'CALC' and fixture.hold_calc is not None and not fixture.hold_calc.wait(60):
                         raise AssertionError('Calc worker was never released')
                     if marker == 'APP' and not fixture.release_app.wait(60):
@@ -347,6 +351,42 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         branches = self.git('for-each-ref', '--format=%(refname:short)', 'refs/heads/alfredo/').split()
         self.assertEqual(len(branches), 1, branches)
         self.assertEqual(self.git('show', f'{branches[0]}:calc.py'), 'def answer():\n    return 42')
+        self.quit(terminal)
+
+    def test_esc_cancels_a_manual_plan_request_like_plan_cancel_and_keeps_an_idle_draft(self):
+        self.fixture.hold_plan = threading.Event()
+        terminal = self.terminal(resume=False)
+        terminal.send('/plan add b\r')
+        self.wait_until('planner asked', lambda: self.fixture.markers() == ['PLAN'], 60)
+        self.screen_has(terminal, 'waiting for model server', 60)
+        self.screen_has(terminal, 'Esc cancel plan')
+        terminal.send(b'\x1b')
+        # Same effect as a typed /plan-cancel: the plan pane closes and the chat records it.
+        self.screen_has(terminal, 'No tasks proposed yet', 1)
+        self.assertNotIn('Esc cancel plan', terminal.screen())
+        terminal.send(b'\x1bOQ')  # F2 chat
+        self.screen_has(terminal, '› /plan-cancel', 1)
+        self.assertEqual(terminal.screen().count('Draft generation stopped'), 2)
+        # The late reply finds no request to publish into.
+        self.fixture.hold_plan.set()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            terminal.pump()
+            time.sleep(0.05)
+        self.assertNotIn('Make answer return 42', terminal.screen())
+        # Idle with a draft shown: Esc keeps the draft.
+        terminal.send('/plan add b\r')
+        self.screen_has(terminal, 'Make answer return 42', 60)
+        self.assertNotIn('Esc cancel plan', terminal.screen())
+        terminal.send(b'\x1b')
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            terminal.pump()
+            time.sleep(0.05)
+        screen = terminal.screen()
+        self.assertIn('Make answer return 42', screen)
+        self.assertIn('Plan draft', screen)
+        self.assertNotIn('Esc cancel plan', screen)
         self.quit(terminal)
 
     def test_repair_after_a_failed_go_reenters_the_loop_and_builds_the_branch(self):

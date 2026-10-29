@@ -1177,7 +1177,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             dirty = true;
             match event {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                Event::Key(mut key) if key.kind != KeyEventKind::Release => {
+                    // Issue #504: Esc during a manual /plan request is `/plan-cancel` typed
+                    // and sent, so the durable command path and its notice are the same.
+                    if key.code == KeyCode::Esc
+                        && work
+                            .tasks
+                            .esc_cancels_plan(&work.app, pending_command.is_some())
+                    {
+                        let index = work.app.selected;
+                        work.app.sessions[index].insert("/plan-cancel");
+                        key.code = KeyCode::Enter;
+                        key.modifiers = KeyModifiers::NONE;
+                    }
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     let alt_only = key.modifiers == KeyModifiers::ALT;
                     let index = work.app.selected;
@@ -2731,7 +2743,7 @@ const HELP_LINES: &[&str] = &[
     "/task description · /after 1,2 description · /approve ID · /cancel-task ID",
     "/permit ID JSON · /run ID · /evidence ID · /recover ID [requeue] · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /requeue ID · /resolve-repair ID · /branch ID",
     "@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry · /scope-clear",
-    "/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off",
+    "/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel (Esc too, while a request generates) · /assign ID MODEL · /dispatch on|off",
     "/watch ID|architect · /tell ID|architect TEXT",
     "@path in a chat prompt attaches that file's working-tree text (8 mentions, 32 KiB per prompt; no spaces or quotes in the path; secrets, symlinks, ignored, binary and files over 256 KiB are refused); each refusal is listed in the transcript",
     "/clear start this conversation fresh (tasks are kept)",

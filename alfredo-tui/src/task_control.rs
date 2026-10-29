@@ -800,6 +800,34 @@ impl TaskControl {
         notice
     }
 
+    /// A `/plan` or `/plan-revise` request typed by the owner is generating. Autopilot's
+    /// own planning stays with `/stop` (issue #504).
+    pub fn manual_plan_in_flight(&self) -> bool {
+        self.planner.active()
+            && self
+                .autopilot
+                .as_ref()
+                .is_none_or(|status| status.state.finished())
+    }
+
+    /// Esc cancels the plan request like `/plan-cancel` (issue #504): the plan pane is
+    /// the open view, nothing else claims the key, the prompt is empty and no command
+    /// intent is pending (the rewritten `/plan-cancel` would be refused and left typed).
+    /// This outranks stopping a chat reply, denying an approval and unqueueing a prompt.
+    pub fn esc_cancels_plan(&self, app: &crate::model::App, command_pending: bool) -> bool {
+        !command_pending
+            && self.visible
+            && self.planner.visible
+            && self.manual_plan_in_flight()
+            && app.pane.focus.is_none()
+            && app.completion.is_none()
+            && !app.models_visible
+            && app
+                .sessions
+                .get(app.selected)
+                .is_some_and(|session| session.draft.is_empty())
+    }
+
     /// Leaving Mission Work cancels a pending evidence view choice even if the
     /// pane is reopened before its asynchronous response arrives.
     pub fn set_visible(&mut self, visible: bool) {

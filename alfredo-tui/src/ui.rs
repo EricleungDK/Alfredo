@@ -320,7 +320,11 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     } else if agent.is_some() {
         dashboard::Footer::Agent
     } else if tasks.is_some_and(|tasks| tasks.visible && tasks.planner.visible) {
-        dashboard::Footer::Plan
+        if tasks.is_some_and(|tasks| tasks.manual_plan_in_flight()) {
+            dashboard::Footer::PlanRunning
+        } else {
+            dashboard::Footer::Plan
+        }
     } else if tasks.is_some_and(|tasks| tasks.visible) {
         dashboard::Footer::Tasks
     } else if session.tool_results_expanded {
