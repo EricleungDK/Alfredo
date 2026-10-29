@@ -317,8 +317,23 @@ pub const COMPLETE_SHOW: usize = 8;
 pub const COMPLETE_EXAMINE: usize = 64;
 /// Wall-clock budget of one completion, listing and checks together.
 const COMPLETE_DEADLINE: Duration = Duration::from_millis(750);
-/// Most files one completion considers.
-pub const COMPLETE_SCAN: usize = 5_000;
+/// Most files one completion considers. Discovery lists the whole repository before it
+/// truncates, so a large cap costs little; it only bounds memory for huge trees.
+pub const COMPLETE_SCAN: usize = 100_000;
+
+/// Candidate files of a workspace for `@path` completion: the `list_files` discovery
+/// (ignore rules, no symlinks) as paths relative to the canonical root. Keeping one
+/// across the keystrokes of an `@` word avoids listing the repository per key; every
+/// path completed from it is still vetted by [`read_mention`] at completion time.
+#[derive(Debug, Clone, Default)]
+pub struct Listing(Vec<String>);
+impl Listing {
+    /// Whether discovery found no files.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 /// Paths the `@path` rules would attach that match `fragment`: prefix matches first, then
 /// substring matches.
@@ -335,51 +350,80 @@ pub fn complete(root: &Path, fragment: &str) -> Vec<String> {
 pub fn complete_within(root: &Path, fragment: &str, scan: usize) -> Vec<String> {
     // Every git call and read of the listing draws on one short budget (issues #257, #359).
     git_read::call_scope(COMPLETE_DEADLINE, || {
-        let odd = |c: char| separator(c) || c.is_control();
-        let needle = fragment
-            .strip_prefix("./")
-            .unwrap_or(fragment)
-            .to_lowercase();
-        let Ok(canonical) = root.canonicalize() else {
-            return Vec::new();
-        };
-        if needle.chars().any(odd) {
-            return Vec::new();
-        }
-        let (files, _, _) = read::discover(root, &canonical, scan);
-        // Only names a mention reads back whole and that draw nothing invisible.
-        let whole = |path: &str| {
-            !path.chars().any(odd)
-                && crate::dashboard::safe_visible(path) == path
-                && matches!(parse(&format!("@{path} ")).as_slice(),
-                    [one] if one.path == path && !one.quoted)
-        };
-        let mut ranked: Vec<(u8, String)> = files
+        let listing = discover_listing(root, scan);
+        vet_matches(root, &listing, fragment)
+    })
+}
+
+/// The candidate files of `root`, listed once for [`complete_listed`] to reuse.
+#[must_use]
+pub fn listing(root: &Path) -> Listing {
+    git_read::call_scope(COMPLETE_DEADLINE, || discover_listing(root, COMPLETE_SCAN))
+}
+
+/// [`complete`] over a [`Listing`] taken earlier: no discovery, only ranking and vetting.
+#[must_use]
+pub fn complete_listed(root: &Path, listing: &Listing, fragment: &str) -> Vec<String> {
+    git_read::call_scope(COMPLETE_DEADLINE, || vet_matches(root, listing, fragment))
+}
+
+fn discover_listing(root: &Path, scan: usize) -> Listing {
+    let Ok(canonical) = root.canonicalize() else {
+        return Listing::default();
+    };
+    let (files, _, _) = read::discover(root, &canonical, scan);
+    Listing(
+        files
             .iter()
             .filter_map(|file| file.strip_prefix(&canonical).ok()?.to_str())
-            .filter(|path| whole(path))
-            .filter_map(|path| {
-                let lower = path.to_lowercase();
-                let rank = if lower == needle {
-                    0
-                } else if lower.starts_with(&needle) {
-                    1
-                } else if lower.contains(&needle) {
-                    2
-                } else {
-                    return None;
-                };
-                Some((rank, path.to_string()))
-            })
-            .collect();
-        ranked.sort_by_key(|(rank, _)| *rank);
-        let mut check_failed = false;
-        vet(
-            ranked.into_iter().map(|(_, path)| path),
-            |path| read_mention(root, path, &mut check_failed).is_ok(),
-            || git_read::call_clock().left().is_zero(),
-        )
-    })
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Rank the listing against `fragment`, then vet the best candidates. Runs inside a
+/// [`git_read::call_scope`].
+fn vet_matches(root: &Path, listing: &Listing, fragment: &str) -> Vec<String> {
+    let odd = |c: char| separator(c) || c.is_control();
+    let needle = fragment
+        .strip_prefix("./")
+        .unwrap_or(fragment)
+        .to_lowercase();
+    if needle.chars().any(odd) {
+        return Vec::new();
+    }
+    // Only names a mention reads back whole and that draw nothing invisible.
+    let whole = |path: &str| {
+        !path.chars().any(odd)
+            && crate::dashboard::safe_visible(path) == path
+            && matches!(parse(&format!("@{path} ")).as_slice(),
+                [one] if one.path == path && !one.quoted)
+    };
+    let mut ranked: Vec<(u8, &str)> = listing
+        .0
+        .iter()
+        .filter_map(|path| {
+            let lower = path.to_lowercase();
+            let rank = if lower == needle {
+                0
+            } else if lower.starts_with(&needle) {
+                1
+            } else if lower.contains(&needle) {
+                2
+            } else {
+                return None;
+            };
+            Some((rank, path.as_str()))
+        })
+        .filter(|(_, path)| whole(path))
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    let mut check_failed = false;
+    vet(
+        ranked.into_iter().map(|(_, path)| path.to_string()),
+        |path| read_mention(root, path, &mut check_failed).is_ok(),
+        || git_read::call_clock().left().is_zero(),
+    )
 }
 
 /// The first [`COMPLETE_SHOW`] of the first [`COMPLETE_EXAMINE`] of `ranked` that `accept`

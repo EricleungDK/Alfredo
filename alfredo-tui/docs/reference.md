@@ -2188,11 +2188,15 @@ size limit, and it is kept in memory only (not restored after a restart).
   list of up to 8 paths, prefix matches first, then substring matches (case-insensitive,
   no fuzzy ranking). Tab or Enter fills the path and a space, Esc closes it and keeps the
   text. Only paths the rules above would attach are listed: each candidate comes from the
-  `list_files` discovery (ignore rules, no symlinks, at most 5000 files) and passes the same
+  `list_files` discovery (ignore rules, no symlinks, at most 100000 files) and passes the same
   check as an attachment (at most 64 are checked, all within 0.75 s, so a slow repository
   lists less rather than stalling the prompt), so secrets, ignored, binary and oversize files, symlinks and
   paths with spaces, names a mention would cut or read differently (trailing `.`, `?`)
   and names with invisible characters never appear; an exact match is listed first. Nothing is attached until the prompt is submitted.
+  The lookup runs on a worker thread, never on the key path: keys echo at once, the list
+  appears within about a second once the lookup finishes (the repository listing is kept
+  for the keystrokes of one `@` word, so later keys are quicker), and a result for a draft
+  that has since changed is dropped.
 - Not included: directory mentions, mentions in `/go` goals or
   commands. `@wayfinder REQUEST` is unchanged. Planner and worker references still use
   committed HEAD content.
