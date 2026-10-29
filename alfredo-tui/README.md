@@ -284,6 +284,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/autopilot.rs` | `/go` loop, auto-review, bounded repair, integration branch |
 | `src/tasks.rs`, `src/task_control.rs`, `src/task_control/commands.rs`, `src/dispatch.rs` | Durable task store, commands (`prepare_command`, `dispatch_prepared`, `command`, `parse`), dispatch |
 | `src/worker.rs`, `src/run_boundary.rs` | Isolated worktree workers and bubblewrap sandbox |
+| `src/worker/answer.rs` | Worker FILE/EDIT answer-block parser, resolver and live display |
 | `src/planner.rs`, `src/planning_context.rs` | Plan generation from committed repo context |
 | `src/provider.rs`, `src/inference_admission.rs`, `src/health.rs` | Ollama client, shared capacity, health polling |
 | `src/commands.rs` | Command catalog (F1 picker) |
