@@ -1875,6 +1875,28 @@ async fn worker_inference_admission(
     Ok(())
 }
 
+/// Tracked paths the check changed, as `HEAD` sees them, for the post-check guard. `--no-renames`
+/// lists both sides of a rename, so a deleted unapproved file cannot hide behind an approved
+/// near-copy that git reports as one rename (#518). `-z` keeps each name one NUL-terminated
+/// record: git quotes a name with a newline instead, and a line split would cut it apart.
+async fn changed_tracked_paths(worktree: &Path) -> Result<Vec<String>> {
+    let listing = git(
+        worktree,
+        &[
+            "diff",
+            "--no-renames",
+            "--no-ext-diff",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "--",
+        ],
+    )
+    .await?;
+    // `split_terminator` drops the final terminator and yields nothing for an empty listing.
+    Ok(listing.split_terminator('\0').map(str::to_owned).collect())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn perform(
     store: &TaskStore,
@@ -2229,9 +2251,9 @@ async fn perform(
         return Err(detail);
     }
     refuse_gitlinks(worktree).await?;
-    let changed = git(worktree, &["diff", "--name-only", "HEAD", "--"]).await?;
+    let changed = changed_tracked_paths(worktree).await?;
     if changed
-        .lines()
+        .iter()
         .any(|path| !policy.files.iter().any(|allowed| allowed == path))
     {
         return Err(
@@ -3186,6 +3208,38 @@ mod host_git_tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    /// #518: the guard's listing names both sides of a rename, and a name holding a newline
+    /// stays one entry instead of splitting into fragments.
+    #[test]
+    fn changed_tracked_paths_names_both_sides_of_a_rename_and_keeps_a_newline_name_whole() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let root = unique_root("changed-paths");
+        let wt = root.join("wt");
+        fs::create_dir_all(&wt).unwrap();
+        fixture_git(&wt, &["init", "-q", "-b", "main", "--template="]);
+        let body: String = (1..=100).map(|line| format!("{line}\n")).collect();
+        fs::write(wt.join("unapproved_src.txt"), &body).unwrap();
+        fs::write(wt.join("a\nb.txt"), "tracked\n").unwrap();
+        fixture_git(&wt, &["add", "."]);
+        fixture_git(&wt, &["commit", "-qm", "init"]);
+        // The worker's private index tracks the approved new file with intent-to-add. The check
+        // copies the unapproved file onto it and deletes both originals.
+        fs::write(wt.join("approved_new.txt"), &body).unwrap();
+        fixture_git(&wt, &["add", "--intent-to-add", "--", "approved_new.txt"]);
+        fs::remove_file(wt.join("unapproved_src.txt")).unwrap();
+        fs::remove_file(wt.join("a\nb.txt")).unwrap();
+
+        let listed = runtime.block_on(super::changed_tracked_paths(&wt)).unwrap();
+        assert_eq!(
+            listed,
+            ["a\nb.txt", "approved_new.txt", "unapproved_src.txt"]
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Where the gitlink the check's attack relies on is recorded.

@@ -1290,13 +1290,40 @@ pub(crate) fn run_bounded(
     let started = Instant::now();
     // The readers hand their result over a channel, so this thread wakes the moment output
     // ends instead of polling for it (issue #500).
-    let stderr = child.stderr.take().map(|stderr| {
+    // The stderr reader keeps the first 4 KiB and drains the rest to EOF: closing the pipe at
+    // the cap would kill a warning-heavy git with SIGPIPE (issue #520). It replies as soon as
+    // the cap is full, so a leftover child holding stderr open cannot hold the reply back. It
+    // stops once this call returns (`alive` is dropped then), so a writer left behind is not
+    // fed forever.
+    const STDERR_KEPT: usize = 4096;
+    let alive = std::sync::Arc::new(());
+    let watch = std::sync::Arc::downgrade(&alive);
+    let stderr = child.stderr.take().map(|mut stderr| {
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             // Lossy: a non-UTF-8 warning must still be seen by the listing check.
-            let mut bytes = Vec::new();
-            let _ = stderr.take(4096).read_to_end(&mut bytes);
-            let _ = sender.send(String::from_utf8_lossy(&bytes).into_owned());
+            let text = |kept: &[u8]| String::from_utf8_lossy(kept).into_owned();
+            let mut sender = Some(sender);
+            let mut kept = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while watch.upgrade().is_some() {
+                let read = match stderr.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => read,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                };
+                let room = STDERR_KEPT - kept.len();
+                kept.extend_from_slice(&chunk[..read.min(room)]);
+                if kept.len() == STDERR_KEPT {
+                    if let Some(sender) = sender.take() {
+                        let _ = sender.send(text(&kept));
+                    }
+                }
+            }
+            if let Some(sender) = sender {
+                let _ = sender.send(text(&kept));
+            }
         });
         receiver
     });
@@ -1924,6 +1951,55 @@ mod tests {
         assert!(error.is_empty(), "{error}");
         assert!(took >= Duration::from_millis(300), "{took:?}");
         assert!(took < Duration::from_millis(1500), "{took:?}");
+    }
+
+    /// Issue #520: a child that writes more than 4 KiB to stderr and exits 0 succeeds, and
+    /// only the first 4 KiB of its stderr is kept. Closing the pipe at the cap would kill the
+    /// child with SIGPIPE (signal 13) instead, as a warning-heavy `git diff` was killed.
+    #[test]
+    fn stderr_past_4_kib_is_drained_and_the_command_still_succeeds() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec head -c 200000 /dev/zero >&2"]);
+        let (status, out, error) = run_bounded(command, 4096, DEADLINE).unwrap();
+        assert!(status.is_some_and(|status| status.success()), "{status:?}");
+        assert!(out.is_empty());
+        assert_eq!(error.len(), 4096);
+    }
+
+    /// Issue #520: a child that exits 0 while a writer it left behind keeps writing to stderr
+    /// must not hold the call to the deadline once the 4 KiB are in, and that writer must stop
+    /// when the call returns, as it did when the pipe was closed at the cap.
+    #[test]
+    fn a_stderr_writer_left_behind_neither_holds_the_call_nor_outlives_it() {
+        let pid_file =
+            std::env::temp_dir().join(format!("alfredo-stderr-writer-{}.pid", std::process::id()));
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "yes warning >&2 & echo $! > \"$1\"; exit 0", "sh"])
+            .arg(&pid_file);
+        let started = Instant::now();
+        let (status, _, error) = run_bounded(command, 4096, DEADLINE).unwrap();
+        let took = started.elapsed();
+        assert!(status.is_some_and(|status| status.success()));
+        assert_eq!(error.len(), 4096);
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        let pid = fs::read_to_string(&pid_file).unwrap();
+        let _ = fs::remove_file(&pid_file);
+        let pid = pid.trim();
+        // A zombie (`Z`) has stopped writing; it is only waiting to be reaped.
+        let stopped = (0..300).any(|_| {
+            let state = Command::new("ps").args(["-o", "stat=", "-p", pid]).output();
+            let state = state.map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
+            if state.is_ok_and(|state| state.trim().is_empty() || state.trim().starts_with('Z')) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            false
+        });
+        assert!(
+            stopped,
+            "the writer left behind (pid {pid}) is still running"
+        );
     }
 
     /// Issue #500: a command that exits at once must not pay a fixed polling floor; the

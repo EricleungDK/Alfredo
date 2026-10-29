@@ -268,6 +268,9 @@ pub struct Planner {
     command_revision: Option<u64>,
     /// Validation findings for the last previewed draft.
     warnings: std::cell::RefCell<Option<(Plan, Vec<String>)>>,
+    /// The draft a background lint is checking, and where its findings arrive (#519: the
+    /// lint runs host git, which may stall, so no view runs it).
+    linting: std::cell::RefCell<Option<(Plan, std::sync::mpsc::Receiver<Vec<String>>)>>,
     /// When the current generation was spawned (display only).
     started: Option<std::time::Instant>,
 }
@@ -884,7 +887,7 @@ impl Planner {
         Ok(())
     }
     pub fn poll(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.collect_findings();
         loop {
             let event = match self
                 .events
@@ -1040,6 +1043,45 @@ impl Planner {
         }
         changed
     }
+    /// Stores the findings of a finished background lint; true when they arrived, so the
+    /// panel is drawn again.
+    fn collect_findings(&mut self) -> bool {
+        let Some((plan, receiver)) = self.linting.get_mut().take() else {
+            return false;
+        };
+        let findings = match receiver.try_recv() {
+            Ok(findings) => findings,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                *self.linting.get_mut() = Some((plan, receiver));
+                return false;
+            }
+            // The lint thread ended without an answer: no findings, and no new lint for
+            // this draft on every frame.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => vec![],
+        };
+        *self.warnings.get_mut() = Some((plan, findings));
+        true
+    }
+    /// The validation findings for `draft`, or `None` while a background lint computes
+    /// them. The lint is started here, never run on the calling thread: a view is drawn on
+    /// every frame (#519).
+    fn findings_for(&self, draft: &Plan) -> Option<Vec<String>> {
+        if let Some((plan, findings)) = self.warnings.borrow().as_ref() {
+            if plan == draft {
+                return Some(findings.clone());
+            }
+        }
+        let mut linting = self.linting.borrow_mut();
+        if linting.as_ref().is_none_or(|(plan, _)| plan != draft) {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let owned = draft.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send(crate::plan_lint::findings(&owned));
+            });
+            *linting = Some((draft.clone(), receiver));
+        }
+        None
+    }
     /// The draft as the panel shows it: the readable task list, or the raw JSON
     /// after Ctrl+O (and while no parsed draft exists).
     pub fn view(&self) -> String {
@@ -1074,22 +1116,18 @@ impl Planner {
             .map(|metrics| format!("\n{}", metrics.summary()))
             .unwrap_or_default();
         let warnings = self.draft.as_ref().map_or_else(String::new, |draft| {
-            let mut cache = self.warnings.borrow_mut();
-            if cache.as_ref().is_none_or(|(plan, _)| plan != draft) {
-                *cache = Some((draft.clone(), crate::plan_lint::findings(draft)));
+            match self.findings_for(draft) {
+                None => "\nValidation warnings · checking the plan against the repository...".into(),
+                Some(findings) if findings.is_empty() => String::new(),
+                Some(findings) => format!(
+                    "\nValidation warnings · /plan-save still allowed; autopilot would re-plan:\n{}",
+                    findings
+                        .iter()
+                        .map(|finding| format!("- {finding}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
             }
-            let findings = &cache.as_ref().expect("cached findings").1;
-            if findings.is_empty() {
-                return String::new();
-            }
-            format!(
-                "\nValidation warnings · /plan-save still allowed; autopilot would re-plan:\n{}",
-                findings
-                    .iter()
-                    .map(|finding| format!("- {finding}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
         });
         format!("{}{timing}\n\nFrontier Architect draft · Local Agent worker assignments\nNot saved or approved · committed context only; working edits excluded\n{}{warnings}\n\n{}", self.notice, context, match &self.draft {
             Some(plan) if readable => readable_tasks(plan),

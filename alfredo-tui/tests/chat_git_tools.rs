@@ -181,6 +181,30 @@ fn git_diff_shows_working_tree_and_staged_changes() {
         .contains("+unstaged"));
 }
 
+/// Issue #520: with `eol=crlf` every changed LF file makes git print a warning, and 300 of
+/// them are more than 4 KiB of stderr. That used to kill git (SIGPIPE) and fail the diff.
+#[test]
+fn git_diff_of_an_eol_crlf_repository_with_many_warnings_succeeds() {
+    let repo = Repo::new();
+    fs::write(repo.root.join(".gitattributes"), "* text eol=crlf\n").unwrap();
+    for index in 0..300 {
+        fs::write(
+            repo.root.join(format!("file_with_a_long_name_{index}.txt")),
+            "x\n",
+        )
+        .unwrap();
+    }
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-q", "-m", "lf files"]);
+    for index in 0..300 {
+        let path = repo.root.join(format!("file_with_a_long_name_{index}.txt"));
+        fs::write(path, "x\ny\n").unwrap();
+    }
+    let output = repo.run("git_diff", json!({}));
+    assert!(!output.starts_with("error: "), "{output}");
+    assert!(output.contains("+y"), "{output}");
+}
+
 #[test]
 fn git_diff_hides_secret_files() {
     let repo = Repo::new();

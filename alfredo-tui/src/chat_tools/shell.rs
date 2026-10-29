@@ -14,6 +14,9 @@ use serde_json::{json, Value};
 use std::{
     cell::RefCell,
     collections::BTreeMap,
+    fs::{self, OpenOptions},
+    io::Write,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -347,6 +350,92 @@ fn sandbox_failure(reason: &str) -> String {
     )
 }
 
+/// Text of the placeholder that holds `root/.git` while a sandboxed command runs in a
+/// Coding Workspace with no Git repository (issue #522). The exact text tells the host the
+/// file is the placeholder and not the owner's file.
+const PLACEHOLDER_TEXT: &str = "alfredo: this Coding Workspace has no Git repository\n";
+
+/// Placeholders this process has written, with the number of runs holding each one.
+static PLACEHOLDERS: Mutex<Vec<Placeholder>> = Mutex::new(Vec::new());
+
+struct Placeholder {
+    path: PathBuf,
+    /// Device and inode of the file this process wrote.
+    identity: (u64, u64),
+    holders: usize,
+}
+
+/// One sandboxed run's hold on a placeholder; the last hold removes the file.
+struct Hold(PathBuf);
+
+/// Keeps `git` (the workspace's `root/.git`) occupied for one sandboxed run, so that
+/// bubblewrap can bind it read-only and `git init`, `mkdir .git` or `ln -s` inside the
+/// sandbox fail with the file in place (issue #522). When `git` is absent, this writes the
+/// placeholder; when it is already a placeholder held by a concurrent run, this joins that
+/// hold. `None` when the owner's own `.git` is there, which is bound as before.
+fn hold_placeholder(git: &Path) -> Result<Option<Hold>, String> {
+    let mut held = PLACEHOLDERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(entry) = held.iter_mut().find(|entry| entry.path == git) {
+        entry.holders += 1;
+        return Ok(Some(Hold(git.to_path_buf())));
+    }
+    match fs::symlink_metadata(git) {
+        Ok(_) if is_placeholder(git) => {
+            // Left by an earlier process that died during a run: replace it.
+            fs::remove_file(git).map_err(|error| error.to_string())?;
+        }
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(git) {
+        Ok(file) => file,
+        // Something appeared since the check: bind that as the owner's entry.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    file.write_all(PLACEHOLDER_TEXT.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let meta = file.metadata().map_err(|error| error.to_string())?;
+    held.push(Placeholder {
+        path: git.to_path_buf(),
+        identity: (meta.dev(), meta.ino()),
+        holders: 1,
+    });
+    Ok(Some(Hold(git.to_path_buf())))
+}
+
+/// Whether `git` is a regular file holding exactly the placeholder text.
+fn is_placeholder(git: &Path) -> bool {
+    fs::symlink_metadata(git).is_ok_and(|meta| meta.is_file())
+        && fs::read_to_string(git).is_ok_and(|text| text == PLACEHOLDER_TEXT)
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        let mut held = PLACEHOLDERS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(index) = held.iter().position(|entry| entry.path == self.0) else {
+            return;
+        };
+        held[index].holders -= 1;
+        if held[index].holders > 0 {
+            return;
+        }
+        let entry = held.remove(index);
+        // Removed only while it is still the file this process wrote: an owner's file put in
+        // its place, or a placeholder another process wrote, is left alone.
+        let same = fs::symlink_metadata(&entry.path)
+            .is_ok_and(|meta| (meta.dev(), meta.ino()) == entry.identity);
+        if same && is_placeholder(&entry.path) {
+            let _ = fs::remove_file(&entry.path);
+        }
+    }
+}
+
 /// Run in the bubblewrap Sandbox at `bwrap`: the worker check boundary rooted at the
 /// Coding Workspace, then `cd` to the cwd inside it.
 fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<String, String> {
@@ -363,14 +452,22 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
         .ok_or("Coding Workspace path is not UTF-8")?
         .to_string();
     let git = root.join(".git");
-    let gitfile = git.exists().then(|| git.to_string_lossy().into_owned());
+    // Held until this function returns, on every path, so the placeholder is removed after
+    // the run (issue #522).
+    let hold = hold_placeholder(&git).map_err(|error| {
+        format!("the Coding Workspace's .git could not be reserved for the sandbox ({error}); nothing ran")
+    })?;
+    let gitfile = match hold {
+        Some(_) => Some(git.to_string_lossy().into_owned()),
+        None => git.exists().then(|| git.to_string_lossy().into_owned()),
+    };
     let mut argv =
         crate::worker::sandbox_argv(&root_text, gitfile.as_deref(), &limits(plan.timeout));
     argv[0] = bwrap.to_string();
     // Read-only extras outside the workspace: a linked worktree's Git directory, and
     // the owner's offline toolchain (only the entries it needs, see `toolchain_binds`).
     let mut extras: Vec<String> = Vec::new();
-    if git.is_file() {
+    if hold.is_none() && git.is_file() {
         extras.extend(git_common_dir(&root));
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -637,6 +734,78 @@ mod tests {
         assert!(error.contains("escalate: true"), "{error}");
         assert!(error.contains("nothing ran on the host"), "{error}");
         assert!(!root.join("ran").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-shell-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_placeholder_stays_until_the_last_hold_is_released() {
+        let root = scratch("hold-last");
+        let git = root.join(".git");
+        let first = hold_placeholder(&git).unwrap().expect("held");
+        assert_eq!(std::fs::read_to_string(&git).unwrap(), PLACEHOLDER_TEXT);
+        let second = hold_placeholder(&git).unwrap().expect("held");
+        drop(first);
+        assert!(git.is_file(), "a concurrent run lost its placeholder");
+        drop(second);
+        assert!(
+            std::fs::symlink_metadata(&git).is_err(),
+            "placeholder left behind"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_existing_git_entry_is_never_taken_over_or_removed() {
+        let root = scratch("hold-existing");
+        let git = root.join(".git");
+        std::fs::create_dir(&git).unwrap();
+        assert!(hold_placeholder(&git).unwrap().is_none());
+        assert!(git.is_dir());
+        std::fs::remove_dir(&git).unwrap();
+        std::fs::write(&git, "gitdir: elsewhere\n").unwrap();
+        assert!(hold_placeholder(&git).unwrap().is_none());
+        assert_eq!(
+            std::fs::read_to_string(&git).unwrap(),
+            "gitdir: elsewhere\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_file_put_in_place_of_the_placeholder_is_not_removed() {
+        let root = scratch("hold-replaced");
+        let git = root.join(".git");
+        let hold = hold_placeholder(&git).unwrap().expect("held");
+        std::fs::remove_file(&git).unwrap();
+        std::fs::write(&git, "owner's own file\n").unwrap();
+        drop(hold);
+        assert_eq!(std::fs::read_to_string(&git).unwrap(), "owner's own file\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_placeholder_left_by_an_earlier_process_is_replaced_and_then_removed() {
+        let root = scratch("hold-stale");
+        let git = root.join(".git");
+        std::fs::write(&git, PLACEHOLDER_TEXT).unwrap();
+        let hold = hold_placeholder(&git).unwrap().expect("held");
+        assert_eq!(std::fs::read_to_string(&git).unwrap(), PLACEHOLDER_TEXT);
+        drop(hold);
+        assert!(std::fs::symlink_metadata(&git).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 

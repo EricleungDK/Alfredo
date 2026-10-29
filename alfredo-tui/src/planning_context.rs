@@ -40,37 +40,75 @@ pub(crate) fn path_valid(path: &str) -> bool {
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
 }
-/// Secret material and Git metadata (issues #312 and the original list). `path` is a
+/// Secret material and Git metadata (issues #312, #471 and #523). `path` is a
 /// `/`-separated path in any case; every rule is tested on each lowercased path component,
 /// so a directory such as `.aws/` or `.ssh/` excludes everything under it.
 ///
+/// Before matching, `.` and empty components are dropped: `.docker//config.json` is read
+/// as `.docker/config.json`. A `..` is also resolved lexically, and the path is a secret
+/// when its raw reading or its resolved reading is one, so `a/.docker/x/../config.json`
+/// is refused and no `..` turns a secret into a plain path.
+///
 /// - Directories: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.azure`, `.password-store`
-///   (everything under them), and `gh` under `.config` (`.config/gh`).
+///   (everything under them), and `gh` under `.config` (`.config/gh`), and `hub` under
+///   `.config` (`.config/hub`).
 /// - Directory-scoped files: `.docker/config.json`, `.cargo/credentials` and
-///   `.cargo/credentials.toml`, `.gem/credentials`. Only those names: `.docker/daemon.json`
-///   and `.cargo/config.toml` stay readable.
-/// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
-///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
+///   `.cargo/credentials.toml`, `.gem/credentials`, `.mc/config.json`, `.m2/settings.xml`,
+///   `.pip/pip.conf`, `.config/rclone/rclone.conf`, `.config/gcloud/credentials.db` and
+///   `.config/gcloud/access_tokens.db`. Only those names: `.docker/daemon.json`,
+///   `.cargo/config.toml` and `.m2/` files other than `settings.xml` stay readable.
+/// - Names: `.env*`, `.npmrc`, `.netrc`, `_netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `.my.cnf`, `.terraformrc`,
+///   `terraform.rc`, `auth.json` (Composer), `.bash_history`, `gradle.properties`,
+///   `.rclone.conf`, `.yarnrc.yml`, `.dev.vars`, `service_account.json`, `kubeconfig`,
 ///   `kubeconfig.yaml`, `kubeconfig.yml`, `application_default_credentials.json`,
 ///   `secrets.y*ml` (starts `secrets.y`, ends `ml`).
 /// - Name prefixes: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa` (private keys and
 ///   their `.pub`/backup siblings; a name that merely starts so is refused too),
 ///   `credentials` with a `.json` ending (`credentials*.json`), `service-account` and
-///   `client_secret` with a `.json` ending (`service-account*.json`, `client_secret*.json`).
+///   `client_secret` with a `.json` ending (`service-account*.json`, `client_secret*.json`),
+///   `firebase-adminsdk-` with a `.json` ending (`firebase-adminsdk-*.json`).
+/// - Globs: `ssh_host_*_key` (starts `ssh_host_`, ends `_key`), `private*.asc` and
+///   `secret*.asc` (starts `private` or `secret`, ends `.asc`). Other `.asc` files, such as
+///   `docs/*.asc`, stay readable.
 /// - Suffixes: `.pem`, `.key`, `.p12`, `.pfx`, `.env`, `.keystore`, `.jks`, `.tfvars`,
-///   `.tfvars.json`, `.tfstate`, `.tfstate.backup`, `.p8`, `.ppk`, `.gpg`.
+///   `.tfvars.json`, `.tfstate`, `.tfstate.backup`, `.p8`, `.ppk`, `.gpg`, `.kdbx`.
 /// - Timestamped Terraform backups: a name containing `.tfstate.` and ending `.backup`
 ///   (`terraform.tfstate.1700000000.backup`).
 ///
 /// Bare `credentials` and `secrets.*` names other than the two above stay readable.
-/// Directory-scoped rules look at the component directly above the name, so a nested
-/// `sub/.docker/config.json` is refused too.
+/// Directory-scoped rules look at the component directly above the name, or at the whole
+/// directory chain for the longer paths, so a nested `sub/.docker/config.json` is refused too.
 pub(crate) fn secret(path: &str) -> bool {
     let lower = path.to_lowercase();
-    let parts: Vec<&str> = lower.split('/').collect();
+    let raw: Vec<&str> = lower
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    secret_components(&raw) || secret_components(&resolve_parent_refs(&raw))
+}
+
+/// `parts` with each `..` resolved against the component before it. A `..` with nothing
+/// to resolve (at the start, or after another `..`) is kept.
+fn resolve_parent_refs<'a>(parts: &[&'a str]) -> Vec<&'a str> {
+    let mut resolved: Vec<&str> = Vec::with_capacity(parts.len());
+    for &part in parts {
+        if part == ".." && resolved.last().is_some_and(|last| *last != "..") {
+            resolved.pop();
+        } else {
+            resolved.push(part);
+        }
+    }
+    resolved
+}
+
+/// Whether one of the normalised, lowercased `parts` is a secret (see [`secret`]).
+fn secret_components(parts: &[&str]) -> bool {
     parts.iter().enumerate().any(|(index, &part)| {
         // The component directly above this one, for the rules scoped to a directory.
         let parent = index.checked_sub(1).map(|up| parts[up]);
+        // The components from the root down to this one, for the rules scoped to a path.
+        let chain = &parts[..=index];
         let json = Path::new(part).extension().is_some_and(|ext| ext == "json");
         matches!(
             part,
@@ -95,20 +133,45 @@ pub(crate) fn secret(path: &str) -> bool {
                 | "kubeconfig.yaml"
                 | "kubeconfig.yml"
                 | "application_default_credentials.json"
-        ) || (parent == Some(".config") && part == "gh")
+                | "_netrc"
+                | ".my.cnf"
+                | ".terraformrc"
+                | "terraform.rc"
+                | "auth.json"
+                | ".bash_history"
+                | "gradle.properties"
+                | ".rclone.conf"
+                | ".yarnrc.yml"
+                | ".dev.vars"
+                | "service_account.json"
+        ) || (parent == Some(".config") && matches!(part, "gh" | "hub"))
             || (parent == Some(".docker") && part == "config.json")
             || (parent == Some(".cargo") && matches!(part, "credentials" | "credentials.toml"))
             || (parent == Some(".gem") && part == "credentials")
+            || chain.ends_with(&[".mc", "config.json"])
+            || chain.ends_with(&[".m2", "settings.xml"])
+            || chain.ends_with(&[".pip", "pip.conf"])
+            || chain.ends_with(&[".config", "rclone", "rclone.conf"])
+            || chain.ends_with(&[".config", "gcloud", "credentials.db"])
+            || chain.ends_with(&[".config", "gcloud", "access_tokens.db"])
             || (part.contains(".tfstate.") && part.ends_with(".backup"))
             || part.starts_with(".env")
             || (part.starts_with("secrets.y") && part.ends_with("ml"))
             || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
                 .iter()
                 .any(|prefix| part.starts_with(prefix))
-            || (["credentials", "service-account", "client_secret"]
-                .iter()
-                .any(|prefix| part.starts_with(prefix))
+            || ([
+                "credentials",
+                "service-account",
+                "client_secret",
+                "firebase-adminsdk-",
+            ]
+            .iter()
+            .any(|prefix| part.starts_with(prefix))
                 && json)
+            || (part.starts_with("ssh_host_") && part.ends_with("_key"))
+            || ((part.starts_with("private") || part.starts_with("secret"))
+                && part.ends_with(".asc"))
             || [
                 ".pem",
                 ".key",
@@ -124,6 +187,7 @@ pub(crate) fn secret(path: &str) -> bool {
                 ".p8",
                 ".ppk",
                 ".gpg",
+                ".kdbx",
             ]
             .iter()
             .any(|suffix| part.ends_with(suffix))
@@ -685,6 +749,168 @@ mod tests {
             ".azure.md",
             "docs/password-store.md",
             "gcloud/config.json",
+        ] {
+            assert!(!secret(path), "{path} must stay readable");
+        }
+    }
+
+    /// Issue #523: common credential files that #471 did not list (package and database
+    /// clients, Terraform and Maven settings, cloud CLIs, KeePass, shell history), with
+    /// case variants. Directory-scoped names need their directory chain.
+    #[test]
+    fn secret_covers_issue_523_credential_files() {
+        let mut missed = vec![];
+        for path in [
+            "_netrc",
+            "home/_NETRC",
+            ".my.cnf",
+            ".My.Cnf",
+            "db/.my.cnf",
+            ".terraformrc",
+            "terraform.rc",
+            "Terraform.RC",
+            "app/auth.json",
+            "auth.json",
+            "secrets.kdbx",
+            "vault/Passwords.KDBX",
+            ".bash_history",
+            "home/.Bash_History",
+            "gradle.properties",
+            "app/Gradle.Properties",
+            ".rclone.conf",
+            ".yarnrc.yml",
+            ".dev.vars",
+            "worker/.DEV.VARS",
+            "service_account.json",
+            "keys/Service_Account.JSON",
+            "firebase-adminsdk-x.json",
+            "firebase-adminsdk-abc12-9f8e7.json",
+            "ssh_host_rsa_key",
+            "etc/ssh_host_ed25519_key",
+            "private.asc",
+            "keys/Private-release.ASC",
+            "secret-key.asc",
+            "secrets.asc",
+            ".m2/settings.xml",
+            "home/.m2/settings.xml",
+            "build/.M2/Settings.XML",
+            ".config/rclone/rclone.conf",
+            "x/.config/rclone/rclone.conf",
+            ".config/gcloud/credentials.db",
+            ".config/gcloud/access_tokens.db",
+            ".pip/pip.conf",
+            "home/.PIP/Pip.conf",
+            ".mc/config.json",
+            "home/.mc/config.json",
+            ".config/hub",
+            "home/.config/hub",
+        ] {
+            if !secret(path) {
+                missed.push(path);
+            }
+        }
+        assert!(missed.is_empty(), "not secret: {missed:?}");
+    }
+
+    /// Issue #523: `.` and empty components name nothing, so every spelling of a listed
+    /// path is matched as the plain path. A `..` is resolved as well, and a path is a
+    /// secret when either its raw or its resolved reading is.
+    #[test]
+    fn secret_drops_dot_and_empty_components_before_matching() {
+        let mut missed = vec![];
+        for path in [
+            ".docker//config.json",
+            ".cargo/./credentials.toml",
+            ".config/./gh/hosts.yml",
+            "./.my.cnf",
+            "a//b/.npmrc",
+            "./.docker/config.json",
+            ".m2/./settings.xml",
+            ".config//rclone/rclone.conf",
+            ".config/hub//x",
+            ".mc//config.json",
+            ".config/gcloud/./credentials.db",
+            ".pip/./pip.conf",
+            "./src/../.env",
+            "a/.docker/x/../config.json",
+            ".config/rclone/x/../rclone.conf",
+            ".m2/x/../../.m2/settings.xml",
+            "a/../.my.cnf",
+            "../.docker/config.json",
+        ] {
+            if !secret(path) {
+                missed.push(path);
+            }
+        }
+        assert!(missed.is_empty(), "not secret: {missed:?}");
+    }
+
+    /// Issue #523 near misses: ordinary files that share a name stem with the new
+    /// credential names, and the same names outside their directories. `docs/*.asc`
+    /// stays readable because only `private*.asc` and `secret*.asc` are refused.
+    #[test]
+    fn secret_leaves_issue_523_near_misses_alone() {
+        for path in [
+            "README.md",
+            "src/auth.rs",
+            "auth.rs",
+            "auth.json.md",
+            "author.json",
+            "docs/authors.json",
+            "oauth.json",
+            "settings.xml",
+            "app/settings.xml",
+            "m2/settings.xml",
+            "docs/.m2/readme.md",
+            "config.json",
+            "docs/config.json",
+            "app/config.json",
+            ".mc/config.yml",
+            ".mc/config.json.md",
+            "docs/mc/config.json",
+            "docs/a.asc",
+            "docs/signing.asc",
+            "keys/public.asc",
+            "public.asc",
+            "private.asc.md",
+            "docs/private-notes.md",
+            "docs/secret-plan.md",
+            "rclone.conf.md",
+            "config/rclone.md",
+            "docs/rclone/rclone.conf.md",
+            ".config/rclone.md",
+            ".config/gcloud/config.json",
+            ".config/gcloud/credentials.db.md",
+            ".config/hub.md",
+            ".config/hubspot.json",
+            "hub/x",
+            "src/hub",
+            ".pip/pip.conf.md",
+            "pip.conf.md",
+            "terraform.rc.md",
+            "src/terraform.rs",
+            "terraformrc.md",
+            "_netrc.md",
+            "gradle.properties.md",
+            "src/gradle.rs",
+            "firebase.json",
+            "firebase-adminsdk.md",
+            "firebase-adminsdk-x.json.md",
+            "service_account_notes.json",
+            "docs/service_account.md",
+            "ssh_host_rsa_key.pub",
+            "ssh_host_notes.md",
+            "kdbx.md",
+            "docs/keepass.md",
+            "notes.kdbx.md",
+            "bash_history.md",
+            ".dev.vars.md",
+            "./README.md",
+            "docs//config.json",
+            "./src/auth.rs",
+            "src/./author.json",
+            "x/../README.md",
+            "a/../b/settings.xml",
         ] {
             assert!(!secret(path), "{path} must stay readable");
         }

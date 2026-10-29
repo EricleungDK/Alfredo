@@ -1718,6 +1718,13 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
   `kubeconfig.yaml`, `kubeconfig.yml` and `application_default_credentials.json`;
+  `_netrc`, `.my.cnf`, `.terraformrc`, `terraform.rc`, `auth.json` (Composer),
+  `.bash_history`, `gradle.properties`, `.rclone.conf`, `.yarnrc.yml`, `.dev.vars` and
+  `service_account.json`; `firebase-adminsdk-*.json`; `ssh_host_*_key`; `private*.asc`
+  and `secret*.asc` (other `.asc` files stay readable); `.m2/settings.xml`,
+  `.mc/config.json`, `.pip/pip.conf`, `.config/rclone/rclone.conf`,
+  `.config/gcloud/credentials.db`, `.config/gcloud/access_tokens.db` and `.config/hub`
+  (only these files in those directories; `.config/hub` covers everything under it);
   `.docker/config.json`, `.cargo/credentials`,
   `.cargo/credentials.toml` and `.gem/credentials` (only these files in those
   directories); names starting `id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa`
@@ -1725,10 +1732,14 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `client_secret*.json`; `secrets.y*ml` (starts `secrets.y`, ends `ml`);
   `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars`,
   `*.tfvars.json`, `*.tfstate`, `*.tfstate.backup` and timestamped `*.tfstate.*.backup`,
-  `*.p8`, `*.ppk` and `*.gpg`. Names that
+  `*.p8`, `*.ppk`, `*.gpg` and `*.kdbx`. Names that
   only look similar stay readable, for example `environment.rs`, `keys.md`,
   `credentials.md`, `secrets.md`, `ssh_client.rs`, `terraform.md`, `.docker/daemon.json`
   and `.cargo/config.toml`.
+  Before matching, `.` and empty path components are dropped and `..` is resolved too, so
+  `.docker//config.json` and `.cargo/./credentials.toml` are refused, and a path is refused
+  when either its raw or its resolved form is a secret. Also readable: `author.json`,
+  `settings.xml` outside `.m2/`, `config.json` outside `.docker/` and `.mc/`, and `docs/*.asc`.
   Limits: the list matches names only; file content is never scanned. Git's rename and
   copy detection finds a secret's copy or rename within git's similarity threshold, in
   git_diff and in git_commit (staged files, and unstaged files that the commit adds, are
@@ -2043,6 +2054,13 @@ default false), `timeout_seconds` (1–600, default 120).
   Limit: the Coding Workspace is writable and mounted as is, so if it contains the cargo
   home itself (a workspace at `$HOME`, or a dotfiles repository there), its credentials are
   readable; the hiding applies only when the workspace does not contain `~/.cargo`.
+  A workspace with no root `.git` gets a read-only placeholder file at `.git` for the
+  run, so `git init`, `mkdir .git` and `ln -s` fail inside it (issue #522). The placeholder
+  is removed when the last run holding it ends; if the process is killed mid-run, the
+  marker file stays until the next sandboxed run in that workspace replaces it, and the git
+  tools refuse it meanwhile.
+  Every capability is dropped (`--cap-drop ALL`), so even as root the sandbox cannot remount
+  a read-only bind and write `.git` or the host (#517).
   The card reads `? Approve run_command · run sh test.sh` with
   `cwd . · sandboxed · network off · …` and the exact command.
 - **Escalated.** `escalate: true` runs on the host with your environment and network

@@ -1,5 +1,5 @@
 use alfredo_tui::{
-    planner::{Plan, Step},
+    planner::{Plan, Planner, SavedDraft, Step},
     provider::Ollama,
     task_control::TaskControl,
     tasks::{Action, Request, TaskStatus, TaskStore, WorkPolicy},
@@ -1914,6 +1914,12 @@ fn manual_plan_shows_validation_warnings_without_blocking_save() {
         .unwrap();
     wait(&mut control, |c| c.planner.draft.is_some());
     server.join().unwrap();
+    // The findings come from a background lint (#519): wait for them before the panel shows them.
+    wait(&mut control, |c| {
+        c.planner
+            .preview()
+            .contains("Validation warnings · /plan-save still allowed")
+    });
     let preview = control.planner.preview();
     assert!(
         preview.contains("Validation warnings · /plan-save still allowed"),
@@ -1926,6 +1932,47 @@ fn manual_plan_shows_validation_warnings_without_blocking_save() {
     control.command(&runtime, "/plan-save", "fixture").unwrap();
     wait(&mut control, |c| !c.pending);
     assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 2);
+}
+
+/// The draft panel is drawn on every frame, so its view must not run the lint (git may
+/// stall, #519): the first view shows the findings as pending, and `poll` brings them.
+#[test]
+fn plan_view_does_not_run_the_lint_on_the_draw_path() {
+    let mut draft = plan();
+    draft.tasks[0].policy.check = vec!["alfredo-no-such-tool-x9".into(), "run".into()];
+    let mut planner = Planner::default();
+    planner
+        .restore(SavedDraft {
+            plan: draft,
+            revision: 1,
+            origin: None,
+        })
+        .unwrap();
+    let first = planner.view();
+    assert!(
+        first.contains("Validation warnings · checking"),
+        "first view must not carry findings computed on the draw path: {first}"
+    );
+    assert!(
+        !first.contains("is not available in the check sandbox"),
+        "{first}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !planner
+        .view()
+        .contains("is not available in the check sandbox")
+    {
+        planner.poll();
+        assert!(Instant::now() < deadline, "findings never arrived");
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        planner
+            .view()
+            .contains("Validation warnings · /plan-save still allowed"),
+        "{}",
+        planner.view()
+    );
 }
 
 /// Mirrors the console route for `/plan-cancel`: a durable planner command when
