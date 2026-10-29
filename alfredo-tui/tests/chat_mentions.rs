@@ -152,6 +152,83 @@ fn a_fifo_gitignore_refuses_promptly_instead_of_hanging() {
     assert_eq!(out.notices.len(), 1, "{:?}", out.notices);
 }
 
+fn fifo(path: &Path) {
+    let status = Command::new("mkfifo").arg(path).status().unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn a_fifo_excludes_file_in_the_repository_config_does_not_stall_an_attach() {
+    let dir = repo();
+    let root = dir.path();
+    fifo(&root.join("x.fifo"));
+    git(
+        root,
+        &[
+            "config",
+            "core.excludesFile",
+            &format!("{}/x.fifo", root.display()),
+        ],
+    );
+    fs::write(root.join("notes.txt"), "untracked\n").unwrap();
+    fs::write(root.join(".gitignore"), "hidden.txt\n").unwrap();
+    fs::write(root.join("hidden.txt"), "ignored\n").unwrap();
+    let started = std::time::Instant::now();
+    let out = attach(root, "see @notes.txt and @hidden.txt");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert!(out.block.contains("FILE notes.txt"), "{out:?}");
+    assert!(!out.block.contains("ignored"), "{out:?}");
+    assert!(
+        out.notices
+            .iter()
+            .any(|n| n.starts_with("@hidden.txt: not attached (ignored by .gitignore")),
+        "{:?}",
+        out.notices
+    );
+}
+
+#[test]
+fn a_fifo_include_in_the_repository_config_refuses_an_attach_naming_the_include() {
+    let dir = repo();
+    let root = dir.path();
+    fifo(&root.join("x.fifo"));
+    git(
+        root,
+        &[
+            "config",
+            "include.path",
+            &format!("{}/x.fifo", root.display()),
+        ],
+    );
+    fs::write(root.join("notes.txt"), "untracked\n").unwrap();
+    fs::write(root.join("more.txt"), "untracked\n").unwrap();
+    let started = std::time::Instant::now();
+    let out = attach(root, "see @notes.txt and @more.txt");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert!(out.block.is_empty(), "{out:?}");
+    assert_eq!(out.notices.len(), 2, "{:?}", out.notices);
+    assert!(
+        out.notices[0].starts_with("@notes.txt: not attached (")
+            && out.notices[0].contains("include.path"),
+        "{:?}",
+        out.notices
+    );
+    assert!(
+        out.notices[1].starts_with("@more.txt: not attached (")
+            && out.notices[1].contains("failed earlier"),
+        "{:?}",
+        out.notices
+    );
+}
+
 #[test]
 fn unsafe_and_unreadable_paths_are_refused_with_reasons() {
     let dir = repo();
