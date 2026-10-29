@@ -981,7 +981,9 @@ fn run_after_the_dependency_was_just_accepted_is_not_refused_by_a_stale_snapshot
     }
     // Task 1 is already accepted in the store; task 2 depends on it and is approved.
     let (store, revision) = task_in_status(&fixture, TaskStatus::Accepted, false);
-    store.transact(proposal("child", revision, vec![1])).unwrap();
+    store
+        .transact(proposal("child", revision, vec![1]))
+        .unwrap();
     store
         .transact(permit_request("permit", revision + 1, 2))
         .unwrap();

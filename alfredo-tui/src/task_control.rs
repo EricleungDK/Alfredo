@@ -1660,11 +1660,21 @@ impl TaskControl {
             .iter()
             .find(|candidate| candidate.id == task)
             .ok_or("Task not found")?;
-        for dependency in &selected.dependencies {
-            // The worker enforces the same rule; refusing here records no start notice.
-            snapshot
-                .dependency_source(*dependency)
-                .map_err(|error| error.to_string())?;
+        // The store enforces this rule for non-repair tasks; refusing here records
+        // no start notice. The view may predate an acceptance, so a refusal is
+        // only final when the store itself agrees.
+        if selected.repair_of.is_none()
+            && selected
+                .dependencies
+                .iter()
+                .any(|dependency| snapshot.dependency_source(*dependency).is_err())
+        {
+            let current = self.store.snapshot()?;
+            for dependency in &selected.dependencies {
+                current
+                    .dependency_source(*dependency)
+                    .map_err(|error| error.to_string())?;
+            }
         }
         if let Some(blocker) = self.scope_status.run_blocker(snapshot, selected) {
             return Err(blocker);
