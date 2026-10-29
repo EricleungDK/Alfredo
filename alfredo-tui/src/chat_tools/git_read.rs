@@ -747,6 +747,16 @@ const REPOSITORY_FILE_KEYS: [&str; 10] = [
     "diff.orderFile=/dev/null",
 ];
 
+/// The `-c` value that points git at `path` as the excludes file. A path that is not valid
+/// UTF-8 cannot be written faithfully (a lossy copy names another, missing file, which git
+/// skips silently, so ignored files would show), so it is refused (issue #506).
+fn excludes_override(path: &Path) -> Result<String, String> {
+    match path.to_str() {
+        Some(text) => Ok(format!("core.excludesFile={text}")),
+        None => Err("core.excludesFile path is not valid UTF-8 and cannot be passed to git faithfully; refused".to_string()),
+    }
+}
+
 /// Tracked and untracked-but-not-ignored files under `rel` (a workspace-relative `/` path,
 /// empty for the whole workspace), as git lists them: `.gitignore` files at any depth,
 /// `.git/info/exclude` and the global excludes file (`excludes`; the hardened environment
@@ -761,7 +771,7 @@ pub(crate) fn list_unignored(
     limit: usize,
 ) -> Result<Vec<String>, String> {
     refuse_filters(root)?;
-    let config = excludes.map(|path| format!("core.excludesFile={}", path.display()));
+    let config = excludes.map(excludes_override).transpose()?;
     let mut args = vec!["--literal-pathspecs"];
     if let Some(config) = &config {
         args.extend(["-c", config]);
@@ -789,7 +799,7 @@ pub(crate) fn is_ignored(root: &Path, rel: &str, excludes: Option<&Path>) -> Res
     // The verification below reads the config with its includes; a FIFO target would stall it
     // (issue #474).
     refuse_includes(root, INCLUDES_NOT_RUN)?;
-    let config = excludes.map(|path| format!("core.excludesFile={}", path.display()));
+    let config = excludes.map(excludes_override).transpose()?;
     // check-ignore rejects `--literal-pathspecs`; the `./` prefix keeps a directory named
     // like pathspec magic (`:(top)`) a plain path.
     let rel = format!("./{rel}");

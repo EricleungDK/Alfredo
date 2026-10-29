@@ -253,6 +253,14 @@ fn ignored_untracked(root: &Path, relative: &str, check_failed: &mut bool) -> Op
     if *check_failed {
         return Some("the ignore check failed earlier in this prompt; refused".into());
     }
+    // Only a workspace that is the top of its own repository has a verified git directory; one
+    // inside a larger repository is refused, not looked up in the parent (issue #506).
+    if std::fs::symlink_metadata(root.join(".git")).is_err() {
+        return Some(
+            "the Coding Workspace is not the top of a git repository (it may be inside a larger one); the ignore check cannot run safely, so the file is not attached"
+                .into(),
+        );
+    }
     // One budget for the whole check; inside a completion call the outer budget stays. The
     // repository's own excludes file counts when it is an ordinary file; any other kind is
     // refused unopened.
