@@ -1288,6 +1288,137 @@ fn git_log_refuses_a_config_include_before_git_runs() {
     }
 }
 
+/// Issue #492 (1): an include refuses every chat git read tool, so the refusal of
+/// `git_status` or a working-tree `git_diff` must not claim `git_log` or `git_diff` with a
+/// base and target still work.
+#[test]
+fn an_include_refusal_does_not_say_other_git_tools_still_work() {
+    let repo = Repo::new();
+    append(
+        &repo.root.join(".git/config"),
+        "[include]\n\tpath = /nonexistent/x\n",
+    );
+    fs::write(repo.root.join("README.md"), "# Demo\ndirty\n").unwrap();
+    for (tool, arguments) in [("git_status", json!({})), ("git_diff", json!({}))] {
+        let output = repo.run(tool, arguments);
+        assert!(output.starts_with("error:"), "{tool}: {output}");
+        assert!(!output.contains("still work"), "{tool}: {output}");
+        assert!(
+            output.contains("an include refuses every chat git read tool"),
+            "{tool}: {output}"
+        );
+        assert!(output.contains("run_command"), "{tool}: {output}");
+    }
+    let output = repo.run("git_log", json!({}));
+    assert!(output.starts_with("error:"), "git_log: {output}");
+}
+
+/// Issue #492 (2): with only a filter driver (no include) `git_status` is refused and says
+/// `git_log` and `git_diff` with a base and target work, which they do.
+#[test]
+fn a_filter_refusal_says_log_and_base_target_diff_still_work() {
+    let repo = Repo::new();
+    repo.go_branch();
+    append(
+        &repo.root.join(".git/config"),
+        "[filter \"f\"]\n\tclean = cat\n",
+    );
+    let output = repo.run("git_status", json!({}));
+    assert!(output.starts_with("error:"), "{output}");
+    assert!(
+        output.contains("git_log and git_diff with base and target still work"),
+        "{output}"
+    );
+    assert!(!output.contains("an include refuses"), "{output}");
+    let output = repo.run("git_log", json!({}));
+    assert!(!output.starts_with("error:"), "{output}");
+    let output = repo.run(
+        "git_diff",
+        json!({"base": "main", "target": "alfredo/go-7"}),
+    );
+    assert!(!output.starts_with("error:"), "{output}");
+}
+
+/// Issue #492 (3): a symbolic link in the git directory is named by its git-directory-relative
+/// path, with what to do about it, by every chat git read tool; no absolute host path.
+#[test]
+fn a_symlink_in_the_git_directory_is_named_with_its_relative_path() {
+    let repo = Repo::new();
+    let exclude = repo.root.join(".git/info/exclude");
+    let _ = fs::remove_file(&exclude);
+    fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("/etc/hostname", &exclude).unwrap();
+    for tool in ["git_status", "git_log", "git_diff", "git_branch"] {
+        let output = dispatch_promptly(&repo.root, tool);
+        assert!(
+            output.starts_with("error:") && output.contains("`info/exclude`"),
+            "{tool}: {output}"
+        );
+        assert!(output.contains("is a symbolic link"), "{tool}: {output}");
+        assert!(
+            output.contains("Remove or replace it") && output.contains("run_command"),
+            "{tool}: {output}"
+        );
+        let root = repo.root.to_str().unwrap();
+        assert!(!output.contains(root), "{tool}: absolute path: {output}");
+    }
+}
+
+/// Issue #492 (4): a FIFO or socket deep in the git directory (an LFS agent socket) is named
+/// by its relative path in a grammatical sentence, not "has a agent.sock".
+#[test]
+fn a_socket_or_fifo_in_the_git_directory_is_named_in_a_grammatical_sentence() {
+    for use_socket in [true, false] {
+        let repo = Repo::new();
+        let path = repo.root.join(".git/lfs/tmp/agent.sock");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _listener = if use_socket {
+            Some(std::os::unix::net::UnixListener::bind(&path).unwrap())
+        } else {
+            mkfifo(&path);
+            None
+        };
+        for tool in ["git_status", "git_log"] {
+            let output = dispatch_promptly(&repo.root, tool);
+            assert!(
+                output.starts_with("error:")
+                    && output.contains("`lfs/tmp/agent.sock` in the repository's git directory is a FIFO, socket, device or link"),
+                "{tool}: {output}"
+            );
+            assert!(!output.contains("has a agent.sock"), "{tool}: {output}");
+            assert!(output.contains("run_command"), "{tool}: {output}");
+            let root = repo.root.to_str().unwrap();
+            assert!(!output.contains(root), "{tool}: absolute path: {output}");
+        }
+    }
+}
+
+/// Issue #492 (5): a control or format character in the offending entry's name shows as
+/// `<U+XXXX>`, never raw (as #313/#361).
+#[test]
+fn a_control_character_in_a_refused_entry_name_is_escaped() {
+    for (relative, link, shown) in [
+        (
+            "lfs/bad\u{1b}name\u{202e}txt",
+            false,
+            "lfs/bad<U+001B>name<U+202E>txt",
+        ),
+        ("info/new\nline", true, "info/new<U+000A>line"),
+    ] {
+        let repo = Repo::new();
+        let path = repo.root.join(".git").join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        if link {
+            std::os::unix::fs::symlink("/etc/hostname", &path).unwrap();
+        } else {
+            mkfifo(&path);
+        }
+        let output = dispatch_promptly(&repo.root, "git_log");
+        assert!(output.contains(shown), "{output}");
+        assert!(!output.contains(['\u{1b}', '\u{202e}', '\n']), "{output:?}");
+    }
+}
+
 /// Issue #497: a partial clone (`extensions.partialClone`, a promisor remote whose
 /// `uploadpack` is a program the repository chose) with `object` missing from the store.
 /// Returns the repo and the marker file the program would create.

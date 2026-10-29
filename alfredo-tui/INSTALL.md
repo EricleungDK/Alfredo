@@ -8,6 +8,12 @@ the GNU/Linux host recorded in `BUILD.json`; older glibc versions are not tested
 
 - Linux x86-64 (WSL2 works).
 - Git at `/usr/bin/git`; a repository with at least one commit.
+  Alfredo refuses a repository whose Git config sets filters (`filter.*`), includes
+  (`include.*`, `includeIf.*`), a partial clone (`extensions.partialClone`, `remote.*.promisor`),
+  transport or ssh/proxy programs (`remote.*.uploadPack`, `core.sshCommand`, `core.gitProxy`),
+  `protocol.*.allow`, or `core.excludesFile`, `core.attributesFile`, `mailmap.file`,
+  `diff.orderFile`: `/go`, `--go` and `--doctor` name the key and the fix,
+  `git config --local --unset KEY`.
 - Ollama with an installed model (`ollama pull qwen2.5-coder:14b`).
 - For coding workers: `/usr/bin/bwrap` (bubblewrap) and `/usr/bin/prlimit`
   (util-linux). Debian/Ubuntu: `sudo apt install git bubblewrap util-linux`.

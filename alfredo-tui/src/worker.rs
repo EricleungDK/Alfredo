@@ -911,6 +911,84 @@ pub(crate) fn qualification_key(config: &str) -> Option<&str> {
         })
 }
 
+/// Start of every owner-facing refusal built by [`config_refusal`]; callers that wrap a
+/// workspace error (`--doctor`) match on it to show the sentence unchanged.
+pub(crate) const CONFIG_REFUSAL_PREFIX: &str = "Alfredo will not run in this repository";
+
+/// `key` as git documents it. `config --list` prints names lowercased; the owner who
+/// reads the sentence types the fix, so the camel-cased spelling is shown. Subsection
+/// names keep the case git printed.
+fn written_key(key: &str) -> String {
+    let key: String = key.chars().filter(|c| !c.is_control()).collect();
+    if let Some(rest) = key.strip_prefix("includeif.") {
+        return format!("includeIf.{rest}");
+    }
+    let known = match key.as_str() {
+        "core.excludesfile" => "core.excludesFile",
+        "core.attributesfile" => "core.attributesFile",
+        "core.sshcommand" => "core.sshCommand",
+        "core.gitproxy" => "core.gitProxy",
+        "diff.orderfile" => "diff.orderFile",
+        "extensions.partialclone" => "extensions.partialClone",
+        _ => "",
+    };
+    if !known.is_empty() {
+        return known.into();
+    }
+    if key.starts_with("remote.") {
+        for (lower, written) in [
+            (".uploadpack", ".uploadPack"),
+            (".receivepack", ".receivePack"),
+        ] {
+            if let Some(head) = key.strip_suffix(lower) {
+                return format!("{head}{written}");
+            }
+        }
+    }
+    key
+}
+
+/// `text` as one shell word: bare when it holds only safe characters, else single-quoted.
+fn shell_word(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
+    {
+        text.into()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+/// The owner-facing refusal for a repository config `key` (as printed by `config --list`):
+/// the key as written, why it is refused, and the command that removes it (#525).
+pub(crate) fn config_refusal(key: &str) -> String {
+    let shown = written_key(key);
+    format!(
+        "{CONFIG_REFUSAL_PREFIX}: its Git config sets \"{shown}\", and Git can run a program or read \
+         a file that setting names (filters, includes, partial clones, ssh and proxy commands, \
+         exclude and attributes files). Remove it with: git config --local --unset {}",
+        shell_word(&shown)
+    )
+}
+
+/// Why `workspace` cannot run coding work because of its Git config, read the bounded,
+/// hardened way (`git config --list` through [`git_blocking`], never an unbounded git). `Ok`
+/// also when the config cannot be read: the worker launch check still refuses (#525).
+pub(crate) fn repository_blocker(workspace: &Path) -> std::result::Result<(), String> {
+    let Ok(ran) = git_blocking(workspace, &REPOSITORY_CONFIG_ARGS) else {
+        return Ok(());
+    };
+    if !ran.success {
+        return Ok(());
+    }
+    match qualification_key(&String::from_utf8_lossy(&ran.stdout)) {
+        Some(key) => Err(config_refusal(key)),
+        None => Ok(()),
+    }
+}
+
 /// Keys that make git run a repository-chosen program or follow another file: filter
 /// drivers, includes, partial-clone promisors and their transport programs, ssh and proxy
 /// commands (#467), and the file-valued keys (#509: exclude, attributes, mailmap and diff
@@ -3955,6 +4033,79 @@ mod host_git_tests {
         assert!(!super::config_needs_qualification(
             "remote.origin.url=/x\nremote.origin.fetch=+refs/*:refs/*\n"
         ));
+    }
+
+    /// Issue #525: the refusal shows each key as git documents it (config lists them
+    /// lowercased), the reason, and the exact fix; an odd key is quoted for the shell.
+    #[test]
+    fn config_refusal_names_the_key_as_written_and_the_fix() {
+        for (listed, written) in [
+            ("filter.lfs.clean", "filter.lfs.clean"),
+            ("include.path", "include.path"),
+            ("core.excludesfile", "core.excludesFile"),
+            ("core.attributesfile", "core.attributesFile"),
+            ("core.sshcommand", "core.sshCommand"),
+            ("core.gitproxy", "core.gitProxy"),
+            ("diff.orderfile", "diff.orderFile"),
+            ("mailmap.file", "mailmap.file"),
+            ("extensions.partialclone", "extensions.partialClone"),
+            ("remote.Origin.uploadpack", "remote.Origin.uploadPack"),
+            ("remote.origin.receivepack", "remote.origin.receivePack"),
+            ("remote.origin.promisor", "remote.origin.promisor"),
+            ("includeif.gitdir:/x/.path", "includeIf.gitdir:/x/.path"),
+        ] {
+            let message = super::config_refusal(listed);
+            assert!(
+                message.starts_with(super::CONFIG_REFUSAL_PREFIX),
+                "{message}"
+            );
+            assert!(
+                message.contains(&format!("sets \"{written}\"")),
+                "{message}"
+            );
+            assert!(
+                message.ends_with(&format!("git config --local --unset {written}")),
+                "{message}"
+            );
+            assert!(
+                message.contains("run a program or read a file"),
+                "{message}"
+            );
+        }
+        let odd = super::config_refusal("filter.a b'c\n.clean");
+        assert!(odd.contains("sets \"filter.a b'c.clean\""), "{odd}");
+        assert!(
+            odd.ends_with("git config --local --unset 'filter.a b'\\''c.clean'"),
+            "{odd}"
+        );
+    }
+
+    /// Issue #525: the preflight reads the config through the bounded git call and names
+    /// the first refused key; a clean repository, or a folder git cannot read, passes.
+    #[test]
+    fn repository_blocker_refuses_a_config_key_and_passes_a_clean_repository() {
+        let root = unique_root("blocker");
+        fixture_git(&root, &["init", "-q"]);
+        assert_eq!(super::repository_blocker(&root), Ok(()));
+        fixture_git(
+            &root,
+            &["config", "core.excludesFile", "/nonexistent/ignore"],
+        );
+        let message = super::repository_blocker(&root).unwrap_err();
+        assert!(message.contains("\"core.excludesFile\""), "{message}");
+        fixture_git(&root, &["config", "--unset", "core.excludesFile"]);
+        fixture_git(&root, &["config", "filter.lfs.clean", "cat"]);
+        let message = super::repository_blocker(&root).unwrap_err();
+        assert!(
+            message.ends_with("git config --local --unset filter.lfs.clean"),
+            "{message}"
+        );
+        fixture_git(&root, &["config", "--unset", "filter.lfs.clean"]);
+        assert_eq!(super::repository_blocker(&root), Ok(()));
+        let plain = unique_root("blocker-plain");
+        assert_eq!(super::repository_blocker(&plain), Ok(()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&plain);
     }
 
     /// Issue #509: the file-valued keys the chat read tier already refuses (#474) also stall

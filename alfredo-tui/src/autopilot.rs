@@ -811,6 +811,8 @@ impl Autopilot {
         if let Some(blocker) = crate::doctor::sandbox_blocker() {
             return Err(blocker);
         }
+        // Before any planner request: a refused config would fail every task at launch (#525).
+        crate::worker::repository_blocker(tasks.workspace())?;
         Ok(())
     }
 
