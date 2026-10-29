@@ -939,7 +939,7 @@ fn run_on_an_approved_task_with_an_unaccepted_dependency_still_names_the_depende
             action: Action::Approve { task: 2 },
         })
         .unwrap();
-    let (control, messages) = run_then_render(&store, &["/run 2"]);
+    let (_control, messages) = run_then_render(&store, &["/run 2"]);
     let joined = messages.join(" | ");
     assert!(joined.contains("Dependency #1 is not accepted"), "{joined}");
     assert!(!joined.contains("acquire a new worker owner"), "{joined}");
