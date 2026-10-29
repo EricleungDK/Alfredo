@@ -716,6 +716,46 @@ fn cancelling_an_unobserved_model_completion_never_publishes_a_late_draft() {
     assert!(fixture.store.snapshot().unwrap().tasks.is_empty());
 }
 
+/// Issue #504: the footer of the plan pane names Esc while a plan request is in flight.
+#[test]
+fn plan_pane_footer_names_esc_cancel_plan_only_while_a_request_is_in_flight() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let footer = |control: &TaskControl, width: u16| {
+        let app = alfredo_tui::model::App::new("fixture".into());
+        let mut terminal = Terminal::new(TestBackend::new(width, 32)).unwrap();
+        terminal
+            .draw(|frame| alfredo_tui::ui::draw_with_tasks(frame, &app, control))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row = usize::from(buffer.area.height) - 2;
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, row as u16)].symbol().to_string())
+            .collect::<String>()
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let (provider, _server) = server(String::new(), true, Duration::from_secs(2));
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider);
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control
+        .command(&runtime, "/plan Implement calculation", "fixture")
+        .unwrap();
+    assert!(control.planner.active() && control.planner.visible);
+    control.set_visible(true);
+    for width in [140, 100, 60] {
+        let line = footer(&control, width);
+        assert!(line.contains("Esc cancel plan"), "{width}: {line}");
+        assert!(line.contains("F1 help"), "{width}: {line}");
+    }
+    control
+        .command(&runtime, "/plan-cancel", "fixture")
+        .unwrap();
+    let idle = footer(&control, 140);
+    assert!(!idle.contains("Esc cancel plan"), "{idle}");
+}
+
 #[tokio::test]
 async fn committed_context_excludes_working_edits_symlinks_secrets_and_oversized_blobs() {
     let fixture = Fixture::new();
