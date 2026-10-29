@@ -477,7 +477,10 @@ fn list_files_notes_that_gitignore_is_not_applied_when_the_config_has_an_include
     let listed = workspace.run("list_files", json!({}));
     let first = listed.lines().next().unwrap_or_default();
     assert!(first.contains("note: .gitignore not applied"), "{listed}");
-    assert!(first.contains("include"), "{listed}");
+    assert!(
+        first.contains("repository config includes another file"),
+        "{listed}"
+    );
     assert!(lines(&listed).contains(&"src.txt"), "{listed}");
     assert!(lines(&listed).contains(&"a.log"), "{listed}");
 }
@@ -489,7 +492,10 @@ fn grep_notes_that_gitignore_is_not_applied_when_the_config_has_an_include() {
     let found = workspace.run("grep", json!({"pattern": "needle"}));
     let first = found.lines().next().unwrap_or_default();
     assert!(first.contains("note: .gitignore not applied"), "{found}");
-    assert!(first.contains("include"), "{found}");
+    assert!(
+        first.contains("repository config includes another file"),
+        "{found}"
+    );
     assert!(found.contains("src.txt:1:needle src"), "{found}");
 }
 

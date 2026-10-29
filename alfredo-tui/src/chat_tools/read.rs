@@ -668,6 +668,24 @@ mod tests {
 
     static ID: AtomicU64 = AtomicU64::new(0);
 
+    #[test]
+    fn the_gitignore_note_escapes_control_and_format_characters_and_caps_its_length() {
+        let note =
+            ignore_not_applied("repository config sets \"a\u{1b}[31m\u{202e}b\u{2028}c\"; rest")
+                .unwrap_or_default();
+        assert_eq!(
+            note,
+            "note: .gitignore not applied (repository config sets \"a<U+001B>[31m<U+202E>b<U+2028>c\")"
+        );
+        // Multibyte text is cut on a character boundary, at 200 characters.
+        let long = format!("repository config sets {}", "é".repeat(300));
+        let note = ignore_not_applied(&long).unwrap_or_default();
+        let shown = note.trim_start_matches("note: .gitignore not applied (");
+        assert_eq!(shown.trim_end_matches(')').chars().count(), 200);
+        assert!(note.ends_with("é)"), "{note}");
+        assert_eq!(ignore_not_applied("fatal: not a git repository"), None);
+    }
+
     fn tree(files: usize, size: usize) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "alfredo-grep-budget-{}-{}",
