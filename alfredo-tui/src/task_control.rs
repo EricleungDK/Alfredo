@@ -711,6 +711,20 @@ impl TaskControl {
                     .as_ref()
                     .is_none_or(|current| snapshot.revision >= current.revision)
                 {
+                    // A start notice for a task that was still proposed is stale
+                    // once its status moves on (for example, after /approve).
+                    if let Some(current) = &self.snapshot {
+                        for old in &current.tasks {
+                            if old.status == crate::tasks::TaskStatus::Proposed
+                                && snapshot
+                                    .tasks
+                                    .iter()
+                                    .any(|new| new.id == old.id && new.status != old.status)
+                            {
+                                self.dispatch.failures.remove(&old.id);
+                            }
+                        }
+                    }
                     self.snapshot = Some(snapshot);
                     if let Some(observations) = run_observations {
                         self.run_observations = observations;
@@ -1638,6 +1652,9 @@ impl TaskControl {
             .iter()
             .find(|candidate| candidate.id == task)
             .ok_or("Task not found")?;
+        if selected.status == crate::tasks::TaskStatus::Proposed {
+            return Err(crate::tasks::proposed_run(task));
+        }
         if let Some(blocker) = self.scope_status.run_blocker(snapshot, selected) {
             return Err(blocker);
         }

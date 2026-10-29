@@ -821,6 +821,11 @@ fn run_then_render(
         }
         messages.push(control.notice.clone());
     }
+    while control.pending {
+        control.poll();
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
     (control, messages)
 }
 
@@ -875,6 +880,29 @@ fn refused_run_leaves_no_start_paused_row_once_the_task_is_approved() {
 }
 
 #[test]
+fn a_start_notice_recorded_while_proposed_is_dropped_when_the_task_is_approved() {
+    let fixture = Fixture::new();
+    let store = fixture.store("stale-notice");
+    store.transact(proposal("task", 0, vec![])).unwrap();
+    store.transact(permit_request("permit", 1, 1)).unwrap();
+    let (mut control, _) = run_then_render(&store, &[]);
+    control.dispatch.failures.insert(1, "start refused".into());
+    control.dispatch.failures.insert(2, "other task".into());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    control.command(&runtime, "/tasks #1", "fixture").unwrap();
+    assert!(inspector_text(&control).contains("start paused: start refused"));
+    control.command(&runtime, "/approve 1", "fixture").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while control.pending {
+        control.poll();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(!control.dispatch.failures.contains_key(&1));
+    assert!(control.dispatch.failures.contains_key(&2));
+}
+
+#[test]
 fn run_on_an_approved_task_with_an_unaccepted_dependency_still_names_the_dependency() {
     let fixture = Fixture::new();
     let workspace = fixture.root.join("workspace");
@@ -915,7 +943,7 @@ fn run_on_an_approved_task_with_an_unaccepted_dependency_still_names_the_depende
     let joined = messages.join(" | ");
     assert!(joined.contains("Dependency #1 is not accepted"), "{joined}");
     assert!(!joined.contains("acquire a new worker owner"), "{joined}");
-    assert!(!inspector_text(&control).contains("Task #2 is proposed"));
+    assert!(store.snapshot().unwrap().tasks[1].run.is_none());
 }
 
 #[test]
