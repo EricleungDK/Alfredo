@@ -1170,7 +1170,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Key(mut key) if key.kind != KeyEventKind::Release => {
                     // Issue #504: Esc during a manual /plan request is `/plan-cancel` typed
                     // and sent, so the durable command path and its notice are the same.
-                    if key.code == KeyCode::Esc && work.tasks.esc_cancels_plan(&work.app) {
+                    if key.code == KeyCode::Esc
+                        && work
+                            .tasks
+                            .esc_cancels_plan(&work.app, pending_command.is_some())
+                    {
                         let index = work.app.selected;
                         work.app.sessions[index].insert("/plan-cancel");
                         key.code = KeyCode::Enter;

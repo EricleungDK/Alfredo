@@ -736,13 +736,22 @@ fn esc_cancels_only_a_manual_plan_request_with_an_empty_prompt_on_the_plan_pane(
     assert!(control.manual_plan_in_flight());
     assert!(control.esc_cancels_plan(&app, false));
     app.sessions[0].insert("typed");
-    assert!(!control.esc_cancels_plan(&app, false), "a typed prompt keeps Esc");
+    assert!(
+        !control.esc_cancels_plan(&app, false),
+        "a typed prompt keeps Esc"
+    );
     app.sessions[0].clear_draft();
     app.models_visible = true;
-    assert!(!control.esc_cancels_plan(&app, false), "the model picker owns Esc");
+    assert!(
+        !control.esc_cancels_plan(&app, false),
+        "the model picker owns Esc"
+    );
     app.models_visible = false;
     app.pane.focus = Some(alfredo_tui::side_pane::Section::Work);
-    assert!(!control.esc_cancels_plan(&app, false), "a focused pane owns Esc");
+    assert!(
+        !control.esc_cancels_plan(&app, false),
+        "a focused pane owns Esc"
+    );
     app.pane.focus = None;
     assert!(
         !control.esc_cancels_plan(&app, true),
@@ -760,9 +769,15 @@ fn esc_cancels_only_a_manual_plan_request_with_an_empty_prompt_on_the_plan_pane(
     app.sessions[0].begin().unwrap();
     app.sessions[0].clear_draft();
     assert!(app.sessions[0].status.active());
-    assert!(control.esc_cancels_plan(&app, false), "outranks a chat reply");
+    assert!(
+        control.esc_cancels_plan(&app, false),
+        "outranks a chat reply"
+    );
     control.set_visible(false);
-    assert!(!control.esc_cancels_plan(&app, false), "plan pane not shown");
+    assert!(
+        !control.esc_cancels_plan(&app, false),
+        "plan pane not shown"
+    );
     control.set_visible(true);
     // Autopilot's own planning stays with /stop.
     let status = |state| Status {
