@@ -1,4 +1,5 @@
 use alfredo_tui::at_lookup::{AtLookup, Found};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::{fs, path::Path, process::Command, time::Duration};
 use tokio::runtime::Runtime;
 
@@ -116,4 +117,44 @@ fn the_cached_listing_is_for_one_workspace() {
     );
     let _ = fs::remove_dir_all(&first);
     let _ = fs::remove_dir_all(&second);
+}
+
+#[test]
+fn only_plain_characters_and_backspace_keep_the_cached_listing() {
+    let (dir, runtime) = (repo("keys"), runtime());
+    let key = |code, modifiers| KeyEvent::new(code, modifiers);
+    let mut lookup = AtLookup::default();
+    for ended_by in [
+        key(KeyCode::Enter, KeyModifiers::NONE),
+        key(KeyCode::Tab, KeyModifiers::NONE),
+        key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        key(KeyCode::Char('x'), KeyModifiers::ALT),
+        key(KeyCode::Esc, KeyModifiers::NONE),
+    ] {
+        lookup.for_draft(&runtime, "@", 1, &dir);
+        answers(&mut lookup, &runtime);
+        fs::write(dir.join("gamma.txt"), "g\n").unwrap();
+        for kept in [
+            key(KeyCode::Char('g'), KeyModifiers::NONE),
+            key(KeyCode::Char('G'), KeyModifiers::SHIFT),
+            key(KeyCode::Backspace, KeyModifiers::NONE),
+        ] {
+            lookup.on_key(&kept);
+        }
+        lookup.for_draft(&runtime, "@ga", 3, &dir);
+        assert!(
+            answers(&mut lookup, &runtime)[0].paths.is_empty(),
+            "{ended_by:?}"
+        );
+        lookup.on_key(&ended_by);
+        lookup.for_draft(&runtime, "@ga", 3, &dir);
+        assert_eq!(
+            answers(&mut lookup, &runtime)[0].paths,
+            ["gamma.txt".to_string()],
+            "{ended_by:?}"
+        );
+        fs::remove_file(dir.join("gamma.txt")).unwrap();
+        lookup.cancel();
+    }
+    let _ = fs::remove_dir_all(&dir);
 }

@@ -1184,6 +1184,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let key_at = std::time::Instant::now();
                     work.app.sessions[index].note_key(key_at);
                     work.app.transient_rows.clear();
+                    at_lookup.on_key(&key);
                     if let Some(completion) = work.app.completion.as_mut() {
                         let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
                         match key.code {
@@ -2268,6 +2269,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Paste(_) if work.app.pane.focus.is_some() => {}
                 Event::Paste(text) => {
                     work.app.completion = None;
+                    at_lookup.cancel();
                     let session = &mut work.app.sessions[work.app.selected];
                     if session.replace_pending() {
                         session.clear_draft();

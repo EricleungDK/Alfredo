@@ -5,8 +5,9 @@
 //! runs on a runtime blocking worker and the loop applies [`AtLookup::poll`]'s answer on
 //! the wake that follows. Every request gets a generation: an answer for an older request
 //! is dropped, and while one lookup runs only the newest later request is kept. The
-//! candidate [`Listing`] is cached for the keystrokes of one `@` word and dropped as soon
-//! as the draft stops being one; vetting of the listed paths is never cached.
+//! candidate [`Listing`] is cached only while the user keeps typing or erasing one `@`
+//! word: any other key (Enter to accept or send, Ctrl+U, arrows, Esc), a paste, and a draft
+//! that is no longer an `@` word drop it, so the next word lists the repository afresh; vetting of the listed paths is never cached.
 use crate::chat_mentions::{self, Listing};
 use crate::commands::Completion;
 use std::{path::Path, path::PathBuf, sync::Arc};
@@ -79,6 +80,18 @@ impl AtLookup {
             self.queued = Some(request);
         } else {
             self.start(runtime, request);
+        }
+    }
+
+    /// Note a key before the draft is edited. Only plain characters and Backspace keep
+    /// the current `@` word going; every other key ends it ([`cancel`](Self::cancel)).
+    pub fn on_key(&mut self, key: &crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if !(plain && matches!(key.code, KeyCode::Char(_) | KeyCode::Backspace)) {
+            self.cancel();
         }
     }
 

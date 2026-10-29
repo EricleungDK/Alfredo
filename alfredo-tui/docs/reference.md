@@ -2195,7 +2195,8 @@ size limit, and it is kept in memory only (not restored after a restart).
   and names with invisible characters never appear; an exact match is listed first. Nothing is attached until the prompt is submitted.
   The lookup runs on a worker thread, never on the key path: keys echo at once, the list
   appears within about a second once the lookup finishes (the repository listing is kept
-  for the keystrokes of one `@` word, so later keys are quicker), and a result for a draft
+  only while you keep typing or erasing one `@` word, so later keys are quicker; Enter,
+  Tab, Esc, Ctrl+U, arrows or a paste end the word, and the next one lists afresh), and a result for a draft
   that has since changed is dropped.
 - Not included: directory mentions, mentions in `/go` goals or
   commands. `@wayfinder REQUEST` is unchanged. Planner and worker references still use
