@@ -2005,6 +2005,14 @@ credentials). Each call pauses for Approval like a file edit.
   redirect a push (`core.gitProxy`, `core.hooksPath`, `core.pager`, `gpg.*`,
   `merge.*.driver`, `remote.*.proxy`, `http.*`, `credential.*`, `receivepack`, `vcs`, …)
   are refused. The error names the key; run the command by hand if it is intended.
+- **Submodule ignore overrides (#516).** `git_merge`, `git_switch` to an existing branch
+  and `git_commit` with `files` naming a submodule (or a path inside or above one) are
+  refused before the card when `.gitmodules` (worktree, index, HEAD, or the branch being
+  merged or switched to) or your git config sets a `submodule.<name>.ignore` other than
+  `all`: with such an override git opens the submodule and runs the filters in its own
+  config when it merges, switches or stages it. A `.gitmodules` that is not a small regular
+  file is refused unopened. Repositories without the override, branch creation and
+  commits of other files are unaffected.
 - **Push URL.** Push takes only `https://`, `ssh://` and scp-style `user@host:path`
   remotes. A local path, `file://`, `git://`, `http://` or `ext::` URL is refused before
   the card. The card shows the push URLs (`pushurl` included). A push sends only the
