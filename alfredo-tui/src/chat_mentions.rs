@@ -2,7 +2,7 @@
 //! model-visible message, read through the same resolve-and-read path as the chat
 //! `read_file` tool. The transcript keeps what the user typed.
 use crate::chat_tools::{git_read, read, resolve};
-use std::{path::Path, process::Command, time::Duration};
+use std::{path::Path, time::Duration};
 
 /// Most distinct mentions read per prompt.
 pub const MAX_MENTIONS: usize = 8;
@@ -10,7 +10,8 @@ pub const MAX_MENTIONS: usize = 8;
 pub const MAX_BYTES: usize = 32 * 1024;
 /// Largest file a mention will read; bigger files are refused.
 const MAX_FILE: u64 = 256 * 1024;
-/// Deadline for the ignore check, so a hostile `.gitignore` cannot stall the TUI.
+
+/// Budget for the ignore check of one mention, so a hostile `.gitignore` cannot stall the TUI.
 const IGNORE_DEADLINE: Duration = Duration::from_secs(3);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -230,8 +231,8 @@ fn read_mention(root: &Path, path: &str, check_failed: &mut bool) -> Result<Stri
         return Err(format!("file is over {} KiB", MAX_FILE / 1024));
     }
     let relative = crate::chat_tools::display(root, &full);
-    if ignored_untracked(root, &relative, check_failed) {
-        return Err("ignored by .gitignore and not tracked; refused".into());
+    if let Some(refusal) = ignored_untracked(root, &relative, check_failed) {
+        return Err(refusal);
     }
     read::text(root, &full).map_err(|error| {
         if error.starts_with("binary") {
@@ -242,31 +243,25 @@ fn read_mention(root: &Path, path: &str, check_failed: &mut bool) -> Result<Stri
     })
 }
 
-/// True when git says `relative` is ignored, or could not say (fail closed).
-/// Tracked files are never "ignored" for this check, so they always pass. After one
-/// timeout or error (`check_failed`), later mentions of the same prompt are refused
-/// without starting git again, so a hostile repository stalls the UI once, not per file.
-fn ignored_untracked(root: &Path, relative: &str, check_failed: &mut bool) -> bool {
+/// Why git's ignore check refuses `relative`, or `None` when it is tracked or not ignored.
+/// Runs [`git_read::is_ignored`], the chat tools' hardened check (config includes refused,
+/// repository file keys nulled, git directory pinned), so a hostile repository config cannot
+/// stall it on a FIFO (issue #506). Fails closed: git unable to say refuses the file. After
+/// one failure (`check_failed`), later mentions of the same prompt are refused without
+/// starting git again, so a hostile repository stalls the UI once, not per file.
+fn ignored_untracked(root: &Path, relative: &str, check_failed: &mut bool) -> Option<String> {
     if *check_failed {
-        return true;
+        return Some("the ignore check failed earlier in this prompt; refused".into());
     }
-    let mut command = Command::new("/usr/bin/git");
-    git_read::hardened(&mut command)
-        .arg("-C")
-        .arg(root)
-        .args(["check-ignore", "-q", "--"])
-        .arg(relative);
-    match git_read::run_bounded(
-        command,
-        1024,
-        IGNORE_DEADLINE.min(git_read::call_clock().left()),
-    ) {
-        Ok((Some(status), _, _)) if matches!(status.code(), Some(0 | 1)) => {
-            status.code() != Some(1)
-        }
-        _ => {
+    // One budget for the whole check; inside a completion call the outer budget stays.
+    match git_read::call_scope(IGNORE_DEADLINE, || {
+        git_read::is_ignored(root, relative, None)
+    }) {
+        Ok(false) => None,
+        Ok(true) => Some("ignored by .gitignore and not tracked; refused".into()),
+        Err(error) => {
             *check_failed = true;
-            true
+            Some(format!("ignore check failed: {error}"))
         }
     }
 }
