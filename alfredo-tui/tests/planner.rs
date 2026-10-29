@@ -716,6 +716,108 @@ fn cancelling_an_unobserved_model_completion_never_publishes_a_late_draft() {
     assert!(fixture.store.snapshot().unwrap().tasks.is_empty());
 }
 
+/// Issue #504: Esc cancels a manual plan request exactly like `/plan-cancel`; idle it does not.
+#[test]
+fn esc_cancels_only_a_manual_plan_request_with_an_empty_prompt_on_the_plan_pane() {
+    use alfredo_tui::autopilot::{RunState, Status};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let (provider, _server) = server(String::new(), true, Duration::from_secs(2));
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider.clone());
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    let mut app = alfredo_tui::model::App::new("fixture".into());
+    assert!(!control.esc_cancels_plan(&app), "nothing in flight");
+    control
+        .command(&runtime, "/plan Implement calculation", "fixture")
+        .unwrap();
+    control.set_visible(true);
+    assert!(control.manual_plan_in_flight());
+    assert!(control.esc_cancels_plan(&app));
+    app.sessions[0].insert("typed");
+    assert!(!control.esc_cancels_plan(&app), "a typed prompt keeps Esc");
+    app.sessions[0].clear_draft();
+    app.models_visible = true;
+    assert!(!control.esc_cancels_plan(&app), "the model picker owns Esc");
+    app.models_visible = false;
+    app.pane.focus = Some(alfredo_tui::side_pane::Section::Work);
+    assert!(!control.esc_cancels_plan(&app), "a focused pane owns Esc");
+    app.pane.focus = None;
+    control.set_visible(false);
+    assert!(!control.esc_cancels_plan(&app), "plan pane not shown");
+    control.set_visible(true);
+    // Autopilot's own planning stays with /stop.
+    let status = |state| Status {
+        state,
+        goal: "goal".into(),
+        done: 0,
+        total: 0,
+        failed: 0,
+        repairs: 0,
+        max_repairs: 3,
+        elapsed: Duration::ZERO,
+        branch: None,
+    };
+    control.autopilot = Some(status(RunState::Planning));
+    assert!(!control.manual_plan_in_flight());
+    assert!(!control.esc_cancels_plan(&app));
+    control.autopilot = Some(status(RunState::Done));
+    assert!(
+        control.esc_cancels_plan(&app),
+        "a finished run does not own Esc"
+    );
+    // The routed command is /plan-cancel itself (the console's durable route): same
+    // notice, no late draft.
+    let Some(alfredo_tui::command_intent::Intent::Planner { request }) =
+        control.prepare_command("/plan-cancel", "fixture").unwrap()
+    else {
+        panic!("an in-flight plan cancels through a planner intent");
+    };
+    control
+        .planner
+        .dispatch_command(&runtime, provider, &request, fixture.store.clone())
+        .unwrap();
+    assert!(!control.planner.active());
+    assert_eq!(
+        control.planner.notice,
+        "Planning stopped · inspect retained draft before continuing"
+    );
+    assert!(!control.esc_cancels_plan(&app));
+    for _ in 0..10 {
+        control.poll();
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(control.planner.draft.is_none());
+}
+
+/// Issue #504: with a draft shown and nothing in flight, Esc keeps the draft.
+#[test]
+fn esc_does_not_cancel_an_idle_plan_draft() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let (provider, server) = server(
+        serde_json::json!({"tasks":plan().tasks}).to_string(),
+        true,
+        Duration::ZERO,
+    );
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider);
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control
+        .command(&runtime, "/plan Implement calculation", "fixture")
+        .unwrap();
+    wait(&mut control, |c| c.planner.draft.is_some());
+    server.join().unwrap();
+    control.set_visible(true);
+    let app = alfredo_tui::model::App::new("fixture".into());
+    assert!(control.planner.visible && !control.planner.active());
+    assert!(!control.manual_plan_in_flight());
+    assert!(!control.esc_cancels_plan(&app));
+    assert!(control.planner.draft.is_some());
+}
+
 /// Issue #504: the footer of the plan pane names Esc while a plan request is in flight.
 #[test]
 fn plan_pane_footer_names_esc_cancel_plan_only_while_a_request_is_in_flight() {

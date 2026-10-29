@@ -187,6 +187,7 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | Enter (side pane) | Open the row: a task's or the architect's agent view, group detail, chat, or switch mission |
 | Enter (agent view) | Instruct that agent: steer, queued note, repair, follow-up or plan revision |
 | Esc (agent view) | Back to the previous pane; the agent's unsent draft is kept |
+| Esc (plan draft, while `/plan` or `/plan-revise` generates) | With an empty prompt, cancel the request exactly like `/plan-cancel` (footer: `Esc cancel plan`); once the draft is shown, Esc keeps it. `/go` planning stays on `/stop` |
 | Ctrl+O (agent view) | Expand / collapse the full instruction text |
 | Ctrl+O (conversation) | Show tool results in full (200 lines each) / one line |
 | Ctrl+O (Plan draft) | Readable task list / raw draft JSON |

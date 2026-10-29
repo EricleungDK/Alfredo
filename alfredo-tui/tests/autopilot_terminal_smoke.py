@@ -361,8 +361,12 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.screen_has(terminal, 'waiting for model server', 60)
         self.screen_has(terminal, 'Esc cancel plan')
         terminal.send(b'\x1b')
-        self.screen_has(terminal, 'Planning stopped', 1)
+        # Same effect as a typed /plan-cancel: the plan pane closes and the chat records it.
+        self.screen_has(terminal, 'No tasks proposed yet', 1)
         self.assertNotIn('Esc cancel plan', terminal.screen())
+        terminal.send(b'\x1bOQ')  # F2 chat
+        self.screen_has(terminal, '› /plan-cancel', 1)
+        self.assertEqual(terminal.screen().count('Draft generation stopped'), 2)
         # The late reply finds no request to publish into.
         self.fixture.hold_plan.set()
         deadline = time.monotonic() + 1.0
@@ -381,7 +385,8 @@ class AutopilotTerminalSmoke(unittest.TestCase):
             time.sleep(0.05)
         screen = terminal.screen()
         self.assertIn('Make answer return 42', screen)
-        self.assertNotIn('Planning stopped', screen)
+        self.assertIn('Plan draft', screen)
+        self.assertNotIn('Esc cancel plan', screen)
         self.quit(terminal)
 
     def test_repair_after_a_failed_go_reenters_the_loop_and_builds_the_branch(self):
