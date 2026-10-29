@@ -2006,6 +2006,14 @@ credentials). Each call pauses for Approval like a file edit.
   redirect a push (`core.gitProxy`, `core.hooksPath`, `core.pager`, `gpg.*`,
   `merge.*.driver`, `remote.*.proxy`, `http.*`, `credential.*`, `receivepack`, `vcs`, …)
   are refused. The error names the key; run the command by hand if it is intended.
+- **Submodule ignore overrides (#516).** `git_merge`, `git_switch` to an existing branch
+  and `git_commit` with `files` naming a submodule (or a path inside or above one) are
+  refused before the card when `.gitmodules` (worktree, index, HEAD, or the branch being
+  merged or switched to) or your git config sets a `submodule.<name>.ignore` other than
+  `all`: with such an override git opens the submodule and runs the filters in its own
+  config when it merges, switches or stages it. A `.gitmodules` that is not a small regular
+  file is refused unopened. Repositories without the override, branch creation and
+  commits of other files are unaffected.
 - **Push URL.** Push takes only `https://`, `ssh://` and scp-style `user@host:path`
   remotes. A local path, `file://`, `git://`, `http://` or `ext::` URL is refused before
   the card. The card shows the push URLs (`pushurl` included). A push sends only the
@@ -2189,11 +2197,16 @@ size limit, and it is kept in memory only (not restored after a restart).
   list of up to 8 paths, prefix matches first, then substring matches (case-insensitive,
   no fuzzy ranking). Tab or Enter fills the path and a space, Esc closes it and keeps the
   text. Only paths the rules above would attach are listed: each candidate comes from the
-  `list_files` discovery (ignore rules, no symlinks, at most 5000 files) and passes the same
+  `list_files` discovery (ignore rules, no symlinks, at most 100000 files) and passes the same
   check as an attachment (at most 64 are checked, all within 0.75 s, so a slow repository
   lists less rather than stalling the prompt), so secrets, ignored, binary and oversize files, symlinks and
   paths with spaces, names a mention would cut or read differently (trailing `.`, `?`)
   and names with invisible characters never appear; an exact match is listed first. Nothing is attached until the prompt is submitted.
+  The lookup runs on a worker thread, never on the key path: keys echo at once, the list
+  appears within about a second once the lookup finishes (the repository listing is kept
+  only while you keep typing or erasing one `@` word, so later keys are quicker; Enter,
+  Tab, Esc, Ctrl+U, arrows or a paste end the word, and the next one lists afresh), and a result for a draft
+  that has since changed is dropped.
 - Not included: directory mentions, mentions in `/go` goals or
   commands. `@wayfinder REQUEST` is unchanged. Planner and worker references still use
   committed HEAD content.

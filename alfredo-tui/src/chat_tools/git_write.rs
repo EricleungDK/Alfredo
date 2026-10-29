@@ -384,6 +384,160 @@ fn refuse_repository_config(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Most bytes of a worktree `.gitmodules` read for the ignore check (#516).
+const MAX_GITMODULES: u64 = 1 << 20;
+
+/// Issue #516: refuse when a `submodule.<name>.ignore` other than `all` is set in a
+/// `.gitmodules` git would read (worktree file, index, HEAD, and each of `revs`, the
+/// commits a merge or switch brings in) or in git config. Such an override makes the
+/// apply step (`merge`, `switch`, `add` on a path reaching a submodule) refresh the
+/// submodule's index, which opens it and runs `filter.<x>.clean` and reads includes from
+/// `.git/modules/<name>/config`, a program the approval card never shows. The names come
+/// from repository content and are only displayed ([`shown`]), never put into a `-c` key.
+/// A `.gitmodules` that is not a small regular file is refused without being opened (a
+/// FIFO would stall git until the deadline). Refusal only: nothing is loosened.
+fn refuse_submodule_ignore_override(root: &Path, revs: &[&str]) -> Result<(), String> {
+    let mut sources = vec![gitmodules_worktree(root)?];
+    sources.push(gitmodules_tree(root, None)?);
+    if git_read::git(root, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .is_ok_and(|sha| !sha.trim().is_empty())
+    {
+        sources.push(gitmodules_tree(root, Some("HEAD"))?);
+    }
+    for rev in revs {
+        sources.push(gitmodules_tree(root, Some(rev))?);
+    }
+    for listing in sources.into_iter().flatten() {
+        check_ignore_listing(&listing)?;
+    }
+    // The owner's global config can carry the key too (repository-local keys are refused
+    // by the config allowlist already).
+    check_ignore_config(&config_listing(root)?)
+}
+
+/// [`check_ignore_entry`] over `config --null --list --show-scope` records
+/// (`scope NUL key LF value NUL`), every scope.
+fn check_ignore_config(listing: &str) -> Result<(), String> {
+    let mut fields = listing.split('\0');
+    while let (Some(_scope), Some(entry)) = (fields.next(), fields.next()) {
+        let (key, value) = entry.split_once('\n').unwrap_or((entry, "true"));
+        check_ignore_entry(key, value)?;
+    }
+    Ok(())
+}
+
+/// Refuse a `submodule.<name>.ignore` entry whose value is not `all`.
+fn check_ignore_entry(key: &str, value: &str) -> Result<(), String> {
+    let key = key.to_lowercase();
+    let overrides = key.starts_with("submodule.")
+        && key.ends_with(".ignore")
+        && !value.trim().eq_ignore_ascii_case("all");
+    if overrides {
+        return Err(format!(
+            "{} is set in .gitmodules or git config: with an ignore override git opens the submodule and runs the filters in its own config when it merges, switches or stages it, which the approval card cannot show; refused (the owner can run this git command by hand)",
+            shown(&key)
+        ));
+    }
+    Ok(())
+}
+
+/// `config --null --list` records (`key LF value NUL`) of a `.gitmodules` copy.
+fn check_ignore_listing(listing: &str) -> Result<(), String> {
+    for entry in listing.split('\0').filter(|e| !e.is_empty()) {
+        let (key, value) = entry.split_once('\n').unwrap_or((entry, "true"));
+        check_ignore_entry(key, value)?;
+    }
+    Ok(())
+}
+
+/// The worktree `.gitmodules`, listed, if there is one; never opened unless it is a small
+/// regular file.
+fn gitmodules_worktree(root: &Path) -> Result<Option<String>, String> {
+    let path = root.join(".gitmodules");
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("cannot check .gitmodules for ignore overrides; refused".into()),
+    };
+    if !meta.is_file() || meta.len() > MAX_GITMODULES {
+        return Err(
+            ".gitmodules is not a small regular file, so its submodule ignore settings cannot be checked; refused"
+                .into(),
+        );
+    }
+    let Some(path) = path.to_str() else {
+        return Err("cannot check .gitmodules for ignore overrides; refused".into());
+    };
+    full(root, &["config", "--file", path, "--null", "--list"]).map(Some)
+}
+
+/// `.gitmodules` as the index (`rev` `None`) or the commit `rev` holds it, listed.
+fn gitmodules_tree(root: &Path, rev: Option<&str>) -> Result<Option<String>, String> {
+    let entry = match rev {
+        None => full(
+            root,
+            &["ls-files", "--stage", "-z", "--", ":(literal).gitmodules"],
+        )?,
+        Some(rev) => full(
+            root,
+            &[
+                "ls-tree",
+                "-z",
+                "--end-of-options",
+                rev,
+                "--",
+                ".gitmodules",
+            ],
+        )?,
+    };
+    // `mode SP [type SP] oid [SP stage] TAB path`: the object id is the third word of a
+    // tree entry and the second of an index entry.
+    let Some(line) = entry.split('\0').find(|line| !line.is_empty()) else {
+        return Ok(None);
+    };
+    let head = line.split('\t').next().unwrap_or_default();
+    let words: Vec<&str> = head.split(' ').collect();
+    let (mode, oid) = match (rev, words.as_slice()) {
+        (None, [mode, oid, ..]) => (*mode, *oid),
+        (Some(_), [mode, _, oid]) => (*mode, *oid),
+        _ => return Err("cannot read .gitmodules from git; refused".into()),
+    };
+    if !matches!(mode, "100644" | "100755") || oid.is_empty() {
+        return Err(".gitmodules is not a regular file in git, so its submodule ignore settings cannot be checked; refused".into());
+    }
+    full(root, &["config", "--blob", oid, "--null", "--list"]).map(Some)
+}
+
+/// Whether any of `pathspecs` (`:(literal)path`) names a submodule in the index, a path
+/// inside one, or a directory holding one: what `git add` would refresh (#516).
+fn reaches_submodule(root: &Path, pathspecs: &[String]) -> Result<bool, String> {
+    let index = full(root, &["ls-files", "--stage", "-z"])?;
+    let links: Vec<String> = index
+        .split('\0')
+        .filter_map(|line| {
+            let (head, path) = line.split_once('\t')?;
+            head.starts_with("160000 ").then(|| path.to_lowercase())
+        })
+        .collect();
+    Ok(pathspecs.iter().any(|spec| {
+        // Git drops `.` and empty components (`deps/.` is `deps`, `deps/./inner` is
+        // `deps/inner`), so the comparison does too.
+        let path = spec
+            .strip_prefix(":(literal)")
+            .unwrap_or(spec)
+            .to_lowercase()
+            .split('/')
+            .filter(|part| !part.is_empty() && *part != ".")
+            .collect::<Vec<_>>()
+            .join("/");
+        links.iter().any(|link| {
+            *link == path
+                || link.starts_with(&format!("{path}/"))
+                || path.starts_with(&format!("{link}/"))
+        })
+    }))
+}
+
 /// The repository config as a write reads it (`--show-scope`), read whole: local, worktree
 /// and the owner's global config, never a cut listing.
 fn config_listing(root: &Path) -> Result<String, String> {
@@ -543,6 +697,9 @@ fn plan_commit(root: &Path, arguments: &Value) -> Result<CommitPlan, String> {
         pathspecs.push(format!(":(literal){path}"));
     }
     refuse_repository_config(root)?;
+    if !pathspecs.is_empty() && reaches_submodule(root, &pathspecs)? {
+        refuse_submodule_ignore_override(root, &[])?;
+    }
     let branch = current_branch(root)?;
     refuse_secrets(root, &pathspecs)?;
     let listing = if pathspecs.is_empty() {
@@ -796,6 +953,11 @@ fn plan_switch(root: &Path, arguments: &Value) -> Result<SwitchPlan, String> {
         return Err(format!(
             "no local branch {branch} (create=true makes it at the current commit)"
         ));
+    } else {
+        // `switch --no-guess` checks out refs/heads/<branch>, so that is the tree read; a
+        // tag or other ref of the same name must not stand in for it. A branch created at
+        // the current commit changes no file, so it opens no submodule.
+        refuse_submodule_ignore_override(root, &[&format!("refs/heads/{branch}")])?;
     }
     let from = match current_branch(root) {
         Ok(name) => name,
@@ -885,6 +1047,7 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
         .to_string();
     let target = ref_arg(arguments, "target")?;
     refuse_repository_config(root)?;
+    refuse_submodule_ignore_override(root, &[&source])?;
     let current = current_branch(root)?;
     if let Some(target) = target {
         if target != current {
@@ -1553,6 +1716,47 @@ mod tests {
             "***@github.com:o/r.git"
         );
         assert_eq!(redacted("/tmp/r\u{1b}[2J.git"), "/tmp/r\\u{1b}[2J.git");
+    }
+
+    /// #516: only a `submodule.<name>.ignore` other than `all` is an override; the name is
+    /// repository content and may hold anything.
+    #[test]
+    fn only_a_non_all_submodule_ignore_value_is_an_override() {
+        for value in ["none", "dirty", "untracked", "", "ALLX", "false"] {
+            let error = check_ignore_entry("submodule.sub.ignore", value).unwrap_err();
+            assert!(
+                error.contains(".gitmodules") && error.contains("ignore"),
+                "{error}"
+            );
+        }
+        for value in ["all", " ALL ", "All"] {
+            assert!(check_ignore_entry("submodule.sub.ignore", value).is_ok());
+        }
+        for key in [
+            "submodule.sub.url",
+            "submodule.sub.update",
+            "core.ignore",
+            "ignore",
+        ] {
+            assert!(check_ignore_entry(key, "none").is_ok(), "{key}");
+        }
+        // Odd names: dots, `=`, spaces and a very long name are shown cut, never executed.
+        let name = format!("submodule.a.b=c d{}.IGNORE", "x".repeat(500));
+        let error = check_ignore_entry(&name, "none").unwrap_err();
+        assert!(error.len() < 600, "{}", error.len());
+    }
+
+    #[test]
+    fn a_global_or_gitmodules_listing_with_an_override_is_refused_in_any_scope() {
+        let config = "global\0submodule.s.ignore\nnone\0local\0core.bare\nfalse\0";
+        assert!(check_ignore_config(config).is_err());
+        let fine = "global\0user.name\nA\0local\0submodule.s.ignore\nall\0";
+        assert!(check_ignore_config(fine).is_ok());
+        assert!(
+            check_ignore_listing("submodule.s.path\nsub\0submodule.s.ignore\ndirty\0").is_err()
+        );
+        assert!(check_ignore_listing("submodule.s.path\nsub\0submodule.s.ignore\nall\0").is_ok());
+        assert!(check_ignore_listing("").is_ok());
     }
 
     #[test]

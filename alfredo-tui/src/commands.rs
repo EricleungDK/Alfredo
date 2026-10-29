@@ -319,17 +319,23 @@ impl Completion {
                 .flatten()
         })
     }
-    /// Live `@path` type-ahead for the last word of `draft` (the cursor at its end).
+    /// The `@` word at the end of `draft`: where it starts and the text after the `@`.
     #[must_use]
-    pub fn at_path(draft: &str, root: &std::path::Path) -> Option<Self> {
+    pub fn at_fragment(draft: &str) -> Option<(usize, &str)> {
         let start = draft
             .char_indices()
             .rev()
             .find(|(_, c)| c.is_whitespace())
             .map_or(0, |(at, c)| at + c.len_utf8());
-        let fragment = draft[start..].strip_prefix('@')?;
+        Some((start, draft[start..].strip_prefix('@')?))
+    }
+    /// The live `@path` list for `draft` offering `paths` (as vetted by
+    /// `chat_mentions::complete`), or `None` when `draft` has no `@` word or no path.
+    #[must_use]
+    pub fn from_paths(draft: &str, paths: Vec<String>) -> Option<Self> {
+        let (start, _) = Self::at_fragment(draft)?;
         let mut completion = Self::from_choices(
-            crate::chat_mentions::complete(root, fragment)
+            paths
                 .into_iter()
                 .map(|path| Choice {
                     name: format!("@{path}"),
@@ -342,6 +348,13 @@ impl Completion {
         completion.live = true;
         completion.files = true;
         Some(completion)
+    }
+    /// Live `@path` type-ahead for the last word of `draft` (the cursor at its end),
+    /// looked up synchronously; the run loop uses `at_lookup::AtLookup` instead.
+    #[must_use]
+    pub fn at_path(draft: &str, root: &std::path::Path) -> Option<Self> {
+        let (_, fragment) = Self::at_fragment(draft)?;
+        Self::from_paths(draft, crate::chat_mentions::complete(root, fragment))
     }
     /// Sets the F1 filter; with text the catalog shows one `Matches` group, prefix first.
     pub fn set_query(&mut self, query: String) {

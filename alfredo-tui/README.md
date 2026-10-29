@@ -284,6 +284,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/autopilot.rs` | `/go` loop, auto-review, bounded repair, integration branch |
 | `src/tasks.rs`, `src/task_control.rs`, `src/task_control/commands.rs`, `src/dispatch.rs` | Durable task store, commands (`prepare_command`, `dispatch_prepared`, `command`, `parse`), dispatch |
 | `src/worker.rs`, `src/run_boundary.rs` | Isolated worktree workers and bubblewrap sandbox |
+| `src/worker/answer.rs` | Worker FILE/EDIT answer-block parser, resolver and live display |
 | `src/planner.rs`, `src/planning_context.rs` | Plan generation from committed repo context |
 | `src/provider.rs`, `src/inference_admission.rs`, `src/health.rs` | Ollama client, shared capacity, health polling |
 | `src/commands.rs` | Command catalog (F1 picker) |
@@ -293,6 +294,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/on_finish.rs` | `--on-finish PROGRAM` completion hook (no shell, outside the sandbox, 10 s limit) |
 | `src/clean.rs` | `/clean`: removes retained worktrees of finished runs only |
 | `src/chat_mentions.rs`, `src/chat_context.rs`, `src/project_notes.rs` | `@path` mentions (working-tree content) and harness context (plus root `AGENTS.md` project notes) for plain chat turns |
+| `src/at_lookup.rs` | `@path` completion lookup on a worker thread (generation-checked, listing cached per `@` word) |
 | `src/chat_tools/mod.rs`, `src/chat_tools/read.rs`, `src/chat_tools/git_read.rs`, `src/chat_tools/run.rs`, `src/chat_tools/edit.rs`, `src/chat_tools/shell.rs`, `src/chat_tools/approval.rs`, `src/chat_tools/git_write.rs`, `src/chat_tools/propose.rs`, `src/chat_tools/budget.rs`, `src/chat_tools/summary.rs` | Chat tool registry (definitions, tiers, dispatch, path confinement), read-only file and git tools, capped tool loop, write_file/edit_file, run_command (sandboxed or host-escalated), approval gate (card, decision, outcome log), git commit/switch/merge/push, propose_plan (prefills /plan or /go), per-round time and cancel budget for read tools, one-line `⚙` row summaries per tool |
 | `src/workstation.rs`, `src/wayfinder.rs` | One admitted workspace/mission plus its conversation owner; first-contact routing |
 | `src/selection.rs`, `src/selection_command.rs`, `src/selection_store.rs`, `src/missions.rs` | Startup workspace selection, its intent and journal; mission namespace discovery |

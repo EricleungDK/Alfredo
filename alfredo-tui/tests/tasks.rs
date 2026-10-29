@@ -786,6 +786,297 @@ fn failed_manual_start_is_not_automatically_retried_and_dispatch_defaults_off_af
     assert!(!reopened.dispatch.enabled);
 }
 
+/// Drive `/run` the way the terminal does and return the refusal text plus the
+/// task inspector rendered with that task selected.
+fn run_then_render(
+    store: &TaskStore,
+    commands: &[&str],
+) -> (alfredo_tui::task_control::TaskControl, Vec<String>) {
+    use alfredo_tui::task_control::TaskControl;
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut control = TaskControl::new(store.clone());
+    control.set_provider(
+        alfredo_tui::provider::Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+    );
+    control.refresh(&runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut messages = vec![];
+    for command in commands {
+        while control.pending {
+            control.poll();
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        if let Err(error) = control.command(&runtime, command, "fixture") {
+            messages.push(error);
+        }
+        while control.pending || !control.workers.is_empty() {
+            control.poll();
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        messages.push(control.notice.clone());
+    }
+    while control.pending {
+        control.poll();
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    (control, messages)
+}
+
+fn inspector_text(control: &alfredo_tui::task_control::TaskControl) -> String {
+    use alfredo_tui::{model::App, ui};
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 40)).unwrap();
+    terminal
+        .draw(|frame| ui::draw_with_tasks(frame, &App::new("fixture".into()), control))
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+#[test]
+fn run_on_a_proposed_task_names_approve_not_the_internal_worker_owner_rule() {
+    let fixture = Fixture::new();
+    let store = fixture.store("run-proposed");
+    store.transact(proposal("task", 0, vec![])).unwrap();
+    store.transact(permit_request("permit", 1, 1)).unwrap();
+    let before = fs::read(fixture.file()).unwrap();
+    let (control, messages) = run_then_render(&store, &["/run 1"]);
+    let joined = messages.join(" | ");
+    assert!(
+        joined.contains("Task #1 is proposed; /approve 1 first"),
+        "{joined}"
+    );
+    assert!(!joined.contains("acquire a new worker owner"), "{joined}");
+    assert!(!inspector_text(&control).contains("start paused"));
+    assert_eq!(fs::read(fixture.file()).unwrap(), before);
+    assert!(store.snapshot().unwrap().tasks[0].run.is_none());
+}
+
+#[test]
+fn refused_run_leaves_no_start_paused_row_once_the_task_is_approved() {
+    let fixture = Fixture::new();
+    let store = fixture.store("run-then-approve");
+    store.transact(proposal("task", 0, vec![])).unwrap();
+    store.transact(permit_request("permit", 1, 1)).unwrap();
+    let (control, _) = run_then_render(&store, &["/run 1", "/approve 1"]);
+    assert_eq!(
+        store.snapshot().unwrap().tasks[0].status,
+        TaskStatus::Approved
+    );
+    let text = inspector_text(&control);
+    assert!(text.contains("Approved for run validation"), "{text}");
+    assert!(!text.contains("start paused"), "{text}");
+}
+
+#[test]
+fn a_start_notice_recorded_while_proposed_is_dropped_when_the_task_is_approved() {
+    let fixture = Fixture::new();
+    let store = fixture.store("stale-notice");
+    store.transact(proposal("task", 0, vec![])).unwrap();
+    store.transact(permit_request("permit", 1, 1)).unwrap();
+    let (mut control, _) = run_then_render(&store, &[]);
+    control.dispatch.failures.insert(1, "start refused".into());
+    control.dispatch.failures.insert(2, "other task".into());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    control.command(&runtime, "/tasks #1", "fixture").unwrap();
+    assert!(inspector_text(&control).contains("start paused: start refused"));
+    control.command(&runtime, "/approve 1", "fixture").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while control.pending {
+        control.poll();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(!control.dispatch.failures.contains_key(&1));
+    assert!(control.dispatch.failures.contains_key(&2));
+}
+
+#[test]
+fn run_on_an_approved_task_with_an_unaccepted_dependency_still_names_the_dependency() {
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace");
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["add", "-A"],
+        vec![
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "fixture",
+            "--allow-empty",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let store = fixture.store("run-dependency");
+    store.transact(proposal("parent", 0, vec![])).unwrap();
+    store.transact(proposal("child", 1, vec![1])).unwrap();
+    store.transact(permit_request("permit", 2, 2)).unwrap();
+    store
+        .transact(Request {
+            correlation: "approve".into(),
+            expected_revision: 3,
+            action: Action::Approve { task: 2 },
+        })
+        .unwrap();
+    let (mut control, messages) = run_then_render(&store, &["/run 2"]);
+    let joined = messages.join(" | ");
+    assert!(joined.contains("Dependency #1 is not accepted"), "{joined}");
+    assert!(!joined.contains("acquire a new worker owner"), "{joined}");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    control.command(&runtime, "/tasks #2", "fixture").unwrap();
+    let text = inspector_text(&control);
+    assert!(text.contains("Task #2"), "{text}");
+    assert!(!text.contains("start paused"), "{text}");
+    assert!(store.snapshot().unwrap().tasks[1].run.is_none());
+}
+
+#[test]
+fn run_after_the_dependency_was_just_accepted_is_not_refused_by_a_stale_snapshot() {
+    use alfredo_tui::task_control::TaskControl;
+    use std::time::Duration;
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace");
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["add", "-A"],
+        vec![
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "fixture",
+            "--allow-empty",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    // Task 1 is already accepted in the store; task 2 depends on it and is approved.
+    let (store, revision) = task_in_status(&fixture, TaskStatus::Accepted, false);
+    store
+        .transact(proposal("child", revision, vec![1]))
+        .unwrap();
+    store
+        .transact(permit_request("permit", revision + 1, 2))
+        .unwrap();
+    store
+        .transact(Request {
+            correlation: "approve".into(),
+            expected_revision: revision + 2,
+            action: Action::Approve { task: 2 },
+        })
+        .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut control = TaskControl::new(store.clone());
+    control.set_provider(
+        alfredo_tui::provider::Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+    );
+    control.refresh(&runtime);
+    while control.pending {
+        control.poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // The terminal still holds the view from before the acceptance landed.
+    control.snapshot.as_mut().unwrap().tasks[0].status = TaskStatus::ReviewReady;
+    let result = control.command(&runtime, "/run 2", "fixture");
+    assert!(
+        result.is_ok(),
+        "stale snapshot refused a start the store accepts: {result:?}"
+    );
+}
+
+#[test]
+fn run_on_a_repair_task_is_not_refused_for_an_unaccepted_dependency_like_the_store() {
+    use alfredo_tui::task_control::TaskControl;
+    use std::time::{Duration, Instant};
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace");
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["add", "-A"],
+        vec![
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "fixture",
+            "--allow-empty",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let store = fixture.store("run-repair-dependency");
+    store.transact(proposal("parent", 0, vec![])).unwrap();
+    store.transact(proposal("child", 1, vec![1])).unwrap();
+    store.transact(permit_request("permit", 2, 2)).unwrap();
+    store
+        .transact(Request {
+            correlation: "approve".into(),
+            expected_revision: 3,
+            action: Action::Approve { task: 2 },
+        })
+        .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut control = TaskControl::new(store.clone());
+    control.set_provider(
+        alfredo_tui::provider::Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+    );
+    control.refresh(&runtime);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.pending {
+        control.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // The store skips the dependency rule for a repair, so the precheck must too.
+    control.snapshot.as_mut().unwrap().tasks[1].repair_of = Some(1);
+    let result = control.command(&runtime, "/run 2", "fixture");
+    if let Err(error) = &result {
+        assert!(!error.contains("Dependency"), "{error}");
+    }
+    while control.pending || !control.workers.is_empty() {
+        control.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 #[test]
 fn background_dispatch_refresh_does_not_block_commands_or_clear_pending_write_state() {
     use alfredo_tui::task_control::TaskControl;
