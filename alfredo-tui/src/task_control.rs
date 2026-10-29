@@ -711,6 +711,20 @@ impl TaskControl {
                     .as_ref()
                     .is_none_or(|current| snapshot.revision >= current.revision)
                 {
+                    // A start notice for a task that was still proposed is stale
+                    // once its status moves on (for example, after /approve).
+                    if let Some(current) = &self.snapshot {
+                        for old in &current.tasks {
+                            if old.status == crate::tasks::TaskStatus::Proposed
+                                && snapshot
+                                    .tasks
+                                    .iter()
+                                    .any(|new| new.id == old.id && new.status != old.status)
+                            {
+                                self.dispatch.failures.remove(&old.id);
+                            }
+                        }
+                    }
                     self.snapshot = Some(snapshot);
                     if let Some(observations) = run_observations {
                         self.run_observations = observations;
@@ -1644,6 +1658,14 @@ impl TaskControl {
         if self.workers.len() >= 4 || self.workers.contains_key(&task) {
             return Err("Worker already active or four-worker limit reached".into());
         }
+        if let Some(proposed) = self.snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .tasks
+                .iter()
+                .find(|item| item.id == task && item.status == crate::tasks::TaskStatus::Proposed)
+        }) {
+            return Err(crate::tasks::proposed_run(proposed.id));
+        }
         if let Some(blocker) = crate::doctor::sandbox_blocker() {
             return Err(blocker);
         }
@@ -1666,6 +1688,22 @@ impl TaskControl {
             .iter()
             .find(|candidate| candidate.id == task)
             .ok_or("Task not found")?;
+        // The store enforces this rule for non-repair tasks; refusing here records
+        // no start notice. The view may predate an acceptance, so a refusal is
+        // only final when the store itself agrees.
+        if selected.repair_of.is_none()
+            && selected
+                .dependencies
+                .iter()
+                .any(|dependency| snapshot.dependency_source(*dependency).is_err())
+        {
+            let current = self.store.snapshot()?;
+            for dependency in &selected.dependencies {
+                current
+                    .dependency_source(*dependency)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         if let Some(blocker) = self.scope_status.run_blocker(snapshot, selected) {
             return Err(blocker);
         }

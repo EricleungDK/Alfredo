@@ -68,6 +68,11 @@ fn review_refusal(task: u64, status: &TaskStatus) -> String {
     }
 }
 
+/// Refusal for `/run` on a task that still needs approval.
+pub fn proposed_run(task: u64) -> String {
+    format!("Task #{task} is proposed; /approve {task} first")
+}
+
 pub fn not_run(task: u64) -> String {
     format!("Task #{task} has not run; /run {task} first")
 }

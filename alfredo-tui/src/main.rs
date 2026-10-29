@@ -477,6 +477,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     alfredo_tui::wake::catch_hangup();
     let result = (|| -> io::Result<()> {
         let mut dirty = true;
+        let mut at_lookup = alfredo_tui::at_lookup::AtLookup::default();
         // A prompt held while earlier turns were summarised, ready to send.
         let mut resume: Option<Result<Vec<alfredo_tui::model::Message>, &'static str>> = None;
         let mut quit_pending = false;
@@ -639,6 +640,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            if let Some(found) = at_lookup.poll(&runtime) {
+                // A list for a draft that has since changed is never shown.
+                let session = &work.app.sessions[work.app.selected];
+                if found.applies_to(&session.draft, session.cursor()) {
+                    work.app.completion =
+                        alfredo_tui::commands::Completion::from_paths(&found.draft, found.paths);
+                    dirty = true;
+                }
+            }
             for completion in work.wayfinder.poll(&runtime) {
                 let alfredo_tui::wayfinder::Completion {
                     turn,
@@ -1186,6 +1196,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let key_at = std::time::Instant::now();
                     work.app.sessions[index].note_key(key_at);
                     work.app.transient_rows.clear();
+                    at_lookup.on_key(&key);
                     if let Some(completion) = work.app.completion.as_mut() {
                         let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
                         match key.code {
@@ -1222,6 +1233,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             KeyCode::Esc => {
                                 work.app.completion = None;
+                                at_lookup.cancel();
                                 continue;
                             }
                             // F1 picker: type to filter instead of closing.
@@ -1555,6 +1567,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, true);
                         }
                         KeyCode::Esc => {
+                            at_lookup.cancel();
                             cancel_chat_turn(&mut work.app, index, &mut jobs, &mut approval_replies)
                         }
                         KeyCode::Char('r') if ctrl => {
@@ -2215,7 +2228,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Backspace => {
                             work.app.sessions[index].backspace();
                             let session = &work.app.sessions[index];
-                            work.app.completion = alfredo_tui::commands::Completion::for_draft(
+                            work.app.completion = at_lookup.for_draft(
+                                &runtime,
                                 &session.draft,
                                 session.cursor(),
                                 work.tasks.workspace(),
@@ -2254,7 +2268,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             work.app.sessions[index].type_char(ch);
                             let session = &work.app.sessions[index];
-                            work.app.completion = alfredo_tui::commands::Completion::for_draft(
+                            work.app.completion = at_lookup.for_draft(
+                                &runtime,
                                 &session.draft,
                                 session.cursor(),
                                 work.tasks.workspace(),
@@ -2266,6 +2281,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Paste(_) if work.app.pane.focus.is_some() => {}
                 Event::Paste(text) => {
                     work.app.completion = None;
+                    at_lookup.cancel();
                     let session = &mut work.app.sessions[work.app.selected];
                     if session.replace_pending() {
                         session.clear_draft();
