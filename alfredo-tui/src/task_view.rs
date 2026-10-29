@@ -87,7 +87,7 @@ pub fn readiness(snapshot: &Snapshot, task: &Task) -> String {
     for id in &task.dependencies {
         match snapshot.dependency_source(*id) {
             Ok(source) if source.id != *id => {
-                resolved.push(format!("#{id} via repair #{}", source.id))
+                resolved.push(format!("#{id} via repair #{}", source.id));
             }
             Ok(_) => {}
             Err(_) => {

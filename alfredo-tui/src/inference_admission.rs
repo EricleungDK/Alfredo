@@ -510,7 +510,7 @@ fn publish(directory: &Path, ledger: &Ledger) -> Result<()> {
     let result = (|| {
         let mut file = private_file(&path, false, true)?;
         file.write_all(&bytes)
-            .and_then(|_| file.sync_all())
+            .and_then(|()| file.sync_all())
             .map_err(|e| format!("Cannot save inference admission: {e}"))?;
         fs::rename(&path, directory.join("ledger.json")).map_err(|e| e.to_string())?;
         File::open(directory)

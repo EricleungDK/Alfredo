@@ -4,6 +4,7 @@
 use crate::tasks::WorkPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -452,11 +453,12 @@ pub(super) fn prior_blocks(answer: &str, policy: Option<&WorkPolicy>) -> Option<
         if !edits.is_empty() {
             let mut text = render_blocks(&FilePlan { files });
             for edit in &edits {
-                text.push_str(&format!("{EDIT_START}{}{FILE_START_END}\n", edit.path));
+                let _ = writeln!(text, "{EDIT_START}{}{FILE_START_END}", edit.path);
                 for (search, replace) in &edit.pairs {
-                    text.push_str(&format!(
+                    let _ = write!(
+                        text,
                         "{SEARCH_MARKER}\n{search}{DIVIDER_MARKER}\n{replace}{REPLACE_MARKER}\n"
-                    ));
+                    );
                 }
                 text.push_str(EDIT_END);
                 text.push('\n');
@@ -498,10 +500,10 @@ pub fn display_output(text: &str) -> String {
     for line in text.split_inclusive('\n') {
         let complete = line.ends_with('\n');
         if let Some(path) = file_marker(line) {
-            shown.push_str(&format!("▸ {path}\n"));
+            let _ = writeln!(shown, "▸ {path}");
             (in_block, in_file, seen, wrapped, depth) = (true, true, false, false, 0);
         } else if let Some(path) = edit_marker(line).filter(|_| !in_file) {
-            shown.push_str(&format!("▸ {path} (edit)\n"));
+            let _ = writeln!(shown, "▸ {path} (edit)");
             (in_block, seen, wrapped, depth) = (true, false, false, 0);
         } else if end_marker(line) || (!in_file && line.trim_end() == EDIT_END) {
             (in_block, in_file) = (false, false);

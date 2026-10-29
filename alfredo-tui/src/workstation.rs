@@ -48,7 +48,7 @@ impl ChatView {
         // Another run started the same mission first: resume it.
         match store.select_mission(start_new) {
             Err(error) if start_new && error == crate::tasks::MISSION_EXISTS => {
-                store.select_mission(false)?
+                store.select_mission(false)?;
             }
             other => other?,
         }
@@ -113,7 +113,7 @@ impl Workstation {
         let plan = restored.as_ref().and_then(|saved| saved.plan_draft.clone());
         let view = restored.as_ref().and_then(|saved| saved.task_view.clone());
         let mut app = restored
-            .map(|saved| saved.restore())
+            .map(super::conversations::Snapshot::restore)
             .unwrap_or_else(|| App::new(model.into()));
         reconcile_selection(&mut app, state);
         if let Err(error) = crate::missions::remember(&store, workspace, mission) {

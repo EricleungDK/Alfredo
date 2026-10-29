@@ -357,7 +357,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     }
 }
 
-/// NO_COLOR: keep text and modifiers, drop every foreground and background colour.
+/// `NO_COLOR`: keep text and modifiers, drop every foreground and background colour.
 fn strip_colors(buffer: &mut Buffer) {
     for cell in buffer.content.iter_mut() {
         cell.set_fg(Color::Reset);

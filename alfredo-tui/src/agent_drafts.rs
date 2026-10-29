@@ -202,7 +202,7 @@ fn write(path: &Path, drafts: &Drafts) -> Result<(), String> {
     }
     let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
     file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
+        .and_then(|()| file.sync_all())
         .map_err(|e| e.to_string())?;
     if let Err(error) = fs::rename(&temporary, path) {
         let _ = fs::remove_file(&temporary);

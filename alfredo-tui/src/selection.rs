@@ -135,7 +135,7 @@ pub async fn prepare_workspace(path: &Path, state: &Path, create: bool) -> Resul
     Ok(WorkspaceChoice::Existing { path: target })
 }
 
-/// Effect helper for an already admitted selection. Picker code uses prepare_workspace.
+/// Effect helper for an already admitted selection. Picker code uses `prepare_workspace`.
 pub async fn acknowledge(path: &Path, state: &Path, create: bool) -> Result<PathBuf> {
     let choice = prepare_workspace(path, state, create).await?;
     prepare_effects(choice).await
@@ -502,7 +502,10 @@ pub fn choose_in_terminal_with(
     let mut saved = crate::missions::Discovery::default();
     let mut saved_index: usize = 0;
     loop {
-        if pending.as_ref().is_some_and(|job| job.is_finished()) {
+        if pending
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
             match runtime
                 .block_on(pending.take().unwrap())
                 .map_err(|e| e.to_string())?
@@ -523,15 +526,19 @@ pub fn choose_in_terminal_with(
                 Err(error) => notice = error,
             }
         }
-        if discovery.as_ref().is_some_and(|job| job.is_finished()) {
+        if discovery
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
             match runtime
                 .block_on(discovery.take().unwrap())
                 .map_err(|e| e.to_string())?
             {
                 Ok(found) => saved = found,
                 Err(error) => {
-                    notice =
-                        format!("Saved work discovery unavailable: {error}. Enter a name manually.")
+                    notice = format!(
+                        "Saved work discovery unavailable: {error}. Enter a name manually."
+                    );
                 }
             }
         }
@@ -556,7 +563,7 @@ pub fn choose_in_terminal_with(
                         loading: discovery.is_some(),
                         pending: pending.is_some(),
                     },
-                )
+                );
             })
             .map_err(|e| e.to_string())?;
         let Some(event) = events

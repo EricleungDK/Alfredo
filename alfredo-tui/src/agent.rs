@@ -383,7 +383,7 @@ fn write(
         .open(directory.join(FILE))
         .map_err(|e| e.to_string())?;
     file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
+        .and_then(|()| file.sync_all())
         .map_err(|e| e.to_string())?;
     File::open(directory)
         .and_then(|f| f.sync_all())

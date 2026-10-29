@@ -595,7 +595,7 @@ impl Autopilot {
                 Ok(notice) => failures.push(notice),
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    failures.push("--on-finish hook did not finish in time".into())
+                    failures.push("--on-finish hook did not finish in time".into());
                 }
             }
         }
@@ -650,7 +650,7 @@ impl Autopilot {
             }
             let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
             file.write_all(&bytes)
-                .and_then(|_| file.sync_all())
+                .and_then(|()| file.sync_all())
                 .map_err(|e| e.to_string())?;
             fs::rename(&temporary, &self.path).map_err(|e| e.to_string())?;
             File::open(directory)
@@ -916,7 +916,7 @@ impl Autopilot {
     /// Pause like `pause`, but with the cause as the notice (live, saved and shown in
     /// the status panel and headless output) instead of the generic pause text.
     pub fn pause_because(&mut self, tasks: &mut TaskControl, notice: String) -> String {
-        if !self.saved.as_ref().is_some_and(|saved| saved.active()) {
+        if !self.saved.as_ref().is_some_and(Saved::active) {
             return "No active autopilot".into();
         }
         self.halt(tasks, notice);
@@ -1002,7 +1002,7 @@ impl Autopilot {
             .as_ref()
             .map(|saved| saved.model.clone())
             .unwrap_or_else(|| "pending".into());
-        let was_active = self.saved.as_ref().is_some_and(|saved| saved.active());
+        let was_active = self.saved.as_ref().is_some_and(Saved::active);
         self.pause(tasks);
         let planning_cancelled = self.cancel_planning(tasks);
         let workers: Vec<u64> = tasks.workers.keys().copied().collect();
@@ -1329,7 +1329,10 @@ impl Autopilot {
         let (Some(saved), Some(snapshot)) = (self.saved.as_ref(), tasks.snapshot.as_ref()) else {
             return vec![];
         };
-        let mut cache = self.outcome_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self
+            .outcome_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         families(snapshot, saved, tasks)
             .into_iter()
             .map(|family| {

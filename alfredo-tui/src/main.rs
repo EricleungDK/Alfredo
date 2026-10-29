@@ -93,7 +93,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--icons" => {
                 theme.icons = alfredo_tui::theme::IconSet::parse(
                     &args.next().ok_or("--icons needs nerd, unicode or ascii")?,
-                )?
+                )?;
             }
             "--no-motion" => theme.motion = false,
             "--doctor" => doctor = true,
@@ -119,7 +119,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &args
                         .next()
                         .ok_or("--approve needs a policy: workspace-edits")?,
-                )?)
+                )?);
             }
             "--max-repairs" => {
                 max_repairs_explicit = true;
@@ -127,25 +127,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .next()
                     .and_then(|value| value.parse::<u32>().ok())
                     .filter(|value| *value <= alfredo_tui::autopilot::MAX_REPAIRS)
-                    .ok_or("--max-repairs needs a number from 0 to 16")?
+                    .ok_or("--max-repairs needs a number from 0 to 16")?;
             }
             "--on-finish" => {
                 on_finish = Some(
                     args.next()
                         .ok_or("--on-finish needs an absolute program path")?,
-                )
+                );
             }
             "--qualify-inference" => {
                 qualification_output = Some(std::path::PathBuf::from(
                     args.next()
                         .ok_or("--qualify-inference needs a new report path")?,
-                ))
+                ));
             }
             "--inspect-qualification" => {
                 qualification_inspection = Some(std::path::PathBuf::from(
                     args.next()
                         .ok_or("--inspect-qualification needs a report path")?,
-                ))
+                ));
             }
             "--qualification-repetitions" => {
                 qualification_repetitions = Some(
@@ -153,15 +153,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .ok_or("--qualification-repetitions needs 1–3")?
                         .parse::<u8>()
                         .map_err(|_| "--qualification-repetitions needs 1–3")?,
-                )
+                );
             }
             "--workspace" => {
                 workspace = Some(std::path::PathBuf::from(
                     args.next().ok_or("--workspace needs a directory")?,
-                ))
+                ));
             }
             "--state-dir" => {
-                state_dir = Some(args.next().ok_or("--state-dir needs a directory")?.into())
+                state_dir = Some(args.next().ok_or("--state-dir needs a directory")?.into());
             }
             "--structured-thinking" => {
                 structured_thinking = match args.next().as_deref() {
@@ -182,29 +182,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .next()
                     .ok_or("--parallel-models needs a number")?
                     .parse::<usize>()
-                    .map_err(|_| "--parallel-models needs a number from 1 to 8")?
+                    .map_err(|_| "--parallel-models needs a number from 1 to 8")?;
             }
             "--conversation" => conversation = args.next().ok_or("--conversation needs a name")?,
             "--keep-alive" => {
                 keep_alive = args
                     .next()
-                    .ok_or("--keep-alive needs a duration, seconds or default")?
+                    .ok_or("--keep-alive needs a duration, seconds or default")?;
             }
             "--num-ctx" => {
                 num_ctx = args
                     .next()
-                    .ok_or("--num-ctx needs a token count from 2048 to 262144")?
+                    .ok_or("--num-ctx needs a token count from 2048 to 262144")?;
             }
             "--max-turns" => {
                 max_turns = args
                     .next()
-                    .ok_or("--max-turns needs a tool-round count from 1 to 32")?
+                    .ok_or("--max-turns needs a tool-round count from 1 to 32")?;
             }
             "--connect-retries" => {
                 connect_retries = args
                     .next()
                     .and_then(|value| value.parse::<u32>().ok())
-                    .ok_or("--connect-retries needs a number from 0 to 10")?
+                    .ok_or("--connect-retries needs a number from 0 to 10")?;
             }
             "--mission" | "--new-mission" => {
                 if mission.is_some() {
@@ -821,7 +821,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             sender,
                                             gate,
                                         )
-                                        .await
+                                        .await;
                                     }
                                     None => {
                                         provider
@@ -832,7 +832,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 messages,
                                                 sender,
                                             )
-                                            .await
+                                            .await;
                                     }
                                 }
                             }));
@@ -1280,7 +1280,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 PaneAction::Moved(RowKey::Node(node))
                                     if work.tasks.visible && work.tasks.agent_shown().is_none() =>
                                 {
-                                    work.tasks.focus_node(node)
+                                    work.tasks.focus_node(node);
                                 }
                                 PaneAction::Open(alfredo_tui::side_pane::OpenTarget::Mission(
                                     name,
@@ -1298,13 +1298,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         })?;
                                         match work.switch_to(&runtime, &workspace, &name) {
                                             Ok(true) => {
-                                                for job in jobs.iter_mut().filter_map(Option::take) {
+                                                for job in jobs.iter_mut().filter_map(Option::take)
+                                                {
                                                     job.abort();
                                                 }
                                                 (sender, receiver) = mpsc::channel(128);
                                                 (model_sender, model_receiver) = mpsc::channel(1);
-                                                (compact_sender, compact_receiver) = mpsc::channel(8);
-                                                (approval_sender, approval_receiver) = mpsc::channel(MAX_SESSIONS);
+                                                (compact_sender, compact_receiver) =
+                                                    mpsc::channel(8);
+                                                (approval_sender, approval_receiver) =
+                                                    mpsc::channel(MAX_SESSIONS);
                                                 for (_, request) in approval_replies.drain() {
                                                     request.cancel();
                                                 }
@@ -1315,12 +1318,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             Ok(false) => {
                                                 work.app.notice =
                                                     "Already in the selected workspace and mission"
-                                                        .into()
+                                                        .into();
                                             }
                                             Err(error) => {
                                                 work.app.notice = format!(
                                                     "Could not switch work: {error}; current work retained"
-                                                )
+                                                );
                                             }
                                         }
                                         terminal.clear()?;
@@ -1399,11 +1402,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 None if answer != 'n'
                                     && !work.app.sessions[index].approval_whole() =>
                                 {
-                                    work.app.notice = "The whole card is not on screen, so y and a are off: enlarge the terminal or press n".into()
+                                    work.app.notice = "The whole card is not on screen, so y and a are off: enlarge the terminal or press n".into();
                                 }
                                 None => {
                                     work.app.notice =
-                                        "Read the approval card first; press y or n again (a always allows, not for push)".into()
+                                        "Read the approval card first; press y or n again (a always allows, not for push)".into();
                                 }
                             }
                         }
@@ -1481,12 +1484,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             work.app.sessions[index].toggle_tool_results();
                         }
                         KeyCode::F(1) if work.app.sessions[index].draft.is_empty() => {
-                            work.app.completion = Some(alfredo_tui::commands::Completion::all())
+                            work.app.completion = Some(alfredo_tui::commands::Completion::all());
                         }
                         // The open model list owns the arrows; Enter picks unless a command is typed.
                         KeyCode::Up if work.app.models_visible => work.app.move_model_cursor(false),
                         KeyCode::Down if work.app.models_visible => {
-                            work.app.move_model_cursor(true)
+                            work.app.move_model_cursor(true);
                         }
                         KeyCode::Enter
                             if work.app.models_visible
@@ -1497,12 +1500,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         KeyCode::Up if work.tasks.visible && work.tasks.agent_shown().is_none() => {
-                            work.tasks.select_task(false)
+                            work.tasks.select_task(false);
                         }
                         KeyCode::Down
                             if work.tasks.visible && work.tasks.agent_shown().is_none() =>
                         {
-                            work.tasks.select_task(true)
+                            work.tasks.select_task(true);
                         }
                         KeyCode::Left
                             if work.tasks.visible && key.modifiers.contains(KeyModifiers::ALT) =>
@@ -1560,7 +1563,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Tab => work.app.selected = (index + 1) % work.app.sessions.len(),
                         KeyCode::BackTab => {
                             work.app.selected =
-                                (index + work.app.sessions.len() - 1) % work.app.sessions.len()
+                                (index + work.app.sessions.len() - 1) % work.app.sessions.len();
                         }
                         KeyCode::Esc if work.app.models_visible => work.app.models_visible = false,
                         KeyCode::Esc if work.tasks.agent_shown().is_some() => {
@@ -1595,9 +1598,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 || work.tasks.visible =>
                         {
                             if key.code == KeyCode::Home {
-                                work.app.sessions[index].home()
+                                work.app.sessions[index].home();
                             } else {
-                                work.app.sessions[index].end()
+                                work.app.sessions[index].end();
                             }
                         }
                         KeyCode::Home => work.app.sessions[index].home_key(ctrl),
@@ -2103,7 +2106,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     } else if previous.is_some() {
                                         work.app.sessions[origin]
                                             .retry_command(&id)
-                                            .map(|_| id.clone())
+                                            .map(|()| id.clone())
                                     } else {
                                         work.app.sessions[origin].submit_command(text, intent)
                                     };
@@ -2236,10 +2239,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                         KeyCode::PageUp if work.tasks.agent_shown().is_some() => {
-                            work.tasks.agent_shown().unwrap().scroll_rows(-10)
+                            work.tasks.agent_shown().unwrap().scroll_rows(-10);
                         }
                         KeyCode::PageDown if work.tasks.agent_shown().is_some() => {
-                            work.tasks.agent_shown().unwrap().scroll_rows(10)
+                            work.tasks.agent_shown().unwrap().scroll_rows(10);
                         }
                         KeyCode::PageUp => {
                             if work.app.models_visible {
@@ -2250,7 +2253,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 work.tasks.page_details(false);
                                 continue;
                             }
-                            work.app.sessions[index].scroll_rows(-10)
+                            work.app.sessions[index].scroll_rows(-10);
                         }
                         KeyCode::PageDown => {
                             if work.app.models_visible {
@@ -2261,7 +2264,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 work.tasks.page_details(true);
                                 continue;
                             }
-                            work.app.sessions[index].scroll_rows(10)
+                            work.app.sessions[index].scroll_rows(10);
                         }
                         KeyCode::Char(ch)
                             if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
@@ -2441,7 +2444,7 @@ fn stage_ready_wayfinder(
         let exists = session.commands().iter().find(|command| command.id == id);
         let admitted = match exists {
             Some(command) if matches!(command.state, CommandState::Pending) || cancelled => Ok(id),
-            Some(_) => work.app.sessions[origin].retry_command(&id).map(|_| id),
+            Some(_) => work.app.sessions[origin].retry_command(&id).map(|()| id),
             None => {
                 work.app.sessions[origin].submit_wayfinder_command(user_message, request.clone())
             }

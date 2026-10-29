@@ -514,7 +514,7 @@ impl Session {
             && self
                 .timing
                 .as_ref()
-                .is_some_and(|timing| timing.has_admission())
+                .is_some_and(super::client_timing::Timing::has_admission)
         {
             "Waiting for model server".into()
         } else {
@@ -541,7 +541,7 @@ impl Session {
             && self
                 .timing
                 .as_ref()
-                .is_some_and(|timing| timing.has_admission())
+                .is_some_and(super::client_timing::Timing::has_admission)
         {
             Some("waiting for model")
         } else {
@@ -2449,7 +2449,7 @@ impl Session {
                     || self
                         .timing
                         .as_ref()
-                        .is_some_and(|timing| timing.has_admission()) => {}
+                        .is_some_and(super::client_timing::Timing::has_admission) => {}
             Update::CapacityWait { live } => {
                 self.queued = true;
                 self.queue_observation = None;

@@ -102,7 +102,7 @@ impl Progress {
             match &outcome.result {
                 Some(Ok(())) if self.settled.insert(id) => lines.push(format!("#{id} accepted")),
                 Some(Err(reason)) if self.settled.insert(id) => {
-                    lines.push(format!("#{id} failed: {}", failed_reason(outcome, reason)))
+                    lines.push(format!("#{id} failed: {}", failed_reason(outcome, reason)));
                 }
                 _ => {}
             }
@@ -169,7 +169,9 @@ impl HistoryWatch {
         }
         self.lengths = lengths;
         self.measured += 1;
-        let warning = sessions.iter().find_map(|s| s.command_history_warning())?;
+        let warning = sessions
+            .iter()
+            .find_map(alfredo_tui::model::Session::command_history_warning)?;
         self.warned = true;
         Some(warning)
     }

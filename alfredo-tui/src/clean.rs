@@ -207,7 +207,7 @@ pub async fn plan(store: &TaskStore) -> Result<Plan, String> {
                 task: task_id,
                 run: run.clone(),
                 reason: reason.into(),
-            })
+            });
         };
         let Some(task) = snapshot.tasks.iter().find(|task| task.id == task_id) else {
             keep("task is unknown");

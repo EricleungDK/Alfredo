@@ -229,7 +229,7 @@ pub async fn summarize(
         }
         Ok(text)
     };
-    let (_, collected) = tokio::join!(call, collect);
+    let ((), collected) = tokio::join!(call, collect);
     let text = collected?;
     clean_summary(&text).ok_or_else(|| "the model returned an empty summary".to_string())
 }

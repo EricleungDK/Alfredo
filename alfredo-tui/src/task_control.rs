@@ -364,7 +364,7 @@ impl TaskControl {
                 // A run cancelled by the user is requeued, not repaired.
                 TaskStatus::Cancelled if task.run.is_some() => status.cancelled += 1,
                 TaskStatus::Failed | TaskStatus::Rejected if task.run.is_some() => {
-                    status.repair += 1
+                    status.repair += 1;
                 }
                 TaskStatus::Accepted if task.repair_of.is_some() => status.resolve += 1,
                 _ => {}
@@ -1842,7 +1842,7 @@ impl TaskControl {
     }
 
     /// Select one eligible launch without starting a worker or reserving its attempt.
-    /// The caller must save the returned exact intent before dispatch_prepared.
+    /// The caller must save the returned exact intent before `dispatch_prepared`.
     pub fn prepare_dispatch(&mut self) -> Result<Option<crate::dispatch::RunRequest>, String> {
         if self.scope_status.blocked
             || !self.dispatch.enabled

@@ -783,7 +783,7 @@ impl Planner {
                 tasks: vec![Step { title: "Validation".into(), acceptance: vec!["Validation".into()], model: model.clone(),
                     dependencies: vec![], policy: WorkPolicy { files: vec!["file".into()], check: vec!["true".into()] } }],
             };
-            if let Err(error) = envelope.validate().and_then(|_| {
+            if let Err(error) = envelope.validate().and_then(|()| {
                 if reference.as_ref().is_some_and(|value| value.len() > 192 * 1024) {
                     Err("Architect reference exceeds context budget".into())
                 } else { Ok(()) }
@@ -886,7 +886,11 @@ impl Planner {
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         loop {
-            let event = match self.events.as_mut().map(|events| events.try_recv()) {
+            let event = match self
+                .events
+                .as_mut()
+                .map(tokio::sync::mpsc::Receiver::try_recv)
+            {
                 Some(Ok(event)) => event,
                 Some(Err(mpsc::error::TryRecvError::Disconnected)) => {
                     self.notice =
@@ -930,12 +934,12 @@ impl Planner {
                 }
                 Update::Queued => {
                     self.notice =
-                        "Plan waiting for shared Alfredo capacity · no action taken".into()
+                        "Plan waiting for shared Alfredo capacity · no action taken".into();
                 }
                 Update::CapacityWait { live } => {
                     self.notice = format!(
                     "Plan waiting for another Alfredo process (capacity {live}) · no action taken"
-                )
+                );
                 }
                 Update::QueueProgress(queue) => {
                     self.notice = format!(
@@ -951,7 +955,7 @@ impl Planner {
                 | Update::Stopped(_)
                 | Update::Notice(_) => {}
                 Update::Admitted => {
-                    self.notice = "Plan waiting for model server · no action taken".into()
+                    self.notice = "Plan waiting for model server · no action taken".into();
                 }
                 Update::Retrying(retry) => {
                     self.notice = format!(
@@ -959,7 +963,7 @@ impl Planner {
                         retry.delay.as_secs(),
                         retry.retry,
                         retry.limit
-                    )
+                    );
                 }
                 Update::Token(token) => {
                     if self.partial.len() + token.len() > 128 * 1024 {

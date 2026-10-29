@@ -1,4 +1,4 @@
-//! Read tier git tools (issue #234): git_status, git_branch, git_log, git_diff on the
+//! Read tier git tools (issue #234): `git_status`, `git_branch`, `git_log`, `git_diff` on the
 //! Coding Workspace. Strictly read-only: no fetch, no optional locks (the index is not
 //! refreshed), hooks and fsmonitor off, and model arguments cannot become options
 //! (refs starting with `-` are refused, `--end-of-options` and `--` separate them).
@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Commits git_log shows by default and at most.
+/// Commits `git_log` shows by default and at most.
 const DEFAULT_COMMITS: u64 = 20;
 const MAX_COMMITS: u64 = 200;
 /// Longest ref or path argument accepted.
@@ -403,7 +403,7 @@ pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
 }
 
 /// [`refuse_filters`] with the listing read up to `limit` bytes within `deadline`. A cut or
-/// late listing is an error (run_bounded stops git), so the gate never trusts a prefix.
+/// late listing is an error (`run_bounded` stops git), so the gate never trusts a prefix.
 fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), String> {
     refuse_keys_within(
         root,

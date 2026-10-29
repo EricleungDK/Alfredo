@@ -1,7 +1,7 @@
 //! Read-only, non-atomic observations of selected-model metadata, never a runtime pin.
 //! Field contracts checked against official Ollama docs on 2026-09-26:
-//! https://docs.ollama.com/api/tags and https://docs.ollama.com/api/ps
-//! https://github.com/ollama/ollama/blob/main/docs/api.md#version
+//! <https://docs.ollama.com/api/tags> and <https://docs.ollama.com/api/ps>
+//! <https://github.com/ollama/ollama/blob/main/docs/api.md#version>
 use crate::provider::Ollama;
 use serde::{
     de::{DeserializeSeed, MapAccess, SeqAccess, Visitor},

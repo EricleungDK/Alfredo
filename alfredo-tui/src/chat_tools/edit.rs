@@ -1,11 +1,11 @@
-//! Mutating tier (issue #235): write_file and edit_file on the Coding Workspace
+//! Mutating tier (issue #235): `write_file` and `edit_file` on the Coding Workspace
 //! working tree. Each call pauses for owner Approval; [`preview`] builds the card
 //! (and refuses invalid calls before asking), the run functions re-check and write.
 use super::{display, excluded, resolve, text_arg, Tier, Tool};
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
 
-/// Largest file write_file or edit_file produces or edits, in bytes.
+/// Largest file `write_file` or `edit_file` produces or edits, in bytes.
 pub(crate) const MAX_FILE: usize = 1024 * 1024;
 /// Most lines an approval card's diff may hold (issue #269). The count is every line of
 /// the diff text: the `@@` header, `-`/`+` lines, line-ending notes and the
@@ -56,7 +56,7 @@ pub(crate) struct Change {
     pub fingerprint: String,
 }
 
-/// Content hash of the call's target file, or `absent`. A write_file target under
+/// Content hash of the call's target file, or `absent`. A `write_file` target under
 /// missing directories adds `+dirs:` and the directories it would create. `None` when `name` is not
 /// one of these tools.
 pub(crate) fn fingerprint(
@@ -94,7 +94,7 @@ pub(crate) fn fingerprint(
     }))
 }
 
-/// The file a write_file/edit_file call changes and its workspace-relative display form
+/// The file a `write_file/edit_file` call changes and its workspace-relative display form
 /// (issue #325: `/undo` keys its pre-image on it). `None` when `name` is not one of these
 /// tools.
 pub(crate) fn target(
@@ -171,7 +171,7 @@ struct Target {
 }
 
 /// Resolve a path that may not exist yet. Its parent must exist inside the workspace,
-/// unless `create_dirs` (write_file) and every missing parent lies below a real,
+/// unless `create_dirs` (`write_file`) and every missing parent lies below a real,
 /// non-symlink, writable directory inside the workspace; the missing ones are then
 /// returned in [`Target::new_dirs`]. The same exclusion policy applies to each of them.
 fn resolve_target(root: &Path, path: &str, create_dirs: bool) -> Result<Target, String> {

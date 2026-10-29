@@ -49,7 +49,7 @@ pub fn hidden(c: char) -> bool {
         )
 }
 
-/// Unicode Default_Ignorable_Code_Point (DerivedCoreProperties, Unicode 16) characters
+/// Unicode `Default_Ignorable_Code_Point` (`DerivedCoreProperties`, Unicode 16) characters
 /// that [`hidden`] does not already flag: they draw as nothing in most fonts and
 /// renderers, so a card could show other text than the bytes hold (issue #468).
 fn default_ignorable(c: char) -> bool {
@@ -69,7 +69,7 @@ fn default_ignorable(c: char) -> bool {
 }
 
 /// What the approval card and the chat transcript show as `<U+XXXX>` instead of drawing:
-/// [`hidden`] plus every Default_Ignorable code point. One list, so the card and the
+/// [`hidden`] plus every `Default_Ignorable` code point. One list, so the card and the
 /// transcript agree (issues #305, #436, #468). Narrower than widening [`hidden`], which
 /// `propose_plan`, project notes and the planner also use, so their text stays as typed.
 pub fn card_hidden(c: char) -> bool {
@@ -159,7 +159,7 @@ pub fn single_line_visible_tabs(text: &str) -> String {
 /// [`safe_visible`] on one line.
 ///
 /// Control characters are dropped as before (headless stderr, issue #361): only the
-/// Default_Ignorable and format characters of [`card_hidden`] are shown as `<U+XXXX>`
+/// `Default_Ignorable` and format characters of [`card_hidden`] are shown as `<U+XXXX>`
 /// (issue #468).
 pub fn single_line_visible(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
