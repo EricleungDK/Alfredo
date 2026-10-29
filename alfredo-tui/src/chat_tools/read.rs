@@ -245,9 +245,18 @@ fn ignore_not_applied(reason: &str) -> Option<String> {
         return None;
     }
     let clause = reason.split(';').next().unwrap_or(reason);
+    // git_read words an include refusal as a list of every key kind it gates; name the cause.
+    let clause = if clause.starts_with("repository config defines filter drivers, includes") {
+        "repository config includes another file"
+    } else {
+        clause
+    };
     let mut shown = String::new();
     for c in clause.chars().take(200) {
-        if c.is_control() {
+        // Control characters and invisible format characters (zero-width, bidi, U+2028).
+        if c.is_control()
+            || matches!(c, '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}')
+        {
             shown.push_str(&format!("<U+{:04X}>", u32::from(c)));
         } else {
             shown.push(c);
