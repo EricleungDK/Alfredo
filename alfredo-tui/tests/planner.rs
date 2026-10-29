@@ -728,24 +728,41 @@ fn esc_cancels_only_a_manual_plan_request_with_an_empty_prompt_on_the_plan_pane(
     control.refresh(&runtime);
     wait(&mut control, |c| !c.pending);
     let mut app = alfredo_tui::model::App::new("fixture".into());
-    assert!(!control.esc_cancels_plan(&app), "nothing in flight");
+    assert!(!control.esc_cancels_plan(&app, false), "nothing in flight");
     control
         .command(&runtime, "/plan Implement calculation", "fixture")
         .unwrap();
     control.set_visible(true);
     assert!(control.manual_plan_in_flight());
-    assert!(control.esc_cancels_plan(&app));
+    assert!(control.esc_cancels_plan(&app, false));
     app.sessions[0].insert("typed");
-    assert!(!control.esc_cancels_plan(&app), "a typed prompt keeps Esc");
+    assert!(!control.esc_cancels_plan(&app, false), "a typed prompt keeps Esc");
     app.sessions[0].clear_draft();
     app.models_visible = true;
-    assert!(!control.esc_cancels_plan(&app), "the model picker owns Esc");
+    assert!(!control.esc_cancels_plan(&app, false), "the model picker owns Esc");
     app.models_visible = false;
     app.pane.focus = Some(alfredo_tui::side_pane::Section::Work);
-    assert!(!control.esc_cancels_plan(&app), "a focused pane owns Esc");
+    assert!(!control.esc_cancels_plan(&app, false), "a focused pane owns Esc");
     app.pane.focus = None;
+    assert!(
+        !control.esc_cancels_plan(&app, true),
+        "a pending command intent would leave /plan-cancel typed"
+    );
+    app.completion = alfredo_tui::commands::Completion::with_models("/pl", &[]);
+    assert!(app.completion.is_some());
+    assert!(!control.esc_cancels_plan(&app, false), "the popup owns Esc");
+    app.completion = None;
+    control.planner.visible = false;
+    assert!(!control.esc_cancels_plan(&app, false), "plan pane hidden");
+    control.planner.visible = true;
+    // A running chat reply does not keep Esc: the plan pane is the open view.
+    app.sessions[0].insert("hi");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].clear_draft();
+    assert!(app.sessions[0].status.active());
+    assert!(control.esc_cancels_plan(&app, false), "outranks a chat reply");
     control.set_visible(false);
-    assert!(!control.esc_cancels_plan(&app), "plan pane not shown");
+    assert!(!control.esc_cancels_plan(&app, false), "plan pane not shown");
     control.set_visible(true);
     // Autopilot's own planning stays with /stop.
     let status = |state| Status {
@@ -761,10 +778,10 @@ fn esc_cancels_only_a_manual_plan_request_with_an_empty_prompt_on_the_plan_pane(
     };
     control.autopilot = Some(status(RunState::Planning));
     assert!(!control.manual_plan_in_flight());
-    assert!(!control.esc_cancels_plan(&app));
+    assert!(!control.esc_cancels_plan(&app, false));
     control.autopilot = Some(status(RunState::Done));
     assert!(
-        control.esc_cancels_plan(&app),
+        control.esc_cancels_plan(&app, false),
         "a finished run does not own Esc"
     );
     // The routed command is /plan-cancel itself (the console's durable route): same
@@ -783,7 +800,7 @@ fn esc_cancels_only_a_manual_plan_request_with_an_empty_prompt_on_the_plan_pane(
         control.planner.notice,
         "Planning stopped · inspect retained draft before continuing"
     );
-    assert!(!control.esc_cancels_plan(&app));
+    assert!(!control.esc_cancels_plan(&app, false));
     for _ in 0..10 {
         control.poll();
         thread::sleep(Duration::from_millis(2));
@@ -814,7 +831,7 @@ fn esc_does_not_cancel_an_idle_plan_draft() {
     let app = alfredo_tui::model::App::new("fixture".into());
     assert!(control.planner.visible && !control.planner.active());
     assert!(!control.manual_plan_in_flight());
-    assert!(!control.esc_cancels_plan(&app));
+    assert!(!control.esc_cancels_plan(&app, false));
     assert!(control.planner.draft.is_some());
 }
 
