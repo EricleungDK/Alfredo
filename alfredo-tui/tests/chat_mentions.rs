@@ -257,6 +257,50 @@ fn an_excludes_file_value_git_cannot_expand_is_refused_naming_it() {
 }
 
 #[test]
+fn a_worktree_scope_excludes_file_still_hides_its_files_from_attach_and_completion() {
+    let dir = repo();
+    let root = dir.path();
+    git(root, &["config", "extensions.worktreeConfig", "true"]);
+    let rules = root.join(".git/private-ignore");
+    fs::write(&rules, "notes/private.txt\n").unwrap();
+    git(
+        root,
+        &[
+            "config",
+            "--worktree",
+            "core.excludesFile",
+            &rules.display().to_string(),
+        ],
+    );
+    fs::create_dir_all(root.join("notes")).unwrap();
+    fs::write(root.join("notes/private.txt"), "untracked\n").unwrap();
+    fs::write(root.join("notes/ok.txt"), "untracked\n").unwrap();
+    let out = attach(root, "see @notes/private.txt and @notes/ok.txt");
+    assert!(!out.block.contains("private.txt"), "{out:?}");
+    assert!(out.block.contains("FILE notes/ok.txt"), "{out:?}");
+    assert!(
+        out.notices
+            .iter()
+            .any(|n| n.starts_with("@notes/private.txt: not attached (ignored by .gitignore")),
+        "{:?}",
+        out.notices
+    );
+    let found = complete(root, "notes/");
+    assert!(found.contains(&"notes/ok.txt".to_string()), "{found:?}");
+    assert!(
+        !found.contains(&"notes/private.txt".to_string()),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn an_empty_excludes_file_value_means_no_file_and_refuses_nothing() {
+    let dir = repo_with_excludes("");
+    let out = attach(dir.path(), "see @notes/ok.txt");
+    assert!(out.block.contains("FILE notes/ok.txt"), "{out:?}");
+}
+
+#[test]
 fn a_missing_excludes_file_in_the_repository_config_refuses_nothing() {
     let dir = repo_with_excludes(".git/not-there");
     let out = attach(dir.path(), "see @notes/ok.txt");
