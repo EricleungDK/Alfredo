@@ -1630,6 +1630,14 @@ impl TaskControl {
         if self.workers.len() >= 4 || self.workers.contains_key(&task) {
             return Err("Worker already active or four-worker limit reached".into());
         }
+        if let Some(proposed) = self.snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .tasks
+                .iter()
+                .find(|item| item.id == task && item.status == crate::tasks::TaskStatus::Proposed)
+        }) {
+            return Err(crate::tasks::proposed_run(proposed.id));
+        }
         if let Some(blocker) = crate::doctor::sandbox_blocker() {
             return Err(blocker);
         }
@@ -1652,8 +1660,11 @@ impl TaskControl {
             .iter()
             .find(|candidate| candidate.id == task)
             .ok_or("Task not found")?;
-        if selected.status == crate::tasks::TaskStatus::Proposed {
-            return Err(crate::tasks::proposed_run(task));
+        for dependency in &selected.dependencies {
+            // The worker enforces the same rule; refusing here records no start notice.
+            snapshot
+                .dependency_source(*dependency)
+                .map_err(|error| error.to_string())?;
         }
         if let Some(blocker) = self.scope_status.run_blocker(snapshot, selected) {
             return Err(blocker);
