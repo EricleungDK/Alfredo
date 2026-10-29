@@ -936,7 +936,10 @@ fn written_key(key: &str) -> String {
         return known.into();
     }
     if key.starts_with("remote.") {
-        for (lower, written) in [(".uploadpack", ".uploadPack"), (".receivepack", ".receivePack")] {
+        for (lower, written) in [
+            (".uploadpack", ".uploadPack"),
+            (".receivepack", ".receivePack"),
+        ] {
             if let Some(head) = key.strip_suffix(lower) {
                 return format!("{head}{written}");
             }
@@ -4052,13 +4055,22 @@ mod host_git_tests {
             ("includeif.gitdir:/x/.path", "includeIf.gitdir:/x/.path"),
         ] {
             let message = super::config_refusal(listed);
-            assert!(message.starts_with(super::CONFIG_REFUSAL_PREFIX), "{message}");
-            assert!(message.contains(&format!("sets \"{written}\"")), "{message}");
+            assert!(
+                message.starts_with(super::CONFIG_REFUSAL_PREFIX),
+                "{message}"
+            );
+            assert!(
+                message.contains(&format!("sets \"{written}\"")),
+                "{message}"
+            );
             assert!(
                 message.ends_with(&format!("git config --local --unset {written}")),
                 "{message}"
             );
-            assert!(message.contains("run a program or read a file"), "{message}");
+            assert!(
+                message.contains("run a program or read a file"),
+                "{message}"
+            );
         }
         let odd = super::config_refusal("filter.a b'c\n.clean");
         assert!(odd.contains("sets \"filter.a b'c.clean\""), "{odd}");
@@ -4075,7 +4087,10 @@ mod host_git_tests {
         let root = unique_root("blocker");
         fixture_git(&root, &["init", "-q"]);
         assert_eq!(super::repository_blocker(&root), Ok(()));
-        fixture_git(&root, &["config", "core.excludesFile", "/nonexistent/ignore"]);
+        fixture_git(
+            &root,
+            &["config", "core.excludesFile", "/nonexistent/ignore"],
+        );
         let message = super::repository_blocker(&root).unwrap_err();
         assert!(message.contains("\"core.excludesFile\""), "{message}");
         fixture_git(&root, &["config", "--unset", "core.excludesFile"]);

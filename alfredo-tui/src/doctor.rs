@@ -147,18 +147,21 @@ pub async fn inspect(
     }
     let git = match root_check {
         Err(error) => Err(error),
-        Ok(root) => async {
-            let workspace = root.as_path();
-            if !crate::worker::has_head_commit(workspace) {
-                return Err(crate::worker::NO_COMMITS.to_string());
+        Ok(root) => {
+            async {
+                let workspace = root.as_path();
+                if !crate::worker::has_head_commit(workspace) {
+                    return Err(crate::worker::NO_COMMITS.to_string());
+                }
+                let config =
+                    crate::worker::git(workspace, &crate::worker::REPOSITORY_CONFIG_ARGS).await?;
+                if let Some(key) = crate::worker::qualification_key(&config) {
+                    return Err(crate::worker::config_refusal(key));
+                }
+                Ok::<_, String>(root)
             }
-            let config = crate::worker::git(workspace, &crate::worker::REPOSITORY_CONFIG_ARGS).await?;
-            if let Some(key) = crate::worker::qualification_key(&config) {
-                return Err(crate::worker::config_refusal(key));
-            }
-            Ok::<_, String>(root)
+            .await
         }
-        .await,
     };
     match git {
         Ok(root) => lines.push(format!(
