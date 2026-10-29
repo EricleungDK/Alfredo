@@ -4,6 +4,7 @@
 //! (refs starting with `-` are refused, `--end-of-options` and `--` separate them).
 use super::{excluded, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
 use std::{
     cell::Cell,
@@ -815,30 +816,41 @@ pub(crate) fn is_ignored(root: &Path, rel: &str, excludes: Option<&Path>) -> Res
 /// when the repository config does not set it (or names a file that does not exist), the
 /// path when it is an ordinary file (relative values resolve against `root`, as git does with
 /// `-C root`), an error when it is anything else or cannot be read. Never opens the file.
-/// Read from the repository config alone (`--local`, without includes, so the hardened
-/// command-line override and a FIFO include target are not consulted).
+/// Read from the repository scopes (`local` and `worktree`) without includes, so the hardened
+/// command-line override is skipped and a FIFO include target is not opened.
 pub(crate) fn repository_excludes(root: &Path) -> Result<Option<PathBuf>, String> {
     const UNUSABLE: &str = "core.excludesFile in the repository config is not an ordinary file git can read safely; refused";
     refuse_includes(root, INCLUDES_NOT_RUN)?;
     let mut command = hardened_command(root)?;
+    // Every repository scope (`local`, `worktree`), last value wins as in git; the hardened
+    // command-line override (`command` scope) and the hidden system/global scopes are skipped.
     command.args([
         "config",
-        "--local",
         "--no-includes",
+        "--show-scope",
+        "-z",
         "--type=path",
-        "--get",
+        "--get-all",
         "core.excludesFile",
     ]);
     let (status, out, _) = run_bounded(command, 4096, call_clock().left())?;
     let code = status.and_then(|status| status.code());
-    if code == Some(1) && out.is_empty() {
-        return Ok(None);
-    }
     if code != Some(0) {
         return Err(UNUSABLE.to_string());
     }
-    let configured = PathBuf::from(String::from_utf8_lossy(&out).trim_end_matches('\n'));
-    let path = root.join(configured);
+    // `scope NUL value NUL` records.
+    let mut fields = out.split(|&byte| byte == 0);
+    let mut configured: Option<&[u8]> = None;
+    while let (Some(scope), Some(value)) = (fields.next(), fields.next()) {
+        if scope == b"local" || scope == b"worktree" {
+            configured = Some(value);
+        }
+    }
+    // An empty value is no file, as for git.
+    let Some(configured) = configured.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let path = root.join(std::ffi::OsStr::from_bytes(configured));
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.is_file() => Ok(Some(path)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
