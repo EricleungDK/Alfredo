@@ -725,3 +725,51 @@ fn no_head_commit_gives_one_notice() {
     assert!(out.block.is_empty());
     assert_eq!(out.notices.len(), 1);
 }
+
+#[test]
+fn a_non_utf8_excludes_file_path_never_lets_an_ignored_file_through() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = repo();
+    let root = dir.path();
+    let rules = std::ffi::OsStr::from_bytes(b"ign\xff");
+    fs::write(root.join(".git").join(rules), "secret.txt\n").unwrap();
+    let configured = std::ffi::OsStr::from_bytes(b".git/ign\xff");
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("config")
+        .arg("core.excludesFile")
+        .arg(configured)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    fs::write(root.join("secret.txt"), "ignored\n").unwrap();
+    fs::write(root.join("ok.txt"), "untracked\n").unwrap();
+    let out = attach(root, "see @secret.txt and @ok.txt");
+    assert!(!out.block.contains("secret.txt"), "{out:?}");
+    assert!(!out.block.contains("ignored"), "{out:?}");
+    assert!(
+        out.notices
+            .iter()
+            .any(|n| n.starts_with("@secret.txt: not attached")),
+        "{:?}",
+        out.notices
+    );
+    let found = complete(root, "secret");
+    assert!(!found.contains(&"secret.txt".to_string()), "{found:?}");
+}
+
+#[test]
+fn a_workspace_inside_a_larger_repository_refuses_naming_the_cause() {
+    let dir = repo();
+    let sub = dir.path().join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("new.txt"), "untracked\n").unwrap();
+    let out = attach(&sub, "see @new.txt");
+    assert!(out.block.is_empty(), "{out:?}");
+    assert!(
+        out.notices.len() == 1 && out.notices[0].contains("not the top of a git repository"),
+        "{:?}",
+        out.notices
+    );
+}
