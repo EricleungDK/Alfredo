@@ -952,6 +952,66 @@ fn run_on_an_approved_task_with_an_unaccepted_dependency_still_names_the_depende
 }
 
 #[test]
+fn run_after_the_dependency_was_just_accepted_is_not_refused_by_a_stale_snapshot() {
+    use alfredo_tui::task_control::TaskControl;
+    use std::time::Duration;
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace");
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["add", "-A"],
+        vec![
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "fixture",
+            "--allow-empty",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    // Task 1 is already accepted in the store; task 2 depends on it and is approved.
+    let (store, revision) = task_in_status(&fixture, TaskStatus::Accepted, false);
+    store.transact(proposal("child", revision, vec![1])).unwrap();
+    store
+        .transact(permit_request("permit", revision + 1, 2))
+        .unwrap();
+    store
+        .transact(Request {
+            correlation: "approve".into(),
+            expected_revision: revision + 2,
+            action: Action::Approve { task: 2 },
+        })
+        .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut control = TaskControl::new(store.clone());
+    control.set_provider(
+        alfredo_tui::provider::Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+    );
+    control.refresh(&runtime);
+    while control.pending {
+        control.poll();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // The terminal still holds the view from before the acceptance landed.
+    control.snapshot.as_mut().unwrap().tasks[0].status = TaskStatus::ReviewReady;
+    let result = control.command(&runtime, "/run 2", "fixture");
+    assert!(
+        result.is_ok(),
+        "stale snapshot refused a start the store accepts: {result:?}"
+    );
+}
+
+#[test]
 fn background_dispatch_refresh_does_not_block_commands_or_clear_pending_write_state() {
     use alfredo_tui::task_control::TaskControl;
     use std::{
