@@ -1014,6 +1014,70 @@ fn run_after_the_dependency_was_just_accepted_is_not_refused_by_a_stale_snapshot
 }
 
 #[test]
+fn run_on_a_repair_task_is_not_refused_for_an_unaccepted_dependency_like_the_store() {
+    use alfredo_tui::task_control::TaskControl;
+    use std::time::{Duration, Instant};
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace");
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["add", "-A"],
+        vec![
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "fixture",
+            "--allow-empty",
+        ],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let store = fixture.store("run-repair-dependency");
+    store.transact(proposal("parent", 0, vec![])).unwrap();
+    store.transact(proposal("child", 1, vec![1])).unwrap();
+    store.transact(permit_request("permit", 2, 2)).unwrap();
+    store
+        .transact(Request {
+            correlation: "approve".into(),
+            expected_revision: 3,
+            action: Action::Approve { task: 2 },
+        })
+        .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut control = TaskControl::new(store.clone());
+    control.set_provider(
+        alfredo_tui::provider::Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+    );
+    control.refresh(&runtime);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.pending {
+        control.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // The store skips the dependency rule for a repair, so the precheck must too.
+    control.snapshot.as_mut().unwrap().tasks[1].repair_of = Some(1);
+    let result = control.command(&runtime, "/run 2", "fixture");
+    if let Err(error) = &result {
+        assert!(!error.contains("Dependency"), "{error}");
+    }
+    while control.pending || !control.workers.is_empty() {
+        control.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
 fn background_dispatch_refresh_does_not_block_commands_or_clear_pending_write_state() {
     use alfredo_tui::task_control::TaskControl;
     use std::{
