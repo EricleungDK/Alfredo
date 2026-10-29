@@ -811,6 +811,41 @@ pub(crate) fn is_ignored(root: &Path, rel: &str, excludes: Option<&Path>) -> Res
     }
 }
 
+/// The repository's own `core.excludesFile`, vetted for [`is_ignored`] (issue #506): `None`
+/// when the repository config does not set it (or names a file that does not exist), the
+/// path when it is an ordinary file (relative values resolve against `root`, as git does with
+/// `-C root`), an error when it is anything else or cannot be read. Never opens the file.
+/// Read from the repository config alone (`--local`, without includes, so the hardened
+/// command-line override and a FIFO include target are not consulted).
+pub(crate) fn repository_excludes(root: &Path) -> Result<Option<PathBuf>, String> {
+    const UNUSABLE: &str = "core.excludesFile in the repository config is not an ordinary file git can read safely; refused";
+    refuse_includes(root, INCLUDES_NOT_RUN)?;
+    let mut command = hardened_command(root)?;
+    command.args([
+        "config",
+        "--local",
+        "--no-includes",
+        "--type=path",
+        "--get",
+        "core.excludesFile",
+    ]);
+    let (status, out, _) = run_bounded(command, 4096, call_clock().left())?;
+    let code = status.and_then(|status| status.code());
+    if code == Some(1) && out.is_empty() {
+        return Ok(None);
+    }
+    if code != Some(0) {
+        return Err(UNUSABLE.to_string());
+    }
+    let configured = PathBuf::from(String::from_utf8_lossy(&out).trim_end_matches('\n'));
+    let path = root.join(configured);
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_file() => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        _ => Err(UNUSABLE.to_string()),
+    }
+}
+
 /// The user's global git excludes file: `core.excludesFile` of the global config, else
 /// git's default `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`. Only if it
 /// exists. It can only hide more files from discovery, never show one.

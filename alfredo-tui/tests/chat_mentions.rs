@@ -245,6 +245,18 @@ fn a_symlinked_excludes_file_is_refused_without_being_opened() {
 }
 
 #[test]
+fn an_excludes_file_value_git_cannot_expand_is_refused_naming_it() {
+    let dir = repo_with_excludes("~nosuchuser/rules");
+    let out = attach(dir.path(), "see @notes/ok.txt");
+    assert!(out.block.is_empty(), "{out:?}");
+    assert!(
+        out.notices.len() == 1 && out.notices[0].contains("core.excludesFile"),
+        "{:?}",
+        out.notices
+    );
+}
+
+#[test]
 fn a_missing_excludes_file_in_the_repository_config_refuses_nothing() {
     let dir = repo_with_excludes(".git/not-there");
     let out = attach(dir.path(), "see @notes/ok.txt");

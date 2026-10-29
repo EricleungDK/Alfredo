@@ -253,10 +253,14 @@ fn ignored_untracked(root: &Path, relative: &str, check_failed: &mut bool) -> Op
     if *check_failed {
         return Some("the ignore check failed earlier in this prompt; refused".into());
     }
-    // One budget for the whole check; inside a completion call the outer budget stays.
-    match git_read::call_scope(IGNORE_DEADLINE, || {
-        git_read::is_ignored(root, relative, None)
-    }) {
+    // One budget for the whole check; inside a completion call the outer budget stays. The
+    // repository's own excludes file counts when it is an ordinary file; any other kind is
+    // refused unopened.
+    let checked = git_read::call_scope(IGNORE_DEADLINE, || {
+        let excludes = git_read::repository_excludes(root)?;
+        git_read::is_ignored(root, relative, excludes.as_deref())
+    });
+    match checked {
         Ok(false) => None,
         Ok(true) => Some("ignored by .gitignore and not tracked; refused".into()),
         Err(error) => {
