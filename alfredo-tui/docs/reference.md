@@ -1707,7 +1707,8 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   leading `[note: … is ignored …]` line. `read_file` is unchanged: it reads any
   non-excluded file by path. Outside git, or when git cannot list (a failing git, a
   repository config with filter drivers or includes, a listing over 16 MiB), the plain walk
-  is used with the fixed exclusions only. Nested repositories and submodule contents are
+  is used with the fixed exclusions only (when a repository config include or filter key is
+  the cause, the result starts with a `[note: .gitignore not applied (…)]` line naming it). Nested repositories and submodule contents are
   not listed in a git workspace.
 - **Secret files.** One list, used by every chat tool (`read_file`, `grep`, `list_files`,
   `write_file`, `edit_file`, `git_diff`, `git_commit`), by `@path` mentions and by planner

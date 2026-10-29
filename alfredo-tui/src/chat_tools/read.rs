@@ -236,9 +236,30 @@ fn noise(lower: &str) -> bool {
 /// Largest git listing used for discovery, in bytes; a bigger one falls back to the walk.
 const MAX_LISTING: usize = 16 << 20;
 
+/// The note for a listing git refused because of the repository config (an include or a
+/// filter key): `.gitignore` is not applied, so ignored files may appear. Names the first
+/// clause of the reason with control characters escaped as `<U+XXXX>`. Other failures (no
+/// repository, git missing) are the ordinary no-git case and carry no note.
+fn ignore_not_applied(reason: &str) -> Option<String> {
+    if !reason.starts_with("repository config") {
+        return None;
+    }
+    let clause = reason.split(';').next().unwrap_or(reason);
+    let mut shown = String::new();
+    for c in clause.chars().take(200) {
+        if c.is_control() {
+            shown.push_str(&format!("<U+{:04X}>", u32::from(c)));
+        } else {
+            shown.push(c);
+        }
+    }
+    Some(format!("note: .gitignore not applied ({shown})"))
+}
+
 /// Files chosen for discovery under `start` (an existing path inside `root`), in the
 /// order [`walk`] yields, whether the listing stopped early, and a note when `start` is
-/// itself ignored. In a git workspace git's ignore rules decide (tracked files stay);
+/// itself ignored or the repository config made git refuse the listing. In a git workspace
+/// git's ignore rules decide (tracked files stay);
 /// otherwise, or when git cannot list, the plain [`walk`] is the fallback. [`excluded`]
 /// and [`noise`] always apply on top, so ignore files can only hide more.
 pub(crate) fn discover(
@@ -261,9 +282,12 @@ pub(crate) fn discover(
         let note = format!("note: {rel} is ignored (by .gitignore or as a virtualenv or cache directory); listed because you named it");
         return (files, cut, Some(note));
     }
-    let Ok(listing) = git_read::list_unignored(root, &rel, excludes.as_deref(), MAX_LISTING) else {
-        let (files, cut) = walk(&canonical, start, limit, true);
-        return (files, cut, None);
+    let listing = match git_read::list_unignored(root, &rel, excludes.as_deref(), MAX_LISTING) {
+        Ok(listing) => listing,
+        Err(reason) => {
+            let (files, cut) = walk(&canonical, start, limit, true);
+            return (files, cut, ignore_not_applied(&reason));
+        }
     };
     let mut paths: Vec<Vec<&str>> = listing
         .iter()
