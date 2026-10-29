@@ -3856,6 +3856,42 @@ fn dirty_working_tree_warns_at_start_and_in_the_summary_without_touching_it() {
     assert!(reopened.report().unwrap().contains(&warning));
 }
 
+/// Issue #525: refused repository config is refused when `/go` starts, before any planner
+/// request: the message names the key as written, why, and the `git config` fix.
+#[test]
+fn go_refuses_repository_config_at_once_naming_the_key_and_the_fix() {
+    for (key, value) in [
+        ("filter.lfs.clean", "git-lfs clean -- %f"),
+        ("core.excludesFile", "/nonexistent/ignore"),
+        ("include.path", "/nonexistent/extra.config"),
+        ("extensions.partialClone", "origin"),
+    ] {
+        let fixture = Fixture::new();
+        git(&fixture.workspace, &["config", key, value]);
+        let server = one_good_task();
+        let runtime = Runtime::new().unwrap();
+        let mut control = control(&fixture, &server, &runtime);
+        let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+        for text in ["/go Make answer return 42", "/go"] {
+            let error = autopilot
+                .command(&runtime, &mut control, text, "fixture", 1)
+                .expect_err(&format!("{key}: {text} must be refused"));
+            assert!(error.contains(&format!("\"{key}\"")), "{key}: {error}");
+            assert!(
+                error.contains(&format!("git config --local --unset {key}")),
+                "{key}: {error}"
+            );
+            assert!(
+                error.contains("Alfredo will not run in this repository"),
+                "{key}: {error}"
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(server.count(), 0, "{key}: a planner request was sent");
+        assert!(!autopilot.running(), "{key}");
+    }
+}
+
 /// Issue #470: `/go` start checks uncommitted changes, and a nested gitfile to a FIFO makes
 /// `git status` block forever. The start must return within its deadline, and its notice
 /// must name the timeout instead of hanging or reporting a clean tree.

@@ -451,6 +451,27 @@ fn completion_walk_is_capped() {
     );
 }
 
+// Issue #524: discovery used to stop at COMPLETE_SCAN files, so a prefix that matches
+// only later files in discovery order listed nothing.
+#[test]
+fn completion_lists_files_past_the_scan_limit() {
+    let dir = tempdir::Dir::new();
+    let root = dir.path();
+    git(root, &["init", "-q", "--template="]);
+    for d in 0..52 {
+        fs::create_dir_all(root.join(format!("d{d:02}"))).unwrap();
+        for f in 0..100 {
+            fs::write(root.join(format!("d{d:02}/file{f}.txt")), "x\n").unwrap();
+        }
+    }
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "init"]);
+    let listed = complete(root, "d51/file7");
+    assert_eq!(listed.first().map(String::as_str), Some("d51/file7.txt"));
+    assert!(listed.iter().all(|path| path.starts_with("d51/file7")));
+    assert_eq!(listed.len(), alfredo_tui::chat_mentions::COMPLETE_SHOW);
+}
+
 #[test]
 fn excluded_names_are_refused_at_the_mention_level() {
     let dir = repo();

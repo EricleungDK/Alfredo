@@ -84,6 +84,12 @@ Every autopilot choice is an ordinary command (`/plan`, `/approve`, `/run`,
 
 - Linux x86-64 (WSL2 works; see [WSL notes](#wsl-notes)).
 - Git at `/usr/bin/git`, and a repository with at least one commit.
+  Alfredo refuses a repository whose Git config sets filters (`filter.*`), includes
+  (`include.*`, `includeIf.*`), a partial clone (`extensions.partialClone`, `remote.*.promisor`),
+  transport or ssh/proxy programs (`remote.*.uploadPack`, `core.sshCommand`, `core.gitProxy`),
+  `protocol.*.allow`, or `core.excludesFile`, `core.attributesFile`, `mailmap.file`,
+  `diff.orderFile`: `/go`, `--go` and `--doctor` name the key and the fix,
+  `git config --local --unset KEY`.
 - [Ollama](https://ollama.com) running locally, plus a model, e.g.
   `ollama pull qwen2.5-coder:14b`.
 - For coding workers: bubblewrap (`/usr/bin/bwrap`) and prlimit (`/usr/bin/prlimit`,

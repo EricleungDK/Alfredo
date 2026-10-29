@@ -853,6 +853,419 @@ fn a_submodule_config_fifo_include_never_stalls_a_write_tier_card() {
     }
 }
 
+/// Issue #516: the apply steps that run after approval. A true merge, a switch to an
+/// existing branch and `git add -- README.md sub` refresh the submodule's index when
+/// `.gitmodules` sets `ignore=none`, which runs its clean filter. Each is refused (naming the
+/// override) or runs no filter.
+fn apply_exposed_calls() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("git_merge", json!({"source": "alfredo/go-7"})),
+        ("git_switch", json!({"branch": "other"})),
+        (
+            "git_commit",
+            json!({"message": "m", "files": ["README.md", "sub"]}),
+        ),
+    ]
+}
+
+/// Issue #516: a repo with branches `alfredo/go-7` (true merge) and `other`, plus the
+/// ignore-none submodule fixture and an edited README; returns the submodule's config.
+fn apply_fixture(repo: &Repo) -> PathBuf {
+    repo.go_branch();
+    let config = repo_with_ignore_none_submodule(repo);
+    other_branch(repo);
+    fs::write(repo.root.join("README.md"), "# Demo\nedited\n").unwrap();
+    config
+}
+
+/// Issue #516: branch `other` differs from `main` by one file, so a switch has work to do.
+fn other_branch(repo: &Repo) {
+    git(&repo.root, &["checkout", "-q", "-b", "other"]);
+    fs::write(repo.root.join("other.txt"), "other\n").unwrap();
+    git(&repo.root, &["add", "other.txt"]);
+    git(&repo.root, &["commit", "-q", "-m", "other work"]);
+    git(&repo.root, &["checkout", "-q", "main"]);
+}
+
+/// Issue #516: merge and switch refuse a dirty tree, so only the commit keeps the edit.
+fn clean_unless_commit(repo: &Repo, tool: &str) {
+    if tool != "git_commit" {
+        git(&repo.root, &["checkout", "-q", "--", "README.md"]);
+    }
+}
+
+/// Issue #516: approving and applying never runs a submodule clean filter.
+#[test]
+fn a_submodule_filter_never_runs_from_an_approved_apply() {
+    let mut failures = Vec::new();
+    for (tool, arguments) in apply_exposed_calls() {
+        let repo = Repo::new();
+        let config = apply_fixture(&repo);
+        clean_unless_commit(&repo, tool);
+        let marker = repo.base.join("submodule-filter-ran");
+        append(
+            &config,
+            &format!(
+                "[filter \"x\"]\n\tclean = touch {}; cat\n",
+                marker.display()
+            ),
+        );
+        let outcome = repo.approve(tool, arguments.clone());
+        if marker.exists() {
+            failures.push(format!("{tool} {arguments} ran a filter: {outcome:?}"));
+        } else if let Err(error) = outcome {
+            if !(error.contains(".gitmodules") && error.contains("ignore")) {
+                failures.push(format!(
+                    "{tool} refused without naming the override: {error}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Issue #516: a FIFO `include.path` in the submodule config never stalls an apply step.
+#[test]
+fn a_submodule_config_fifo_include_never_stalls_an_approved_apply() {
+    let mut stalled = Vec::new();
+    for (tool, arguments) in apply_exposed_calls() {
+        let repo = Repo::new();
+        let config = apply_fixture(&repo);
+        clean_unless_commit(&repo, tool);
+        let fifo = repo.base.join("sub-include-fifo");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        append(
+            &config,
+            &format!("[include]\n\tpath = {}\n", fifo.display()),
+        );
+        let Ok(card) = repo.card(tool, arguments.clone()) else {
+            continue;
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let root = repo.root.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(approval::apply(&root, &card));
+        });
+        let outcome = receiver.recv_timeout(Duration::from_secs(3));
+        if outcome.is_err() {
+            // Release a git that is blocked reading the FIFO, then fail.
+            drop(fs::OpenOptions::new().write(true).open(&fifo));
+        }
+        if outcome.is_err() {
+            stalled.push(format!("{tool} {arguments}"));
+        }
+    }
+    assert!(
+        stalled.is_empty(),
+        "stalled on the FIFO include: {stalled:?}"
+    );
+}
+
+/// Issue #516: without the `ignore` override a submodule repository merges, switches and
+/// commits (a named gitlink included) as before.
+#[test]
+fn an_ordinary_submodule_repository_still_merges_switches_and_commits() {
+    for (tool, arguments) in apply_exposed_calls() {
+        let repo = Repo::new();
+        repo.go_branch();
+        ordinary_submodule_repo(&repo);
+        other_branch(&repo);
+        if tool == "git_commit" {
+            fs::write(repo.root.join("README.md"), "# Demo\nedited\n").unwrap();
+            stage_submodule_bump(&repo);
+        }
+        let done = repo.approve(tool, arguments.clone());
+        assert!(done.is_ok(), "{tool} {arguments}: {done:?}");
+    }
+}
+
+/// Issue #516: a branch created from the current commit and a commit of files that are not
+/// the submodule do not refresh it, so they stay allowed under the override.
+#[test]
+fn creating_a_branch_and_committing_other_files_still_work_under_the_override() {
+    let repo = Repo::new();
+    let config = apply_fixture(&repo);
+    let marker = repo.base.join("submodule-filter-ran");
+    append(&config, &filter_config(&marker));
+    let made = repo.approve("git_switch", json!({"branch": "feature/x", "create": true}));
+    assert!(made.is_ok(), "{made:?}");
+    let done = repo.approve(
+        "git_commit",
+        json!({"message": "edit", "files": ["README.md"]}),
+    );
+    assert!(done.is_ok(), "{done:?}");
+    assert!(!marker.exists(), "a submodule filter ran");
+}
+
+/// Issue #516: a pathspec that reaches the submodule is refused under the override, and the
+/// message names the override.
+#[test]
+fn a_commit_pathspec_that_reaches_an_override_submodule_is_refused() {
+    for files in [
+        json!(["README.md", "sub"]),
+        json!(["README.md", "sub/lib.txt"]),
+        json!(["README.md", "sub/"]),
+    ] {
+        let repo = Repo::new();
+        apply_fixture(&repo);
+        let error = repo
+            .card("git_commit", json!({"message": "m", "files": files}))
+            .unwrap_err();
+        assert!(
+            error.contains(".gitmodules") && error.contains("ignore"),
+            "{files}: {error}"
+        );
+    }
+}
+
+/// Issue #516: an override that is committed or staged, with no `.gitmodules` file in the
+/// worktree, is found too (git reads the index or HEAD copy then).
+#[test]
+fn a_committed_or_staged_ignore_override_is_found_without_a_worktree_file() {
+    for staged_only in [false, true] {
+        let repo = Repo::new();
+        apply_fixture(&repo);
+        if staged_only {
+            git(
+                &repo.root,
+                &[
+                    "config",
+                    "-f",
+                    ".gitmodules",
+                    "submodule.sub.ignore",
+                    "dirty",
+                ],
+            );
+            git(&repo.root, &["add", ".gitmodules"]);
+        }
+        fs::remove_file(repo.root.join(".gitmodules")).unwrap();
+        let error = repo
+            .card(
+                "git_commit",
+                json!({"message": "m", "files": ["README.md", "sub"]}),
+            )
+            .unwrap_err();
+        assert!(error.contains(".gitmodules"), "{staged_only}: {error}");
+    }
+}
+
+/// Issue #516: an override that only the branch being merged or switched to brings in is
+/// found too, before the card.
+#[test]
+fn an_override_brought_in_by_the_other_branch_is_refused() {
+    for tool in ["git_merge", "git_switch"] {
+        let repo = Repo::new();
+        repo.go_branch();
+        ordinary_submodule_repo(&repo);
+        git(&repo.root, &["checkout", "-q", "-b", "theirs"]);
+        git(
+            &repo.root,
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.sub.ignore",
+                "none",
+            ],
+        );
+        git(&repo.root, &["add", ".gitmodules"]);
+        git(&repo.root, &["commit", "-q", "-m", "override"]);
+        git(&repo.root, &["checkout", "-q", "main"]);
+        let arguments = match tool {
+            "git_merge" => json!({"source": "theirs"}),
+            _ => json!({"branch": "theirs"}),
+        };
+        let error = repo.card(tool, arguments).unwrap_err();
+        assert!(
+            error.contains(".gitmodules") && error.contains("ignore"),
+            "{error}"
+        );
+    }
+}
+
+/// Issue #516: a directory that holds a submodule reaches it.
+#[test]
+fn a_commit_of_a_directory_holding_an_override_submodule_is_refused() {
+    let repo = Repo::new();
+    apply_fixture(&repo);
+    let sha = git(&repo.root, &["rev-parse", "HEAD:sub"]);
+    git(
+        &repo.root,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{},deps/inner", sha.trim()),
+        ],
+    );
+    fs::create_dir_all(repo.root.join("deps")).unwrap();
+    let error = repo
+        .card("git_commit", json!({"message": "m", "files": ["deps"]}))
+        .unwrap_err();
+    assert!(
+        error.contains(".gitmodules") && error.contains("ignore"),
+        "{error}"
+    );
+}
+
+fn filter_config(marker: &Path) -> String {
+    format!(
+        "[filter \"x\"]\n\tclean = touch {}; cat\n",
+        marker.display()
+    )
+}
+
+/// Issue #516 (review): the override lives on branch `other` only, and a tag `other` at
+/// `main` shadows the branch for a DWIM revision lookup, but `git switch --no-guess other`
+/// checks out the branch. The check must read the branch's `.gitmodules`.
+#[test]
+fn a_tag_named_like_the_branch_does_not_hide_its_override() {
+    let repo = Repo::new();
+    ordinary_submodule_repo(&repo);
+    git(&repo.root, &["checkout", "-q", "-b", "other"]);
+    git(
+        &repo.root,
+        &[
+            "config",
+            "-f",
+            ".gitmodules",
+            "submodule.sub.ignore",
+            "none",
+        ],
+    );
+    git(&repo.root, &["add", ".gitmodules"]);
+    git(&repo.root, &["commit", "-q", "-m", "override"]);
+    git(&repo.root, &["checkout", "-q", "main"]);
+    git(&repo.root, &["tag", "other", "main"]);
+    fs::write(repo.root.join("sub/.gitattributes"), "* filter=x\n").unwrap();
+    let changed = repo.root.join("sub/lib.txt");
+    fs::write(&changed, "bil\n").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&changed)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+        .unwrap();
+    let marker = repo.base.join("submodule-filter-ran");
+    append(
+        &repo.root.join(".git/modules/sub/config"),
+        &filter_config(&marker),
+    );
+    let outcome = repo.approve("git_switch", json!({"branch": "other"}));
+    assert!(
+        !marker.exists(),
+        "switch ran a submodule filter: {outcome:?}"
+    );
+    let error = outcome.unwrap_err();
+    assert!(
+        error.contains(".gitmodules") && error.contains("ignore"),
+        "{error}"
+    );
+}
+
+/// Issue #516 (review): a nonexistent branch keeps its own message.
+#[test]
+fn switching_to_a_missing_branch_still_says_so() {
+    let repo = Repo::new();
+    apply_fixture(&repo);
+    let error = repo
+        .card("git_switch", json!({"branch": "nope"}))
+        .unwrap_err();
+    assert!(error.contains("no local branch nope"), "{error}");
+}
+
+/// Issue #516 (review): a tag named like the merge source resolves the same way for the
+/// override check and for `git merge`; nothing runs a filter.
+#[test]
+fn a_tag_named_like_the_merge_source_runs_no_filter() {
+    let repo = Repo::new();
+    repo.go_branch();
+    let config = repo_with_ignore_none_submodule(&repo);
+    git(&repo.root, &["tag", "theirs", "alfredo/go-7"]);
+    git(&repo.root, &["branch", "theirs", "main"]);
+    let marker = repo.base.join("submodule-filter-ran");
+    append(&config, &filter_config(&marker));
+    let outcome = repo.approve("git_merge", json!({"source": "theirs"}));
+    assert!(
+        !marker.exists(),
+        "merge ran a submodule filter: {outcome:?}"
+    );
+}
+
+/// Issue #516 (review): `.` components are dropped by git, so `deps/.` and `deps/./inner`
+/// reach the submodule at `deps/inner`.
+#[test]
+fn dot_components_do_not_hide_a_nested_override_submodule() {
+    for file in ["deps/.", "deps/./inner", "./deps/inner", "deps//inner"] {
+        let repo = Repo::new();
+        let config = repo_with_ignore_none_submodule(&repo);
+        fs::create_dir_all(repo.root.join("deps")).unwrap();
+        git(&repo.root, &["mv", "sub", "deps/inner"]);
+        git(&repo.root, &["commit", "-q", "-m", "move"]);
+        fs::write(repo.root.join("README.md"), "# Demo\nedited\n").unwrap();
+        let marker = repo.base.join("submodule-filter-ran");
+        append(&config, &filter_config(&marker));
+        let outcome = repo.approve(
+            "git_commit",
+            json!({"message": "m", "files": ["README.md", file]}),
+        );
+        assert!(
+            !marker.exists(),
+            "{file} ran a submodule filter: {outcome:?}"
+        );
+        if let Err(error) = outcome {
+            assert!(
+                error.contains(".gitmodules") || error.contains("path"),
+                "{file}: {error}"
+            );
+        }
+    }
+}
+
+/// Issue #516 (review): a `.gitmodules` over the size bound is refused unread.
+#[test]
+fn an_oversized_gitmodules_is_refused_unread() {
+    let repo = Repo::new();
+    apply_fixture(&repo);
+    let big = "# padding\n".repeat(120_000);
+    append(&repo.root.join(".gitmodules"), &big);
+    let error = repo
+        .card("git_merge", json!({"source": "alfredo/go-7"}))
+        .unwrap_err();
+    assert!(
+        error.contains(".gitmodules") && error.contains("regular file"),
+        "{error}"
+    );
+}
+
+/// Issue #516: a `.gitmodules` that is a FIFO is never opened, and the call is refused.
+#[test]
+fn a_gitmodules_fifo_never_stalls_and_refuses_a_submodule_apply() {
+    let repo = Repo::new();
+    apply_fixture(&repo);
+    let path = repo.root.join(".gitmodules");
+    fs::remove_file(&path).unwrap();
+    assert!(Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .unwrap()
+        .success());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (root, args) = (repo.root.clone(), json!({"message": "m", "files": ["sub"]}));
+    std::thread::spawn(move || {
+        let _ = sender.send(approval::card(&root, &call("git_commit", args)).map(|c| c.summary));
+    });
+    let outcome = receiver.recv_timeout(Duration::from_secs(3));
+    if outcome.is_err() {
+        drop(fs::OpenOptions::new().write(true).open(&path));
+    }
+    assert!(matches!(outcome, Ok(Err(_))), "{outcome:?}");
+}
+
 /// Issue #499: an ordinary submodule repository still previews and commits its
 /// superproject changes.
 #[test]
