@@ -748,6 +748,75 @@ class ModelPicker(unittest.TestCase):
             finally:
                 terminal.close()
 
+    def test_esc_closes_the_at_path_list_without_stopping_the_running_reply(self):
+        # Issue #524: Esc on an open @path list only closes it and keeps the draft; it
+        # must not fall through to "Esc stops the reply", and no late listing returns.
+        release = threading.Event()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps({'models': [{'name': 'fixture'}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-ndjson')
+                self.end_headers()
+                if self.path != '/api/chat':
+                    self.wfile.write(b'{"done":true,"done_reason":"load"}\n')
+                    return
+                self.wfile.write(b'{"message":{"content":"PARTIAL_REPLY"},"done":false}\n')
+                self.wfile.flush()
+                release.wait(30)
+                self.wfile.write(b'{"message":{"content":"FINAL_REPLY"},"done":true}\n')
+
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory(prefix='alfredo-esc-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-esc-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            Path(repo, 'docs.txt').write_text('hi\n')
+            subprocess.run(git + ['add', '.'], check=True)
+            subprocess.run(git + ['commit', '-q', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'hello\r')
+                terminal.wait_for('PARTIAL_REPLY')
+                terminal.write(b'@d')
+                terminal.wait_for('Files ·')
+                terminal.write(b'\x1b')
+                terminal.wait_gone('Files ·')
+                terminal.wait_for('@d▏')
+                quiet_until = time.monotonic() + 0.7
+                while time.monotonic() < quiet_until:
+                    if select.select([terminal.master], [], [], 0.05)[0]:
+                        chunk = os.read(terminal.master, 65536)
+                        terminal.output.extend(chunk)
+                        if b'\x1b[6n' in chunk:
+                            os.write(terminal.master, b'\x1b[1;1R')
+                    self.assertNotIn('Files ·', terminal.screen())
+                release.set()
+                terminal.wait_for('FINAL_REPLY')
+                self.assertNotIn('Cancelled', terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                release.set()
+                terminal.close()
+                server.shutdown()
+
     def test_at_path_keys_echo_quickly_in_a_large_repository(self):
         # Issue #524: the lookup runs off the key path, so keys echo at once, a list for
         # an older draft is never shown, and a prefix past the 5000th file still lists.
