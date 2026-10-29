@@ -790,10 +790,10 @@ impl TaskControl {
     /// own planning stays with `/stop` (issue #504).
     pub fn manual_plan_in_flight(&self) -> bool {
         self.planner.active()
-            && !self
+            && self
                 .autopilot
                 .as_ref()
-                .is_some_and(|status| !status.state.finished())
+                .is_none_or(|status| status.state.finished())
     }
 
     /// Esc cancels the plan request like `/plan-cancel` (issue #504): the plan pane is
