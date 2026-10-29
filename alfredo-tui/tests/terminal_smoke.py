@@ -788,24 +788,56 @@ class ModelPicker(unittest.TestCase):
             try:
                 terminal.wait_for('◈ ○ chat 1')
                 drain(0.5)
-                timings = [echo_ms(byte.encode()) for byte in '@d1/file1']
-                timings.sort()
-                p95 = timings[min(len(timings) - 1, int(len(timings) * 0.95))]
+                keys = [byte.encode() for byte in '@d1/file1234'] + [b'\x7f'] * 10
+                timings = sorted(echo_ms(key) for key in keys)
+                p95 = timings[int(len(timings) * 0.95)]
                 print(f'at-path key echo ms (sorted): {[round(t, 1) for t in timings]} p95={p95:.1f}')
-                self.assertLess(p95, 75, f'key echo too slow: {timings}')
+                self.assertLess(p95, 40, f'key echo too slow: {timings}')
                 terminal.wait_for('Files ·')
                 terminal.write(b'\x15')
                 drain()
-                # Back-to-back keys while the lookup runs; the final draft's list wins.
                 started = time.monotonic()
                 terminal.write(b'@d1')
                 terminal.wait_for('Files ·', timeout=3)
                 print(f'at-path list after @d1: {(time.monotonic() - started) * 1000:.0f} ms')
-                terminal.write(b'00/file7')
-                terminal.wait_for('@d1')
+                # A key typed while the lookup runs: the list for the older draft never shows.
+                terminal.write(b'\x15@d1')
+                terminal.write(b'x')
+                terminal.wait_for('@d1x')
+                time.sleep(1)
+                drain()
+                self.assertNotIn('Files ·', terminal.screen())
                 terminal.write(b'\x15@d99/file7')
                 terminal.wait_for('@d99/file7.txt', timeout=5)
-                self.assertNotIn('@d1/', terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+
+    def test_at_path_lists_a_file_created_after_an_earlier_mention_was_sent(self):
+        # Issue #524: the cached listing lives for one @ word, not across sent prompts.
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-fresh-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-fresh-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            Path(repo, 'alpha.txt').write_text('a\n')
+            subprocess.run(git + ['add', '.'], check=True)
+            subprocess.run(git + ['commit', '-q', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'@al')
+                terminal.wait_for('Files ·')
+                terminal.write(b'\t')
+                terminal.wait_for('@alpha.txt ')
+                terminal.write(b'\r')
+                terminal.wait_gone('Files ·')
+                Path(repo, 'newfile.txt').write_text('n\n')
+                time.sleep(0.5)
+                terminal.write(b'@newf')
+                terminal.wait_for('@newfile.txt', timeout=5)
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
             finally:
