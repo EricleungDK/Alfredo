@@ -158,3 +158,18 @@ fn only_plain_characters_and_backspace_keep_the_cached_listing() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_answer_applies_only_to_its_draft_with_the_cursor_at_the_end() {
+    let found = Found {
+        draft: "@al".into(),
+        paths: vec!["alpha.txt".into()],
+    };
+    assert!(found.applies_to("@al", 3));
+    // Same draft, cursor moved into it: the list would act on the wrong word.
+    assert!(!found.applies_to("@al", 1));
+    assert!(!found.applies_to("@al", 0));
+    // Cursor at the end of a different draft.
+    assert!(!found.applies_to("@alp", 4));
+    assert!(!found.applies_to("", 0));
+}

@@ -643,7 +643,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(found) = at_lookup.poll(&runtime) {
                 // A list for a draft that has since changed is never shown.
                 let session = &work.app.sessions[work.app.selected];
-                if session.draft == found.draft && session.cursor() == session.draft.len() {
+                if found.applies_to(&session.draft, session.cursor()) {
                     work.app.completion =
                         alfredo_tui::commands::Completion::from_paths(&found.draft, found.paths);
                     dirty = true;

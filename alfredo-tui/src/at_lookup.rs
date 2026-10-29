@@ -38,6 +38,14 @@ pub struct Found {
     pub paths: Vec<String>,
 }
 
+impl Found {
+    /// Whether the answer still fits the prompt: the same draft with the cursor at its end.
+    #[must_use]
+    pub fn applies_to(&self, draft: &str, cursor: usize) -> bool {
+        self.draft == draft && cursor == draft.len()
+    }
+}
+
 #[derive(Default)]
 pub struct AtLookup {
     generation: u64,
