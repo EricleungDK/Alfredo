@@ -157,38 +157,98 @@ fn fifo(path: &Path) {
     assert!(status.success());
 }
 
-#[test]
-fn a_fifo_excludes_file_in_the_repository_config_does_not_stall_an_attach() {
+/// A repository whose `.git/config` names `value` as `core.excludesFile`, plus the untracked
+/// files `notes/private.txt` and `notes/ok.txt`.
+fn repo_with_excludes(value: &str) -> tempdir::Dir {
     let dir = repo();
     let root = dir.path();
+    git(root, &["config", "core.excludesFile", value]);
+    fs::create_dir_all(root.join("notes")).unwrap();
+    fs::write(root.join("notes/private.txt"), "untracked\n").unwrap();
+    fs::write(root.join("notes/ok.txt"), "untracked\n").unwrap();
+    dir
+}
+
+#[test]
+fn a_fifo_excludes_file_in_the_repository_config_refuses_an_attach_naming_it_promptly() {
+    let dir = repo_with_excludes("x.fifo");
+    let root = dir.path();
     fifo(&root.join("x.fifo"));
-    git(
-        root,
-        &[
-            "config",
-            "core.excludesFile",
-            &format!("{}/x.fifo", root.display()),
-        ],
-    );
-    fs::write(root.join("notes.txt"), "untracked\n").unwrap();
-    fs::write(root.join(".gitignore"), "hidden.txt\n").unwrap();
-    fs::write(root.join("hidden.txt"), "ignored\n").unwrap();
     let started = std::time::Instant::now();
-    let out = attach(root, "see @notes.txt and @hidden.txt");
+    let out = attach(root, "see @notes/ok.txt");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(1),
         "took {:?}",
         started.elapsed()
     );
-    assert!(out.block.contains("FILE notes.txt"), "{out:?}");
-    assert!(!out.block.contains("ignored"), "{out:?}");
+    assert!(out.block.is_empty(), "{out:?}");
     assert!(
-        out.notices
-            .iter()
-            .any(|n| n.starts_with("@hidden.txt: not attached (ignored by .gitignore")),
+        out.notices.len() == 1 && out.notices[0].contains("core.excludesFile"),
         "{:?}",
         out.notices
     );
+}
+
+#[test]
+fn a_repository_excludes_file_still_hides_the_files_it_lists_from_an_attach() {
+    for absolute in [false, true] {
+        let value = if absolute { "absolute" } else { "relative" };
+        let dir = repo_with_excludes(".git/private-ignore");
+        let root = dir.path();
+        let target = root.join(".git/private-ignore");
+        fs::write(&target, "notes/private.txt\n").unwrap();
+        if absolute {
+            git(
+                root,
+                &["config", "core.excludesFile", &target.display().to_string()],
+            );
+        }
+        let out = attach(root, "see @notes/private.txt and @notes/ok.txt");
+        assert!(!out.block.contains("private.txt"), "{value}: {out:?}");
+        assert!(out.block.contains("FILE notes/ok.txt"), "{value}: {out:?}");
+        assert!(
+            out.notices
+                .iter()
+                .any(|n| n.starts_with("@notes/private.txt: not attached (ignored by .gitignore")),
+            "{value}: {:?}",
+            out.notices
+        );
+    }
+}
+
+#[test]
+fn completion_does_not_offer_a_file_the_repository_excludes_file_hides() {
+    let dir = repo_with_excludes(".git/private-ignore");
+    let root = dir.path();
+    fs::write(root.join(".git/private-ignore"), "notes/private.txt\n").unwrap();
+    let found = complete(root, "notes/");
+    assert!(found.contains(&"notes/ok.txt".to_string()), "{found:?}");
+    assert!(
+        !found.contains(&"notes/private.txt".to_string()),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_symlinked_excludes_file_is_refused_without_being_opened() {
+    let dir = repo_with_excludes("link-rules");
+    let root = dir.path();
+    fs::write(root.join("real-rules"), "notes/private.txt\n").unwrap();
+    std::os::unix::fs::symlink("real-rules", root.join("link-rules")).unwrap();
+    let out = attach(root, "see @notes/private.txt");
+    assert!(out.block.is_empty(), "{out:?}");
+    assert!(
+        out.notices.len() == 1 && out.notices[0].contains("core.excludesFile"),
+        "{:?}",
+        out.notices
+    );
+}
+
+#[test]
+fn a_missing_excludes_file_in_the_repository_config_refuses_nothing() {
+    let dir = repo_with_excludes(".git/not-there");
+    let out = attach(dir.path(), "see @notes/ok.txt");
+    assert!(out.block.contains("FILE notes/ok.txt"), "{out:?}");
 }
 
 #[test]
