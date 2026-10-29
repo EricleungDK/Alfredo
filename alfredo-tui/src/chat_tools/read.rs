@@ -236,9 +236,39 @@ fn noise(lower: &str) -> bool {
 /// Largest git listing used for discovery, in bytes; a bigger one falls back to the walk.
 const MAX_LISTING: usize = 16 << 20;
 
+/// The note for a listing git refused because of the repository config (an include or a
+/// filter key): `.gitignore` is not applied, so ignored files may appear. Names the first
+/// clause of the reason with control characters escaped as `<U+XXXX>`. Other failures (no
+/// repository, git missing) are the ordinary no-git case and carry no note.
+fn ignore_not_applied(reason: &str) -> Option<String> {
+    if !reason.starts_with("repository config") {
+        return None;
+    }
+    let clause = reason.split(';').next().unwrap_or(reason);
+    // git_read words an include refusal as a list of every key kind it gates; name the cause.
+    let clause = if clause.starts_with("repository config defines filter drivers, includes") {
+        "repository config includes another file"
+    } else {
+        clause
+    };
+    let mut shown = String::new();
+    for c in clause.chars().take(200) {
+        // Control characters and invisible format characters (zero-width, bidi, U+2028).
+        if c.is_control()
+            || matches!(c, '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}')
+        {
+            shown.push_str(&format!("<U+{:04X}>", u32::from(c)));
+        } else {
+            shown.push(c);
+        }
+    }
+    Some(format!("note: .gitignore not applied ({shown})"))
+}
+
 /// Files chosen for discovery under `start` (an existing path inside `root`), in the
 /// order [`walk`] yields, whether the listing stopped early, and a note when `start` is
-/// itself ignored. In a git workspace git's ignore rules decide (tracked files stay);
+/// itself ignored or the repository config made git refuse the listing. In a git workspace
+/// git's ignore rules decide (tracked files stay);
 /// otherwise, or when git cannot list, the plain [`walk`] is the fallback. [`excluded`]
 /// and [`noise`] always apply on top, so ignore files can only hide more.
 pub(crate) fn discover(
@@ -261,9 +291,12 @@ pub(crate) fn discover(
         let note = format!("note: {rel} is ignored (by .gitignore or as a virtualenv or cache directory); listed because you named it");
         return (files, cut, Some(note));
     }
-    let Ok(listing) = git_read::list_unignored(root, &rel, excludes.as_deref(), MAX_LISTING) else {
-        let (files, cut) = walk(&canonical, start, limit, true);
-        return (files, cut, None);
+    let listing = match git_read::list_unignored(root, &rel, excludes.as_deref(), MAX_LISTING) {
+        Ok(listing) => listing,
+        Err(reason) => {
+            let (files, cut) = walk(&canonical, start, limit, true);
+            return (files, cut, ignore_not_applied(&reason));
+        }
     };
     let mut paths: Vec<Vec<&str>> = listing
         .iter()
@@ -643,6 +676,24 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn the_gitignore_note_escapes_control_and_format_characters_and_caps_its_length() {
+        let note =
+            ignore_not_applied("repository config sets \"a\u{1b}[31m\u{202e}b\u{2028}c\"; rest")
+                .unwrap_or_default();
+        assert_eq!(
+            note,
+            "note: .gitignore not applied (repository config sets \"a<U+001B>[31m<U+202E>b<U+2028>c\")"
+        );
+        // Multibyte text is cut on a character boundary, at 200 characters.
+        let long = format!("repository config sets {}", "é".repeat(300));
+        let note = ignore_not_applied(&long).unwrap_or_default();
+        let shown = note.trim_start_matches("note: .gitignore not applied (");
+        assert_eq!(shown.trim_end_matches(')').chars().count(), 200);
+        assert!(note.ends_with("é)"), "{note}");
+        assert_eq!(ignore_not_applied("fatal: not a git repository"), None);
+    }
 
     fn tree(files: usize, size: usize) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

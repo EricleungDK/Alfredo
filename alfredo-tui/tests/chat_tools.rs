@@ -458,6 +458,75 @@ fn nested_gitignore_and_info_exclude_are_honoured() {
     assert_eq!(found.trim(), "pkg/real.txt:1:needle real");
 }
 
+/// Issue #511: a repo-local include or filter key makes git listing refuse; the plain walk
+/// then lists ignored files, and the result must say that `.gitignore` is not applied.
+fn refused_listing_repo(key: &str, value: &str) -> Workspace {
+    let workspace = git_workspace();
+    put(&workspace, ".gitignore", "build/\n*.log\n");
+    put(&workspace, "src.txt", "needle src\n");
+    put(&workspace, "a.log", "needle log\n");
+    put(&workspace, "build/out.o", "x\n");
+    git(&workspace, &["config", "--local", key, value]);
+    workspace
+}
+
+#[test]
+fn list_files_notes_that_gitignore_is_not_applied_when_the_config_has_an_include() {
+    let workspace = refused_listing_repo("include.path", "../.gitconfig");
+    put(&workspace, ".gitconfig", "");
+    let listed = workspace.run("list_files", json!({}));
+    let first = listed.lines().next().unwrap_or_default();
+    assert!(first.contains("note: .gitignore not applied"), "{listed}");
+    assert!(
+        first.contains("repository config includes another file"),
+        "{listed}"
+    );
+    assert!(lines(&listed).contains(&"src.txt"), "{listed}");
+    assert!(lines(&listed).contains(&"a.log"), "{listed}");
+}
+
+#[test]
+fn grep_notes_that_gitignore_is_not_applied_when_the_config_has_an_include() {
+    let workspace = refused_listing_repo("include.path", "../.gitconfig");
+    put(&workspace, ".gitconfig", "");
+    let found = workspace.run("grep", json!({"pattern": "needle"}));
+    let first = found.lines().next().unwrap_or_default();
+    assert!(first.contains("note: .gitignore not applied"), "{found}");
+    assert!(
+        first.contains("repository config includes another file"),
+        "{found}"
+    );
+    assert!(found.contains("src.txt:1:needle src"), "{found}");
+}
+
+#[test]
+fn list_files_and_grep_name_a_filter_key_as_the_reason_gitignore_is_not_applied() {
+    let workspace = refused_listing_repo("filter.lfs.clean", "cat");
+    let listed = workspace.run("list_files", json!({}));
+    let first = listed.lines().next().unwrap_or_default();
+    assert!(first.contains("note: .gitignore not applied"), "{listed}");
+    assert!(first.contains("filter.lfs.clean"), "{listed}");
+    assert!(lines(&listed).contains(&"src.txt"), "{listed}");
+    let found = workspace.run("grep", json!({"pattern": "needle"}));
+    let first = found.lines().next().unwrap_or_default();
+    assert!(first.contains("note: .gitignore not applied"), "{found}");
+    assert!(first.contains("filter.lfs.clean"), "{found}");
+    assert!(found.contains("src.txt:1:needle src"), "{found}");
+}
+
+#[test]
+fn a_normal_repo_and_a_non_git_directory_carry_no_gitignore_note() {
+    let workspace = refused_listing_repo("core.pager", "cat");
+    for tool in [json!({}), json!({"path": "."})] {
+        assert!(!workspace.run("list_files", tool).contains("not applied"));
+    }
+    let found = workspace.run("grep", json!({"pattern": "needle"}));
+    assert_eq!(found.trim(), "src.txt:1:needle src");
+    let plain = Workspace::new();
+    fs::remove_dir_all(plain.root.join(".git")).unwrap();
+    assert!(!plain.run("list_files", json!({})).contains("not applied"));
+}
+
 #[test]
 fn virtualenv_and_cache_directories_are_skipped_without_a_gitignore() {
     for in_git in [true, false] {
