@@ -66,6 +66,17 @@ class FlagTests(unittest.TestCase):
         for name in ('/exit', '/quit'):
             self.assertIn(f'`{name}`', reference)
 
+    def test_headless_chat_stdin_prompt_is_documented(self):
+        # Issue #549: `--chat -` reads the prompt from stdin (256 KiB, UTF-8, nonempty).
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        start = reference.index('### Headless chat')
+        end = reference.index('\n## ', start)
+        section = reference[start:end]
+        for text in ('--chat -', 'stdin', '256 KiB', 'UTF-8', 'nonempty', '--chat needs a PROMPT'):
+            self.assertIn(text, section)
+        readme = (ROOT / 'alfredo-tui/README.md').read_text(encoding='utf-8')
+        self.assertIn('--chat -', readme)
+
     def test_readme_documents_every_flag(self):
         source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
         flags = set(re.findall(r'^\s*"(--[a-z-]+)"(?: \| "--[a-z-]+")* =>', source, re.M))

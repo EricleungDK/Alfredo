@@ -216,7 +216,7 @@ cargo test --locked --manifest-path alfredo-tui/Cargo.toml
 cargo build --locked --manifest-path alfredo-tui/Cargo.toml
 python3 alfredo-tui/tests/terminal_smoke.py            # PTY journeys against a fake Ollama
 python3 alfredo-tui/tests/autopilot_terminal_smoke.py
-python3 alfredo-tui/tests/headless_smoke.py            # --go --headless without a TTY (--chat --headless: cargo test --test headless_chat)
+python3 alfredo-tui/tests/headless_smoke.py            # --go --headless without a TTY (--chat --headless, incl. `--chat -` stdin prompt: cargo test --test headless_chat)
 python3 alfredo-tui/tests/agent_terminal_smoke.py
 python3 alfredo-tui/tests/inference_terminal_smoke.py
 python3 alfredo-tui/tests/num_ctx_terminal_smoke.py
