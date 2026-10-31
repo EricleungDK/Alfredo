@@ -1497,7 +1497,10 @@ The worker prompt describes EDIT blocks only when an approved existing file is 1
 larger; an EDIT answer for a smaller file is still accepted and applied.
 
 One or more SEARCH/REPLACE pairs per block, applied in order to the approved file's
-baseline text (CRLF read as LF, as for FILE). Rules:
+baseline text (CRLF read as LF for matching, as for FILE). An EDIT keeps the line
+endings of a file that uses CRLF throughout: every line of the result ends CRLF, so a
+one-line change is a one-line diff. A file with LF endings, or with mixed CRLF and LF
+endings, is written back with LF. Rules:
 
 - Each SEARCH must match the current text exactly once (counting overlaps, after the
   earlier pairs); an empty SEARCH, no match and several matches fail with a message

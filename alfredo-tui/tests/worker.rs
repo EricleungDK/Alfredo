@@ -6603,7 +6603,8 @@ fn edit_block_with_pairs_applies_in_order_and_becomes_a_whole_file() {
         plan.files[0].content,
         "def a():\n    return 1\n\ndef answer():\n    return 42\n"
     );
-    // An empty REPLACE deletes; CRLF in the answer and in the file is read as LF.
+    // An empty REPLACE deletes; CRLF in the answer and in the file is read as LF
+    // for matching, and a CRLF file keeps its CRLF endings (#555).
     let plan = resolve_with(
         &edit_block("calc.py", &[("def a():\n    return 1\n\n", "")]).replace('\n', "\r\n"),
         &base.replace('\n', "\r\n"),
@@ -6611,7 +6612,7 @@ fn edit_block_with_pairs_applies_in_order_and_becomes_a_whole_file() {
     .unwrap();
     assert_eq!(
         plan.files[0].content,
-        "def answer():\n    return 0\n".to_string()
+        "def answer():\r\n    return 0\r\n".to_string()
     );
     // FILE answers are untouched, alone or beside an EDIT of another file.
     let mixed = format!(
