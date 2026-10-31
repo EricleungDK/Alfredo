@@ -693,18 +693,8 @@ impl TaskControl {
                 {
                     if let Some(task) = self.evidence.as_ref().map(|view| view.task) {
                         if let Some(current) = snapshot.tasks.iter().find(|item| item.id == task) {
-                            let changed = self
-                                .snapshot
-                                .as_ref()
-                                .and_then(|old| old.tasks.iter().find(|item| item.id == task))
-                                .is_none_or(|old| {
-                                    old.status != current.status
-                                        || old.can_repair() != current.can_repair()
-                                });
-                            if changed {
-                                self.evidence =
-                                    self.evidence.take().map(|view| view.with_current(current));
-                            }
+                            self.evidence =
+                                self.evidence.take().map(|view| view.with_current(current));
                         }
                         if let Some(summary) = snapshot.review_summary_for_task(task) {
                             let previous = self

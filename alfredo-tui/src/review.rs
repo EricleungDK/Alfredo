@@ -150,7 +150,9 @@ impl View {
             Some((_, stored)) => stored.to_owned(),
             None => shown,
         };
-        self.lines[run - 1] = Line::from(detail_line(task, &stored, Some(current)));
+        let detail = detail_line(task, &stored, Some(current));
+        let mut changed = self.lines[run - 1].to_string() != detail;
+        self.lines[run - 1] = Line::from(detail);
         let hint = self.lines.iter().position(|line| {
             let text = line.to_string();
             text.starts_with(&format!("/review {task} JSON"))
@@ -158,9 +160,14 @@ impl View {
                 || text.starts_with("No review commands apply")
         });
         if let Some(hint) = hint {
-            self.lines[hint] = Line::from(hint_line(task, Some(current)));
+            let text = hint_line(task, Some(current));
+            changed |= self.lines[hint].to_string() != text;
+            self.lines[hint] = Line::from(text);
         }
-        *self.layout.get_mut() = None;
+        // An unchanged view keeps its measured layout; only a rewrite invalidates it.
+        if changed {
+            *self.layout.get_mut() = None;
+        }
         self
     }
 
@@ -391,5 +398,49 @@ mod tests {
         assert!(view.layout.borrow().is_none());
         view.page(60, 24, 0);
         assert_eq!(view.measured_lines.get(), 198_001);
+    }
+
+    fn task(status: crate::tasks::TaskStatus) -> crate::tasks::Task {
+        serde_json::from_value(serde_json::json!({
+            "id": 7, "title": "t", "model": "m", "dependencies": [], "status": status,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn refresh_keeps_the_measured_layout_unless_a_line_changed() {
+        use crate::tasks::TaskStatus;
+        let raw = serde_json::to_string(&Evidence {
+            agent: None,
+            candidate_commit: None,
+            model_metrics: None,
+            failure_code: None,
+            generation: None,
+            project_notes: None,
+            run: "r".into(),
+            baseline: "b".into(),
+            status: TaskStatus::ReviewReady,
+            detail: "stored".into(),
+            patch: String::new(),
+            check: None,
+        })
+        .unwrap();
+        let view = View::from_verified_for(&task(TaskStatus::Accepted), &raw).unwrap();
+        view.page(40, 10, 0);
+        let measured = view.measured_lines.get();
+        assert!(measured > 0);
+        let view = view.with_current(&task(TaskStatus::Accepted));
+        view.page(40, 10, 0);
+        assert_eq!(
+            view.measured_lines.get(),
+            measured,
+            "unchanged view re-measured"
+        );
+        let view = view.with_current(&task(TaskStatus::Failed));
+        view.page(40, 10, 0);
+        assert!(
+            view.measured_lines.get() > measured,
+            "changed view kept stale layout"
+        );
     }
 }
