@@ -54,12 +54,16 @@ pub(crate) fn path_valid(path: &str) -> bool {
 ///   `.config` (`.config/hub`).
 /// - Directory-scoped files: `.docker/config.json`, `.cargo/credentials` and
 ///   `.cargo/credentials.toml`, `.gem/credentials`, `.mc/config.json`, `.m2/settings.xml`,
-///   `.pip/pip.conf`, `.config/rclone/rclone.conf`, `.config/gcloud/credentials.db` and
-///   `.config/gcloud/access_tokens.db`. Only those names: `.docker/daemon.json`,
+///   `.pip/pip.conf`, `.config/rclone/rclone.conf`, `.config/gcloud/credentials.db`,
+///   `.config/gcloud/access_tokens.db`, `.config/git/credentials`, `.config/pip/pip.conf`
+///   and `.config/netrc` (the `.config` directory is required: `config/git/credentials`
+///   without the dot stays readable, like `pip/pip.conf` next to `.pip/pip.conf`). Only those names: `.docker/daemon.json`,
 ///   `.cargo/config.toml` and `.m2/` files other than `settings.xml` stay readable.
 /// - Names: `.env*`, `.npmrc`, `.netrc`, `_netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
 ///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `.my.cnf`, `.terraformrc`,
-///   `terraform.rc`, `auth.json` (Composer), `.bash_history`, `gradle.properties`,
+///   `terraform.rc`, `auth.json` (Composer), `.bash_history`, `.zsh_history`,
+///   `.zhistory`, `.mysql_history`, `.psql_history`, `.python_history`,
+///   `.node_repl_history`, `.sqlite_history`, `.authinfo`, `.sentryclirc`, `gradle.properties`,
 ///   `.rclone.conf`, `.yarnrc.yml`, `.dev.vars`, `service_account.json`, `kubeconfig`,
 ///   `kubeconfig.yaml`, `kubeconfig.yml`, `application_default_credentials.json`,
 ///   `secrets.y*ml` (starts `secrets.y`, ends `ml`).
@@ -139,6 +143,15 @@ fn secret_components(parts: &[&str]) -> bool {
                 | "terraform.rc"
                 | "auth.json"
                 | ".bash_history"
+                | ".zsh_history"
+                | ".zhistory"
+                | ".mysql_history"
+                | ".psql_history"
+                | ".python_history"
+                | ".node_repl_history"
+                | ".sqlite_history"
+                | ".authinfo"
+                | ".sentryclirc"
                 | "gradle.properties"
                 | ".rclone.conf"
                 | ".yarnrc.yml"
@@ -152,6 +165,9 @@ fn secret_components(parts: &[&str]) -> bool {
             || chain.ends_with(&[".m2", "settings.xml"])
             || chain.ends_with(&[".pip", "pip.conf"])
             || chain.ends_with(&[".config", "rclone", "rclone.conf"])
+            || chain.ends_with(&[".config", "git", "credentials"])
+            || chain.ends_with(&[".config", "pip", "pip.conf"])
+            || chain.ends_with(&[".config", "netrc"])
             || chain.ends_with(&[".config", "gcloud", "credentials.db"])
             || chain.ends_with(&[".config", "gcloud", "access_tokens.db"])
             || (part.contains(".tfstate.") && part.ends_with(".backup"))
