@@ -6631,6 +6631,89 @@ fn edit_block_with_pairs_applies_in_order_and_becomes_a_whole_file() {
     );
 }
 
+/// Issue #555: a file that uses CRLF throughout keeps its endings through an EDIT.
+#[test]
+fn edit_keeps_crlf_file_endings() {
+    let base = "# a\r\ndef answer():\r\n    return 0\r\n";
+    let answer = edit_block("calc.py", &[("    return 0\n", "    return 42\n")]);
+    let plan = resolve_with(&answer, base).unwrap();
+    assert_eq!(
+        plan.files[0].content,
+        "# a\r\ndef answer():\r\n    return 42\r\n"
+    );
+    // A multi-line REPLACE gets CRLF on every inserted line, whether the answer
+    // used LF or CRLF; a deleting REPLACE leaves the rest CRLF.
+    let wanted = "# a\r\ndef answer():\r\n    x = 40\r\n    return x + 2\r\n";
+    let multi = edit_block(
+        "calc.py",
+        &[("    return 0\n", "    x = 40\n    return x + 2\n")],
+    );
+    assert_eq!(resolve_with(&multi, base).unwrap().files[0].content, wanted);
+    assert_eq!(
+        resolve_with(&multi.replace('\n', "\r\n"), base)
+            .unwrap()
+            .files[0]
+            .content,
+        wanted
+    );
+    let delete = edit_block("calc.py", &[("# a\n", "")]);
+    assert_eq!(
+        resolve_with(&delete, base).unwrap().files[0].content,
+        "def answer():\r\n    return 0\r\n"
+    );
+    // The last line may lack its newline; it still gets none.
+    let unterminated = "# a\r\ndef answer():\r\n    return 0";
+    let answer = edit_block(
+        "calc.py",
+        &[("    return 0\n", "    x = 1\n    return x\n")],
+    );
+    assert_eq!(
+        resolve_with(&answer, unterminated).unwrap().files[0].content,
+        "# a\r\ndef answer():\r\n    x = 1\r\n    return x"
+    );
+}
+
+/// Issue #555: only a file whose every line ends CRLF is converted back; LF files,
+/// files with no newline at all, and mixed-ending files are LF-normalised as before.
+#[test]
+fn edit_adds_no_cr_to_lf_or_mixed_ending_files() {
+    let pair = [("    return 0\n", "    x = 1\n    return x\n")];
+    let lf = "# a\ndef answer():\n    return 0\n";
+    assert_eq!(
+        resolve_with(&edit_block("calc.py", &pair), lf)
+            .unwrap()
+            .files[0]
+            .content,
+        "# a\ndef answer():\n    x = 1\n    return x\n"
+    );
+    // No newline at all in the file: a multi-line REPLACE stays LF.
+    assert_eq!(
+        resolve_with(&edit_block("calc.py", &[("abc\n", "x\ny\n")]), "abc")
+            .unwrap()
+            .files[0]
+            .content,
+        "x\ny"
+    );
+    // Mixed endings (some CRLF, some bare LF): read as LF and written as LF.
+    let mixed = "# a\r\ndef answer():\n    return 0\r\n";
+    assert_eq!(
+        resolve_with(&edit_block("calc.py", &pair), mixed)
+            .unwrap()
+            .files[0]
+            .content,
+        "# a\ndef answer():\n    x = 1\n    return x\n"
+    );
+    // A bare LF at the very end, after CRLF lines, is also mixed.
+    let tail = "# a\r\ndef answer():\r\n    return 0\n";
+    assert_eq!(
+        resolve_with(&edit_block("calc.py", &pair), tail)
+            .unwrap()
+            .files[0]
+            .content,
+        "# a\ndef answer():\n    x = 1\n    return x\n"
+    );
+}
+
 #[test]
 fn edit_with_missing_ambiguous_or_empty_search_fails_with_the_reason_and_changes_nothing() {
     let base = "x = 1\ny = 1\nz = 2\n";
@@ -7934,4 +8017,65 @@ fn accept_on_a_proposed_task_with_criteria_names_its_status_not_the_review_templ
         "{message}"
     );
     assert!(!message.contains("Use /review"), "{message}");
+}
+
+/// Issue #555, end to end: a one-line EDIT of a CRLF file is a one-line git diff.
+#[tokio::test]
+async fn edit_of_a_crlf_file_commits_a_one_line_diff() {
+    let fixture = unittest_fixture();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&fixture.workspace)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["config", "core.autocrlf", "false"]);
+    let mut lines: Vec<String> = (0..40).map(|i| format!("# line {i}")).collect();
+    lines.push("def answer():".into());
+    lines.push("    return 0".into());
+    assert_eq!(lines.len(), 42);
+    let base: String = lines.iter().map(|line| format!("{line}\r\n")).collect();
+    // The fixture's `* text eol=lf` would normalise the CRLF baseline on commit.
+    commit_files(
+        &fixture,
+        &[(".gitattributes", "* -text\n"), ("calc.py", &base)],
+    );
+    assert_eq!(
+        git(&["show", "HEAD:calc.py"]).len(),
+        base.len(),
+        "baseline must be committed with CRLF"
+    );
+    let before = git(&["rev-parse", "HEAD"]).trim().to_string();
+    let answer = format!(
+        "Fixing it.\n{}",
+        edit_block("calc.py", &[("    return 0\n", "    return 42\n")])
+    );
+    let (provider, server, _) = serve_reply(answer, Duration::ZERO, "", None, true, None);
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "crlf-run".into(),
+        fixture.store.snapshot().unwrap().revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        snapshot.tasks[0].status,
+        TaskStatus::ReviewReady,
+        "{detail}"
+    );
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    let candidate = evidence.candidate_commit.unwrap();
+    assert_eq!(
+        git(&["diff", "--numstat", &before, &candidate]),
+        "1\t1\tcalc.py\n"
+    );
 }
