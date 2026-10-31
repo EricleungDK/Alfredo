@@ -175,9 +175,9 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         return subprocess.run(['git', '-C', str(self.workspace), *args], env=self.git_env, check=True,
                               timeout=10, capture_output=True, text=True).stdout.strip()
 
-    def terminal(self, resume, env=None, conversation='default'):
+    def terminal(self, resume, env=None, conversation='default', **size):
         terminal = Terminal(self.binary, self.fixture.endpoint, self.workspace, self.state,
-                            'autopilot', resume=resume, env=env, conversation=conversation)
+                            'autopilot', resume=resume, env=env, conversation=conversation, **size)
         self.terminals.append(terminal)
         self.screen_has(terminal, 'ALFREDO')
         return terminal
@@ -501,6 +501,36 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         screen = terminal.screen()
         self.assertNotIn('Repair', screen)
         self.assertNotIn('repair budget', screen)
+        self.assertEqual(self.fixture.markers(), [])
+        self.quit(terminal)
+
+    def assert_go_refused_config_shows_the_fix(self, width):
+        self.git('config', '--local', 'core.excludesFile', '/x')
+        terminal = self.terminal(resume=False, height=24, width=width)
+        terminal.send('/go add something\r')
+        self.screen_has(terminal, 'git config --local --unset core.excludesFile')
+        time.sleep(0.5)
+        terminal.pump()
+        screen = terminal.screen()
+        self.assertIn('core.excludesFile', screen)
+        self.assertEqual(self.fixture.markers(), [])
+        self.quit(terminal)
+
+    def test_go_refused_repo_config_shows_the_fix_command_at_100_columns(self):
+        self.assert_go_refused_config_shows_the_fix(100)
+
+    def test_go_refused_repo_config_shows_the_fix_command_at_80_columns(self):
+        self.assert_go_refused_config_shows_the_fix(80)
+
+    def test_go_refused_repo_config_from_the_task_view_shows_the_fix_command_at_80_columns(self):
+        self.git('config', '--local', 'core.excludesFile', '/x')
+        terminal = self.terminal(resume=False, height=24, width=80)
+        terminal.send(b'\x1bOQ')  # F2: task view
+        self.wait_until('task view open', lambda: 'Chat 1' not in terminal.screen())
+        terminal.send('/go add something\r')
+        self.screen_has(terminal, 'git config --local --unset core.excludesFile')
+        # The footer points at the chat rows, so they must be on screen, not behind the task view.
+        self.screen_has(terminal, 'Not started')
         self.assertEqual(self.fixture.markers(), [])
         self.quit(terminal)
 

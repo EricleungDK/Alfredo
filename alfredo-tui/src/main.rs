@@ -1646,7 +1646,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 Err(error) => {
-                                    work.app.notice = error;
+                                    // The footer cuts the long config refusal before its fix (#537).
+                                    if let Some((notice, rows)) =
+                                        alfredo_tui::worker::config_refusal_view(&error)
+                                    {
+                                        work.app.notice = notice;
+                                        work.app.transient_rows = rows;
+                                        // Only the chat view draws the rows.
+                                        work.app.models_visible = false;
+                                        work.tasks.set_visible(false);
+                                    } else {
+                                        work.app.notice = error;
+                                    }
                                     work.app.sessions[index].reject_draft();
                                 }
                             }
