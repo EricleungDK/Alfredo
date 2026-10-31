@@ -43,6 +43,31 @@ fn heading(text: impl Into<String>) -> Line<'static> {
     )
 }
 
+const RECORDED: &str = "; recorded at run time: ";
+
+fn detail_line(task: u64, stored: &str, current: Option<&crate::tasks::Task>) -> String {
+    match current.filter(|t| !t.can_review()) {
+        Some(t) => format!(
+            "Task #{task} is {}{RECORDED}{stored}",
+            crate::tasks::status_label(&t.status)
+        ),
+        None => stored.to_owned(),
+    }
+}
+
+fn hint_line(task: u64, current: Option<&crate::tasks::Task>) -> String {
+    match current.filter(|t| !t.can_review()) {
+        Some(t) if t.can_repair() => format!("/repair {task} reason"),
+        Some(t) => format!(
+            "No review commands apply; the task is {}.",
+            crate::tasks::status_label(&t.status)
+        ),
+        None => {
+            format!("/review {task} JSON · /accept {task} · /reject {task} · /repair {task} reason")
+        }
+    }
+}
+
 impl View {
     pub fn lines(&self) -> &[Line<'static>] {
         &self.lines
@@ -103,6 +128,40 @@ impl View {
                 .min(u16::MAX as usize) as u16,
             maximum,
         }
+    }
+
+    /// Re-derive the status and command lines for the task's current state, so
+    /// an open view follows `/accept`, `/reject` and other status changes.
+    pub fn with_current(mut self, current: &crate::tasks::Task) -> Self {
+        let task = self.task;
+        let Some(run) = self
+            .lines
+            .iter()
+            .position(|line| line.to_string().starts_with("Run: "))
+        else {
+            return self;
+        };
+        let shown = self.lines[run - 1].to_string();
+        let prefix = format!("Task #{task} is ");
+        let stored = match shown
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.split_once(RECORDED))
+        {
+            Some((_, stored)) => stored.to_owned(),
+            None => shown,
+        };
+        self.lines[run - 1] = Line::from(detail_line(task, &stored, Some(current)));
+        let hint = self.lines.iter().position(|line| {
+            let text = line.to_string();
+            text.starts_with(&format!("/review {task} JSON"))
+                || text == format!("/repair {task} reason")
+                || text.starts_with("No review commands apply")
+        });
+        if let Some(hint) = hint {
+            self.lines[hint] = Line::from(hint_line(task, Some(current)));
+        }
+        *self.layout.get_mut() = None;
+        self
     }
 
     pub fn with_assessment(self, assessment: Option<&crate::assessment::Assessment>) -> Self {
@@ -182,7 +241,6 @@ impl View {
     }
 
     fn build(task: u64, raw: &str, current: Option<&crate::tasks::Task>) -> Result<Self, String> {
-        use crate::tasks::status_label;
         let evidence: Evidence =
             serde_json::from_str(raw).map_err(|_| "Cannot display malformed run evidence")?;
         let mut lines = vec![
@@ -190,26 +248,10 @@ impl View {
                 "Task #{task} · worker result {:?}",
                 evidence.status
             )),
-            Line::from(match current.filter(|t| !t.can_review()) {
-                Some(t) => format!(
-                    "Task #{task} is {}; recorded at run time: {}",
-                    status_label(&t.status),
-                    safe(&evidence.detail)
-                ),
-                None => safe(&evidence.detail),
-            }),
+            Line::from(detail_line(task, &safe(&evidence.detail), current)),
             Line::from(format!("Run: {}", safe(&evidence.run))),
             Line::from(format!("Baseline: {}", safe(&evidence.baseline))),
-            Line::from(match current.filter(|t| !t.can_review()) {
-                Some(t) if t.can_repair() => format!("/repair {task} reason"),
-                Some(t) => format!(
-                    "No review commands apply to a {} task.",
-                    status_label(&t.status)
-                ),
-                None => format!(
-                    "/review {task} JSON · /accept {task} · /reject {task} · /repair {task} reason"
-                ),
-            }),
+            Line::from(hint_line(task, current)),
             Line::from("Accepted changes remain in the isolated worktree."),
             Line::default(),
             heading("Check result"),

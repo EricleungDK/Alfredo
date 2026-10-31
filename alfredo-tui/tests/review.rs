@@ -406,8 +406,14 @@ fn status_and_hints(task: &alfredo_tui::tasks::Task) -> (String, String) {
 #[test]
 fn accepted_task_evidence_names_status_and_offers_no_review_commands() {
     let (detail, rest) = status_and_hints(&current_task(TaskStatus::Accepted, true, true));
-    assert!(detail.contains("Task #42 is accepted"), "{detail}");
-    assert!(!detail.contains("await human review") || detail.contains("recorded at run time"));
+    assert_eq!(
+        detail,
+        "Task #42 is accepted; recorded at run time: Approved check passed; changes await human review"
+    );
+    assert!(
+        rest.contains("No review commands apply; the task is accepted."),
+        "{rest}"
+    );
     for gone in ["/accept", "/reject", "/repair", "/review"] {
         assert!(!rest.contains(gone), "{gone} offered for accepted: {rest}");
     }
@@ -422,13 +428,16 @@ fn review_ready_task_keeps_stored_text_and_every_review_command() {
 
 #[test]
 fn terminal_unsuccessful_tasks_list_only_commands_that_would_succeed() {
-    for status in [
-        TaskStatus::Failed,
-        TaskStatus::Rejected,
-        TaskStatus::Cancelled,
+    for (status, word) in [
+        (TaskStatus::Failed, "failed"),
+        (TaskStatus::Rejected, "rejected"),
+        (TaskStatus::Cancelled, "cancelled"),
     ] {
         let (detail, rest) = status_and_hints(&current_task(status, true, true));
-        assert!(detail.contains("Task #42 is "), "{detail}");
+        assert_eq!(
+            detail,
+            format!("Task #42 is {word}; recorded at run time: Approved check passed; changes await human review")
+        );
         assert!(rest.contains("/repair 42 reason"), "{rest}");
         for gone in ["/accept", "/reject", "/review"] {
             assert!(!rest.contains(gone), "{gone} offered: {rest}");
@@ -453,4 +462,39 @@ fn review_and_repair_eligibility_match_the_store_refusal_rules() {
     assert!(!current_task(TaskStatus::Accepted, true, true).can_review());
     assert!(current_task(TaskStatus::Cancelled, true, true).can_repair());
     assert!(!current_task(TaskStatus::Accepted, true, true).can_repair());
+}
+
+#[test]
+fn refreshing_an_open_view_matches_a_view_built_for_the_new_status() {
+    let mut value: serde_json::Value = serde_json::from_str(&fixture()).unwrap();
+    value["status"] = serde_json::json!(TaskStatus::ReviewReady);
+    value["detail"] = "Approved check passed; changes await human review".into();
+    let raw = value.to_string();
+    let lines =
+        |view: &View| -> Vec<String> { view.lines().iter().map(|l| l.to_string()).collect() };
+    for status in [
+        TaskStatus::Accepted,
+        TaskStatus::Rejected,
+        TaskStatus::Cancelled,
+        TaskStatus::ReviewReady,
+    ] {
+        let task = current_task(status, true, true);
+        let open =
+            View::from_verified_for(&current_task(TaskStatus::ReviewReady, true, true), &raw)
+                .unwrap()
+                .with_current(&task);
+        assert_eq!(
+            lines(&open),
+            lines(&View::from_verified_for(&task, &raw).unwrap())
+        );
+        // Refreshing twice, or from an already refreshed view, keeps the stored detail.
+        let again = open.with_current(&current_task(TaskStatus::Failed, true, true));
+        assert_eq!(
+            lines(&again),
+            lines(
+                &View::from_verified_for(&current_task(TaskStatus::Failed, true, true), &raw)
+                    .unwrap()
+            )
+        );
+    }
 }
