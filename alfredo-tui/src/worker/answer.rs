@@ -288,9 +288,13 @@ fn occurrences(haystack: &str, needle: &str) -> usize {
 }
 
 /// Apply `block`'s pairs, in order, to `current`. Each SEARCH must match exactly
-/// once in the content so far; any failing pair fails the whole block.
+/// once in the content so far; any failing pair fails the whole block. Matching is
+/// done on LF text; a file that uses CRLF throughout is written back with CRLF.
 fn apply_edit(block: &EditBlock, current: &str) -> Result<String> {
     let shown = shown_path(&block.path);
+    // A file whose every newline is CRLF gets its CRLF back at the end, so an EDIT
+    // does not rewrite every line; mixed endings stay LF-normalised.
+    let crlf = current.contains("\r\n") && !current.replace("\r\n", "").contains('\n');
     let mut content = current.replace("\r\n", "\n");
     // The prompt shows the file with a newline appended, so a SEARCH may end on the
     // last line; the appended newline is dropped again so none is invented.
@@ -325,6 +329,9 @@ fn apply_edit(block: &EditBlock, current: &str) -> Result<String> {
     }
     if appended && content.ends_with('\n') {
         content.pop();
+    }
+    if crlf {
+        content = content.replace('\n', "\r\n");
     }
     Ok(content)
 }
