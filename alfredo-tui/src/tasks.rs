@@ -73,6 +73,25 @@ pub fn proposed_run(task: u64) -> String {
     format!("Task #{task} is proposed; /approve {task} first")
 }
 
+/// Refusal for `/run` on a task whose status can never start a worker, naming the
+/// next command. `None` for approved (may run) and running (the worker or store
+/// reports it), so those keep their own messages.
+pub fn run_refusal(task: u64, status: &TaskStatus) -> Option<String> {
+    let label = status_label(status);
+    let hint = match status {
+        TaskStatus::Proposed => return Some(proposed_run(task)),
+        TaskStatus::Approved | TaskStatus::Running => return None,
+        TaskStatus::Accepted => "nothing is left to run".to_owned(),
+        TaskStatus::Failed | TaskStatus::Rejected => {
+            format!("/repair {task} <hint> to try again")
+        }
+        TaskStatus::ReviewReady => format!("/accept {task} or /review {task} JSON"),
+        TaskStatus::Cancelled => format!("/requeue {task} to approve it again"),
+        TaskStatus::NeedsHumanReview => format!("/review {task} JSON"),
+    };
+    Some(format!("Task #{task} is {label}; {hint}"))
+}
+
 pub fn not_run(task: u64) -> String {
     format!("Task #{task} has not run; /run {task} first")
 }

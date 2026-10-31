@@ -863,6 +863,101 @@ fn run_on_a_proposed_task_names_approve_not_the_internal_worker_owner_rule() {
     assert!(store.snapshot().unwrap().tasks[0].run.is_none());
 }
 
+const RUN_REFUSALS: [(TaskStatus, &str); 6] = [
+    (
+        TaskStatus::Accepted,
+        "Task #1 is accepted; nothing is left to run",
+    ),
+    (
+        TaskStatus::Failed,
+        "Task #1 is failed; /repair 1 <hint> to try again",
+    ),
+    (
+        TaskStatus::Rejected,
+        "Task #1 is rejected; /repair 1 <hint> to try again",
+    ),
+    (
+        TaskStatus::ReviewReady,
+        "Task #1 is review-ready; /accept 1 or /review 1 JSON",
+    ),
+    (
+        TaskStatus::Cancelled,
+        "Task #1 is cancelled; /requeue 1 to approve it again",
+    ),
+    (
+        TaskStatus::NeedsHumanReview,
+        "Task #1 is needs-human-review; /review 1 JSON",
+    ),
+];
+
+#[test]
+fn run_on_a_non_approved_task_names_its_status_and_the_next_command() {
+    for (status, expected) in RUN_REFUSALS {
+        let fixture = Fixture::new();
+        let (store, _) = task_in_status(&fixture, status.clone(), true);
+        let before = fs::read(fixture.file()).unwrap();
+        let (mut control, messages) = run_then_render(&store, &["/run 1"]);
+        let joined = messages.join(" | ");
+        assert!(
+            messages.iter().any(|message| message == expected),
+            "{status:?}: {joined}"
+        );
+        assert!(!joined.contains("acquire a new worker owner"), "{joined}");
+        assert!(control.workers.is_empty());
+        assert!(!control.dispatch.failures.contains_key(&1), "{status:?}");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        control.command(&runtime, "/tasks #1", "fixture").unwrap();
+        let text = inspector_text(&control);
+        assert!(text.contains("Task #1"), "{status:?}: {text}");
+        assert!(!text.contains("start paused"), "{status:?}: {text}");
+        assert_eq!(fs::read(fixture.file()).unwrap(), before, "{status:?}");
+        assert_eq!(store.snapshot().unwrap().tasks[0].status, status);
+    }
+}
+
+#[test]
+fn only_approved_and_running_tasks_have_no_pre_start_run_refusal() {
+    use alfredo_tui::tasks::run_refusal;
+    assert_eq!(run_refusal(1, &TaskStatus::Approved), None);
+    assert_eq!(run_refusal(1, &TaskStatus::Running), None);
+    assert_eq!(
+        run_refusal(7, &TaskStatus::Proposed).as_deref(),
+        Some("Task #7 is proposed; /approve 7 first")
+    );
+    for (status, expected) in RUN_REFUSALS {
+        assert_eq!(run_refusal(1, &status).as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn bare_run_on_a_selected_non_approved_task_names_its_status_and_the_next_command() {
+    for (status, expected) in RUN_REFUSALS {
+        let fixture = Fixture::new();
+        let (store, _) = task_in_status(&fixture, status.clone(), true);
+        let before = fs::read(fixture.file()).unwrap();
+        let (control, messages) = run_then_render(&store, &["/tasks #1", "/run"]);
+        let joined = messages.join(" | ");
+        assert!(
+            messages.iter().any(|message| message == expected),
+            "{status:?}: {joined}"
+        );
+        assert!(!joined.contains("acquire a new worker owner"), "{joined}");
+        assert!(!control.dispatch.failures.contains_key(&1), "{status:?}");
+        assert!(!inspector_text(&control).contains("start paused"));
+        assert_eq!(fs::read(fixture.file()).unwrap(), before, "{status:?}");
+    }
+}
+
+#[test]
+fn run_on_a_running_task_keeps_its_own_refusal_not_the_status_hint() {
+    let fixture = Fixture::new();
+    let (store, _) = task_in_status(&fixture, TaskStatus::Running, true);
+    let (_, messages) = run_then_render(&store, &["/run 1"]);
+    let joined = messages.join(" | ");
+    assert!(!joined.contains("nothing is left to run"), "{joined}");
+    assert!(!joined.contains("/repair 1"), "{joined}");
+}
+
 #[test]
 fn refused_run_leaves_no_start_paused_row_once_the_task_is_approved() {
     let fixture = Fixture::new();

@@ -1662,13 +1662,16 @@ impl TaskControl {
         if self.workers.len() >= 4 || self.workers.contains_key(&task) {
             return Err("Worker already active or four-worker limit reached".into());
         }
-        if let Some(proposed) = self.snapshot.as_ref().and_then(|snapshot| {
+        // Decided from the view alone, before any sandbox or worker starts; returning
+        // here records no dispatch failure, so no `start paused` row is left behind.
+        if let Some(refusal) = self.snapshot.as_ref().and_then(|snapshot| {
             snapshot
                 .tasks
                 .iter()
-                .find(|item| item.id == task && item.status == crate::tasks::TaskStatus::Proposed)
+                .find(|item| item.id == task)
+                .and_then(|item| crate::tasks::run_refusal(item.id, &item.status))
         }) {
-            return Err(crate::tasks::proposed_run(proposed.id));
+            return Err(refusal);
         }
         if let Some(blocker) = crate::doctor::sandbox_blocker() {
             return Err(blocker);
