@@ -47,6 +47,65 @@ fn launch_error_message(error: String, journal: &std::path::Path) -> String {
     }
 }
 
+/// Every flag `run` accepts; a `--chat` value that is one of these is a missing PROMPT.
+const KNOWN_FLAGS: &[&str] = &[
+    "--icons",
+    "--no-motion",
+    "--doctor",
+    "--select",
+    "--go",
+    "--headless",
+    "--resume",
+    "--chat",
+    "--approve",
+    "--max-repairs",
+    "--on-finish",
+    "--qualify-inference",
+    "--inspect-qualification",
+    "--qualification-repetitions",
+    "--workspace",
+    "--state-dir",
+    "--structured-thinking",
+    "--worker-format",
+    "--parallel-models",
+    "--conversation",
+    "--keep-alive",
+    "--num-ctx",
+    "--max-turns",
+    "--connect-retries",
+    "--mission",
+    "--new-mission",
+    "--model",
+    "--endpoint",
+    "--help",
+    "-h",
+    "--version",
+    "-V",
+];
+
+/// Largest prompt `--chat -` accepts from stdin.
+const STDIN_PROMPT_CAP: u64 = 256 * 1024;
+
+/// Reads the `--chat -` prompt: UTF-8, at most `STDIN_PROMPT_CAP` bytes, not blank.
+fn read_stdin_prompt(reader: impl std::io::Read) -> Result<String, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    // One byte past the cap tells "too big" from "exactly full" without buffering an endless stream.
+    reader
+        .take(STDIN_PROMPT_CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("--chat - could not read stdin: {error}"))?;
+    if bytes.len() as u64 > STDIN_PROMPT_CAP {
+        return Err("--chat - prompt on stdin is over the 256 KiB limit".into());
+    }
+    let prompt =
+        String::from_utf8(bytes).map_err(|_| "--chat - needs UTF-8 text on stdin".to_string())?;
+    if prompt.trim().is_empty() {
+        return Err("--chat - needs a nonempty prompt on stdin".into());
+    }
+    Ok(prompt)
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let starting = std::env::current_dir()?;
     let mut workspace = None;
@@ -108,7 +167,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--headless" => headless = true,
             "--resume" => resume = true,
             "--chat" => {
-                let prompt = args.next().ok_or("--chat needs a PROMPT")?;
+                // A known flag in the value slot means the PROMPT is missing.
+                let prompt = args
+                    .next()
+                    .filter(|value| !KNOWN_FLAGS.contains(&value.as_str()))
+                    .ok_or("--chat needs a PROMPT")?;
                 if prompt.trim().is_empty() {
                     return Err("--chat needs a nonempty PROMPT".into());
                 }
@@ -362,7 +425,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let state_dir = state_dir.ok_or("Set --state-dir or ALFREDO_STATE_DIR")?;
-    if let Some(prompt) = chat_prompt {
+    if let Some(mut prompt) = chat_prompt {
+        if prompt == "-" {
+            prompt = read_stdin_prompt(std::io::stdin().lock())?;
+        }
         let code = headless::run_chat(headless::ChatOptions {
             runtime: &runtime,
             provider,
@@ -2753,7 +2819,7 @@ const HELP_LINES: &[&str] = &[
     "",
     "Usage: alfredo-tui [--model NAME] [--endpoint URL]",
     "  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--num-ctx 2048..262144] [--connect-retries 0..10] [--doctor]",
-    "  [--go GOAL [--headless] | --chat PROMPT --headless [--approve workspace-edits]] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]",
+    "  [--go GOAL [--headless] | --chat PROMPT|- --headless [--approve workspace-edits]] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]",
     "",
     "Side pane: missions of this repository and the work tree (plan groups, tasks, repairs, architect and chats). F6 focuses it (an overlay below 88 columns): Up/Down move, Tab switches missions/work, Enter opens, Alt+Left/Right fold, Esc returns to the prompt. Enter on another mission switches to it under the /workspace rules.",
     "Agents: Enter on a task or the architect opens its agent view: the instruction, read-only references, the answer as code per file, the check and outcome, then each repair. The prompt then talks to that agent: while it generates a note steers it (cancel, rerun with the note; not a repair), during its check it is queued for a failure, a failed, rejected or review-ready result is repaired with it, accepted work gets a follow-up task, and the architect revises its draft. Same files and check only; held reviews refuse. Esc back · Ctrl+O expand instructions · /watch ID · /tell ID TEXT.",
@@ -2787,7 +2853,7 @@ const HELP_LINES: &[&str] = &[
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
     "Chat transcript: Home/End (empty prompt) or Ctrl+Home/Ctrl+End jump to the oldest/latest row; End resumes following new output. With text in the prompt, Home/End move the cursor.",
     "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
-    "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals): read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {model, state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
+    "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals); PROMPT `-` reads the prompt from stdin to EOF (UTF-8, at most 256 KiB, nonempty; otherwise exit 2), as in `git diff | alfredo-tui --chat - --headless`: read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {model, state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
     "--resume --headless continues the mission's paused run (left by SIGINT/SIGTERM, /stop or a restart) with the same stderr lines, JSON result and exit codes as --go; exit 2 with nothing on stdout when there is no paused run. --go GOAL --headless over a paused run exits 2 naming the paused goal and progress and plans nothing; start a different goal with --conversation NAME (a new name has no paused run) or /go GOAL in the terminal.",
     "--model NAME: in the terminal it is the model for new conversations (a restored conversation keeps its saved model). With --headless (--go or --chat) and --doctor an explicit --model is the model for that run even when the conversation has a saved one: it is checked against the installed list first (exit 2 names it), never saved, and echoed as \"model\" in the JSON and on one stderr line. Without --model (or with only ALFREDO_MODEL) the conversation's saved model applies.",
     "",
