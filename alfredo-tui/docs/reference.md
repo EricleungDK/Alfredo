@@ -1719,12 +1719,16 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
   `kubeconfig.yaml`, `kubeconfig.yml` and `application_default_credentials.json`;
   `_netrc`, `.my.cnf`, `.terraformrc`, `terraform.rc`, `auth.json` (Composer),
-  `.bash_history`, `gradle.properties`, `.rclone.conf`, `.yarnrc.yml`, `.dev.vars` and
+  `.bash_history`, `.zsh_history`, `.zhistory`, `.mysql_history`, `.psql_history`,
+  `.python_history`, `.node_repl_history`, `.sqlite_history`, `.authinfo`, `.sentryclirc`,
+  `gradle.properties`, `.rclone.conf`, `.yarnrc.yml`, `.dev.vars` and
   `service_account.json`; `firebase-adminsdk-*.json`; `ssh_host_*_key`; `private*.asc`
   and `secret*.asc` (other `.asc` files stay readable); `.m2/settings.xml`,
   `.mc/config.json`, `.pip/pip.conf`, `.config/rclone/rclone.conf`,
-  `.config/gcloud/credentials.db`, `.config/gcloud/access_tokens.db` and `.config/hub`
-  (only these files in those directories; `.config/hub` covers everything under it);
+  `.config/gcloud/credentials.db`, `.config/gcloud/access_tokens.db`,
+  `.config/git/credentials`, `.config/pip/pip.conf`, `.config/netrc` and `.config/hub`
+  (only these files in those directories; `.config/hub` covers everything under it; the
+  dot directory is required, so `config/git/credentials` stays readable);
   `.docker/config.json`, `.cargo/credentials`,
   `.cargo/credentials.toml` and `.gem/credentials` (only these files in those
   directories); names starting `id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa`

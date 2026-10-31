@@ -54,12 +54,17 @@ pub(crate) fn path_valid(path: &str) -> bool {
 ///   `.config` (`.config/hub`).
 /// - Directory-scoped files: `.docker/config.json`, `.cargo/credentials` and
 ///   `.cargo/credentials.toml`, `.gem/credentials`, `.mc/config.json`, `.m2/settings.xml`,
-///   `.pip/pip.conf`, `.config/rclone/rclone.conf`, `.config/gcloud/credentials.db` and
-///   `.config/gcloud/access_tokens.db`. Only those names: `.docker/daemon.json`,
-///   `.cargo/config.toml` and `.m2/` files other than `settings.xml` stay readable.
+///   `.pip/pip.conf`, `.config/rclone/rclone.conf`, `.config/gcloud/credentials.db`,
+///   `.config/gcloud/access_tokens.db`, `.config/git/credentials`, `.config/pip/pip.conf`
+///   and `.config/netrc` (the `.config` directory is required: `config/git/credentials`
+///   without the dot stays readable, like `pip/pip.conf` next to `.pip/pip.conf`).
+///   Only those names: `.docker/daemon.json`, `.cargo/config.toml` and `.m2/` files other than
+///   `settings.xml` stay readable.
 /// - Names: `.env*`, `.npmrc`, `.netrc`, `_netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
 ///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `.my.cnf`, `.terraformrc`,
-///   `terraform.rc`, `auth.json` (Composer), `.bash_history`, `gradle.properties`,
+///   `terraform.rc`, `auth.json` (Composer), `.bash_history`, `.zsh_history`,
+///   `.zhistory`, `.mysql_history`, `.psql_history`, `.python_history`,
+///   `.node_repl_history`, `.sqlite_history`, `.authinfo`, `.sentryclirc`, `gradle.properties`,
 ///   `.rclone.conf`, `.yarnrc.yml`, `.dev.vars`, `service_account.json`, `kubeconfig`,
 ///   `kubeconfig.yaml`, `kubeconfig.yml`, `application_default_credentials.json`,
 ///   `secrets.y*ml` (starts `secrets.y`, ends `ml`).
@@ -139,6 +144,15 @@ fn secret_components(parts: &[&str]) -> bool {
                 | "terraform.rc"
                 | "auth.json"
                 | ".bash_history"
+                | ".zsh_history"
+                | ".zhistory"
+                | ".mysql_history"
+                | ".psql_history"
+                | ".python_history"
+                | ".node_repl_history"
+                | ".sqlite_history"
+                | ".authinfo"
+                | ".sentryclirc"
                 | "gradle.properties"
                 | ".rclone.conf"
                 | ".yarnrc.yml"
@@ -152,6 +166,9 @@ fn secret_components(parts: &[&str]) -> bool {
             || chain.ends_with(&[".m2", "settings.xml"])
             || chain.ends_with(&[".pip", "pip.conf"])
             || chain.ends_with(&[".config", "rclone", "rclone.conf"])
+            || chain.ends_with(&[".config", "git", "credentials"])
+            || chain.ends_with(&[".config", "pip", "pip.conf"])
+            || chain.ends_with(&[".config", "netrc"])
             || chain.ends_with(&[".config", "gcloud", "credentials.db"])
             || chain.ends_with(&[".config", "gcloud", "access_tokens.db"])
             || (part.contains(".tfstate.") && part.ends_with(".backup"))
@@ -911,6 +928,73 @@ mod tests {
             "src/./author.json",
             "x/../README.md",
             "a/../b/settings.xml",
+        ] {
+            assert!(!secret(path), "{path} must stay readable");
+        }
+    }
+
+    /// Issue #540: more shell and database histories, and token files under `.config`.
+    #[test]
+    fn secret_covers_issue_540_credential_files() {
+        let mut missed = vec![];
+        for path in [
+            ".zsh_history",
+            "home/.ZSH_HISTORY",
+            ".zhistory",
+            ".mysql_history",
+            ".psql_history",
+            ".python_history",
+            ".node_repl_history",
+            ".sqlite_history",
+            "home/.Sqlite_History",
+            ".authinfo",
+            "home/.AUTHINFO",
+            ".sentryclirc",
+            "app/.sentryclirc",
+            ".config/git/credentials",
+            "home/.Config/Git/Credentials",
+            ".config/pip/pip.conf",
+            "x/.config/pip/pip.conf",
+            ".config/netrc",
+            "home/.CONFIG/NETRC",
+            ".config/./git//credentials",
+            ".config/git/x/../credentials",
+        ] {
+            if !secret(path) {
+                missed.push(path);
+            }
+        }
+        assert!(missed.is_empty(), "not secret: {missed:?}");
+    }
+
+    /// Issue #540 near misses. The `.config` chain rules need the leading dot directory,
+    /// like `.pip/pip.conf` and `.config/rclone/rclone.conf`: `config/git/credentials`
+    /// stays readable.
+    #[test]
+    fn secret_leaves_issue_540_near_misses_alone() {
+        for path in [
+            "docs/history.md",
+            "history",
+            "zsh_history_notes.md",
+            "zsh_history",
+            "zhistory.md",
+            "python_history.md",
+            ".zsh_history.md",
+            "config/git/credentials-guide.md",
+            "config/git/credentials",
+            "config/pip/pip.conf",
+            "config/netrc",
+            ".config/git/config",
+            ".config/git/credentials.md",
+            ".config/git/credentials-guide.md",
+            ".config/pip/pip.conf.md",
+            ".config/pip/other.conf",
+            ".config/netrc.md",
+            ".config/netrcs",
+            "docs/.config/git/notes/credentials",
+            "authinfo.md",
+            "sentryclirc.md",
+            ".sentryclirc.md",
         ] {
             assert!(!secret(path), "{path} must stay readable");
         }
