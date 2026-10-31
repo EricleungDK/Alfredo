@@ -2267,6 +2267,131 @@ mod evidence_refresh_tests {
             canonical
         );
     }
+
+    #[test]
+    fn open_evidence_view_follows_the_task_when_it_is_accepted() {
+        let fixture = Fixture(std::env::temp_dir().join(format!(
+            "alfredo-evidence-accept-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        )));
+        fs::create_dir_all(fixture.0.join("workspace")).unwrap();
+        let store = TaskStore::new(
+            &fixture.0.join("state"),
+            &fixture.0.join("workspace"),
+            "evidence-accept",
+        )
+        .unwrap();
+        for action in [
+            Action::Propose {
+                title: "Accept while open".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+            },
+            Action::Permit {
+                task: 1,
+                policy: WorkPolicy {
+                    files: vec!["result.txt".into()],
+                    check: vec!["true".into()],
+                },
+            },
+            Action::Approve { task: 1 },
+            Action::Start {
+                task: 1,
+                baseline: "a".repeat(40),
+                inputs: vec![],
+            },
+        ] {
+            transact(&store, action);
+        }
+        let started = store.snapshot().unwrap();
+        let run = started.tasks[0].run.as_ref().unwrap();
+        let evidence = serde_json::to_vec(&Evidence {
+            agent: None,
+            candidate_commit: None,
+            model_metrics: None,
+            failure_code: None,
+            generation: None,
+            project_notes: None,
+            run: run.id.clone(),
+            baseline: run.baseline.clone(),
+            status: TaskStatus::ReviewReady,
+            detail: "Approved check passed; changes await human review".into(),
+            patch: String::new(),
+            check: Some(crate::execution::ExecutionReceipt {
+                schema_version: 1,
+                request_id: String::new(),
+                request_digest: String::new(),
+                effect: String::new(),
+                status: "completed".into(),
+                started_at: String::new(),
+                ended_at: String::new(),
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+                stdout_sha256: String::new(),
+                stderr_sha256: String::new(),
+                effect_started: true,
+                reconciliation_required: false,
+                error_code: String::new(),
+                error_message: String::new(),
+                receipt_id: "receipt".into(),
+                owner_pid: None,
+                owner_identity: String::new(),
+                process_pid: None,
+                process_identity: String::new(),
+                provider: String::new(),
+            }),
+        })
+        .unwrap();
+        let directory = store.run_directory(&run.id).unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("evidence.json"), &evidence).unwrap();
+        let ready = transact(
+            &store,
+            Action::Finish {
+                task: 1,
+                run: run.id.clone(),
+                status: TaskStatus::ReviewReady,
+                evidence_sha256: format!("{:x}", Sha256::digest(&evidence)),
+                detail: "Approved check passed; changes await human review".into(),
+            },
+        );
+        let view =
+            crate::review::View::from_verified_for(&ready.tasks[0], &store.evidence(1).unwrap())
+                .unwrap();
+        let mut control = TaskControl::new(store.clone());
+        control.snapshot = Some(ready.clone());
+        control.visible = true;
+        control.evidence = Some(view);
+        let accepted = transact(
+            &store,
+            Action::Review {
+                task: 1,
+                accept: true,
+            },
+        );
+        assert!(control
+            .background_sender
+            .try_send(Ok((accepted, "Task #1 accepted".into()).into()))
+            .is_ok());
+        assert!(control.poll());
+        let text = control
+            .evidence
+            .as_ref()
+            .unwrap()
+            .lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Task #1 is accepted"), "{text}");
+        for gone in ["/accept", "/reject", "/repair", "/review"] {
+            assert!(!text.contains(gone), "{gone} still offered: {text}");
+        }
+    }
 }
 
 #[cfg(test)]
