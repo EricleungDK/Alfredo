@@ -1652,6 +1652,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     {
                                         work.app.notice = notice;
                                         work.app.transient_rows = rows;
+                                        // Only the chat view draws the rows.
+                                        work.app.models_visible = false;
+                                        work.tasks.set_visible(false);
                                     } else {
                                         work.app.notice = error;
                                     }

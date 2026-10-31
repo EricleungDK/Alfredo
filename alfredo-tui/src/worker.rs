@@ -3578,8 +3578,6 @@ mod host_git_tests {
         ));
     }
 
-    /// Issue #525: the refusal shows each key as git documents it (config lists them
-    /// lowercased), the reason, and the exact fix; an odd key is quoted for the shell.
     #[test]
     fn config_refusal_view_leads_the_footer_with_the_fix_and_keeps_the_sentence() {
         let message = super::config_refusal("core.excludesfile");
@@ -3596,6 +3594,8 @@ mod host_git_tests {
         assert_eq!(super::config_refusal_view("Unknown task 9"), None);
     }
 
+    /// Issue #525: the refusal shows each key as git documents it (config lists them
+    /// lowercased), the reason, and the exact fix; an odd key is quoted for the shell.
     #[test]
     fn config_refusal_names_the_key_as_written_and_the_fix() {
         for (listed, written) in [
