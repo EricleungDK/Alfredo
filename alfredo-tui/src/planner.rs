@@ -420,6 +420,11 @@ impl Planner {
                 self.visible = false;
             }
             self.notice = "Planning stopped · inspect retained draft before continuing".into();
+            if was_active && self.draft.is_some() {
+                // A stopped revision hands the earlier draft back: show it (#538).
+                self.visible = true;
+                self.notice = "Revision request stopped; the earlier draft was kept · /plan-save saves it, /plan-revise tries again".into();
+            }
             self.command_events.push(Event {
                 request: request.clone(),
                 outcome: Outcome::Stopped,

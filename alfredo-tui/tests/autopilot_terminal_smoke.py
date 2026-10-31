@@ -406,13 +406,21 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.screen_has(terminal, 'Dependency #1 is not accepted')
         self.assertEqual(self.fixture.markers(), ['PLAN'])
         self.assertEqual(self.statuses(), [(1, 'proposed', None), (2, 'approved', None)])
+        # A run that starts leaves no refusal behind in the footer.
+        terminal.send('/approve 1\r')
+        self.wait_until('task 1 approved', lambda: self.statuses()[0][1] == 'approved')
+        terminal.send('/run 1\r')
+        self.wait_until('worker asked', lambda: 'CALC' in self.fixture.markers(), 60)
+        self.assertNotIn('is not accepted', terminal.screen())
+        self.assertNotIn('is proposed; /approve', terminal.screen())
         self.quit(terminal)
 
     def test_esc_on_a_generating_plan_revise_says_the_earlier_draft_was_kept(self):
         # Issue #538: Esc left the footer on a stale message and the pane on "No tasks".
         terminal = self.terminal(resume=False)
         terminal.send('/plan add b\r')
-        self.screen_has(terminal, 'Not saved or approved', 60)
+        self.screen_has(terminal, 'Make answer return 42', 60)
+        self.wait_until('first draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
         self.fixture.hold_plan = threading.Event()
         terminal.send('/plan-revise add boundary coverage\r')
         self.wait_until('revise asked', lambda: self.fixture.markers() == ['PLAN', 'PLAN'], 60)
