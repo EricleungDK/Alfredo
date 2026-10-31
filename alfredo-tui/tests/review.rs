@@ -498,3 +498,39 @@ fn refreshing_an_open_view_matches_a_view_built_for_the_new_status() {
         );
     }
 }
+
+#[test]
+fn refreshing_an_open_view_discards_the_cached_layout() {
+    let mut value: serde_json::Value = serde_json::from_str(&fixture()).unwrap();
+    value["status"] = serde_json::json!(TaskStatus::ReviewReady);
+    value["detail"] = "Approved check passed; changes await human review".into();
+    let raw = value.to_string();
+    let view =
+        View::from_verified_for(&current_task(TaskStatus::ReviewReady, true, true), &raw).unwrap();
+    // Lay out at a narrow width first so a stale cache would hide the longer line.
+    let before = view.page(20, 3, 0);
+    assert!(before
+        .lines
+        .iter()
+        .all(|l| !l.to_string().contains("is accepted")));
+    let view = view.with_current(&current_task(TaskStatus::Accepted, true, true));
+    let after = view.page(20, 3, 0);
+    assert!(
+        after
+            .lines
+            .iter()
+            .any(|l| l.to_string().contains("Task #42 is accepted")),
+        "{:?}",
+        after
+            .lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        after.maximum > before.maximum,
+        "{} vs {}",
+        after.maximum,
+        before.maximum
+    );
+}

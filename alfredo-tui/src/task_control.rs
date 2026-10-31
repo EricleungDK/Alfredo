@@ -2282,6 +2282,161 @@ mod evidence_refresh_tests {
         );
     }
 
+    fn ready_fixture(name: &str) -> (Fixture, TaskStore, Snapshot, String) {
+        let fixture = Fixture(std::env::temp_dir().join(format!(
+            "alfredo-evidence-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        )));
+        fs::create_dir_all(fixture.0.join("workspace")).unwrap();
+        let store = TaskStore::new(
+            &fixture.0.join("state"),
+            &fixture.0.join("workspace"),
+            "evidence-refresh-fixture",
+        )
+        .unwrap();
+        for action in [
+            Action::Propose {
+                title: "Accept while open".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+            },
+            Action::Permit {
+                task: 1,
+                policy: WorkPolicy {
+                    files: vec!["result.txt".into()],
+                    check: vec!["true".into()],
+                },
+            },
+            Action::Approve { task: 1 },
+            Action::Start {
+                task: 1,
+                baseline: "a".repeat(40),
+                inputs: vec![],
+            },
+        ] {
+            transact(&store, action);
+        }
+        let started = store.snapshot().unwrap();
+        let run = started.tasks[0].run.as_ref().unwrap();
+        let evidence = serde_json::to_vec(&Evidence {
+            agent: None,
+            candidate_commit: None,
+            model_metrics: None,
+            failure_code: None,
+            generation: None,
+            project_notes: None,
+            run: run.id.clone(),
+            baseline: run.baseline.clone(),
+            status: TaskStatus::ReviewReady,
+            detail: "Approved check passed; changes await human review".into(),
+            patch: String::new(),
+            check: Some(crate::execution::ExecutionReceipt {
+                schema_version: 1,
+                request_id: String::new(),
+                request_digest: String::new(),
+                effect: String::new(),
+                status: "completed".into(),
+                started_at: String::new(),
+                ended_at: String::new(),
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                stdout_bytes: 0,
+                stderr_bytes: 0,
+                stdout_sha256: String::new(),
+                stderr_sha256: String::new(),
+                effect_started: true,
+                reconciliation_required: false,
+                error_code: String::new(),
+                error_message: String::new(),
+                receipt_id: "receipt".into(),
+                owner_pid: None,
+                owner_identity: String::new(),
+                process_pid: None,
+                process_identity: String::new(),
+                provider: String::new(),
+            }),
+        })
+        .unwrap();
+        let directory = store.run_directory(&run.id).unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("evidence.json"), &evidence).unwrap();
+        let ready = transact(
+            &store,
+            Action::Finish {
+                task: 1,
+                run: run.id.clone(),
+                status: TaskStatus::ReviewReady,
+                evidence_sha256: format!("{:x}", Sha256::digest(&evidence)),
+                detail: "Approved check passed; changes await human review".into(),
+            },
+        );
+        let raw = store.evidence(1).unwrap();
+        (fixture, store, ready, raw)
+    }
+
+    fn view_text(control: &TaskControl) -> String {
+        control
+            .evidence
+            .as_ref()
+            .unwrap()
+            .lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn admit(control: &mut TaskControl, snapshot: Snapshot) {
+        assert!(control
+            .background_sender
+            .try_send(Ok((snapshot, "refreshed".into()).into()))
+            .is_ok());
+        assert!(control.poll());
+    }
+
+    #[test]
+    fn open_evidence_view_gains_repair_when_only_repairability_changes() {
+        let (_fixture, store, ready, raw) = ready_fixture("repairable");
+        let mut before = ready.clone();
+        before.tasks[0].status = TaskStatus::Failed;
+        before.tasks[0].policy = None;
+        let mut after = before.clone();
+        after.revision += 1;
+        after.tasks[0].policy = ready.tasks[0].policy.clone();
+        assert!(!before.tasks[0].can_repair() && after.tasks[0].can_repair());
+        let mut control = TaskControl::new(store);
+        control.snapshot = Some(before.clone());
+        control.visible = true;
+        control.evidence =
+            Some(crate::review::View::from_verified_for(&before.tasks[0], &raw).unwrap());
+        assert!(view_text(&control).contains("No review commands apply"));
+        admit(&mut control, after);
+        let text = view_text(&control);
+        assert!(text.contains("/repair 1 reason"), "{text}");
+        assert!(!text.contains("No review commands apply"), "{text}");
+    }
+
+    #[test]
+    fn open_evidence_view_refreshes_when_its_task_was_absent_from_the_old_snapshot() {
+        let (_fixture, store, ready, raw) = ready_fixture("absent");
+        let mut before = ready.clone();
+        before.tasks.clear();
+        let mut after = ready.clone();
+        after.revision = before.revision + 1;
+        after.tasks[0].status = TaskStatus::Accepted;
+        let mut control = TaskControl::new(store);
+        control.snapshot = Some(before);
+        control.visible = true;
+        control.evidence =
+            Some(crate::review::View::from_verified_for(&ready.tasks[0], &raw).unwrap());
+        admit(&mut control, after);
+        let text = view_text(&control);
+        assert!(text.contains("Task #1 is accepted"), "{text}");
+        assert!(!text.contains("/accept"), "{text}");
+    }
+
     #[test]
     fn open_evidence_view_follows_the_task_when_it_is_accepted() {
         let fixture = Fixture(std::env::temp_dir().join(format!(
