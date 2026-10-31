@@ -916,6 +916,20 @@ fn run_on_a_non_approved_task_names_its_status_and_the_next_command() {
 }
 
 #[test]
+fn only_approved_and_running_tasks_have_no_pre_start_run_refusal() {
+    use alfredo_tui::tasks::run_refusal;
+    assert_eq!(run_refusal(1, &TaskStatus::Approved), None);
+    assert_eq!(run_refusal(1, &TaskStatus::Running), None);
+    assert_eq!(
+        run_refusal(7, &TaskStatus::Proposed).as_deref(),
+        Some("Task #7 is proposed; /approve 7 first")
+    );
+    for (status, expected) in RUN_REFUSALS {
+        assert_eq!(run_refusal(1, &status).as_deref(), Some(expected));
+    }
+}
+
+#[test]
 fn bare_run_on_a_selected_non_approved_task_names_its_status_and_the_next_command() {
     for (status, expected) in RUN_REFUSALS {
         let fixture = Fixture::new();
