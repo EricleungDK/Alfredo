@@ -57,8 +57,9 @@ pub(crate) fn path_valid(path: &str) -> bool {
 ///   `.pip/pip.conf`, `.config/rclone/rclone.conf`, `.config/gcloud/credentials.db`,
 ///   `.config/gcloud/access_tokens.db`, `.config/git/credentials`, `.config/pip/pip.conf`
 ///   and `.config/netrc` (the `.config` directory is required: `config/git/credentials`
-///   without the dot stays readable, like `pip/pip.conf` next to `.pip/pip.conf`). Only those names: `.docker/daemon.json`,
-///   `.cargo/config.toml` and `.m2/` files other than `settings.xml` stay readable.
+///   without the dot stays readable, like `pip/pip.conf` next to `.pip/pip.conf`).
+///   Only those names: `.docker/daemon.json`, `.cargo/config.toml` and `.m2/` files other than
+///   `settings.xml` stay readable.
 /// - Names: `.env*`, `.npmrc`, `.netrc`, `_netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
 ///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `.my.cnf`, `.terraformrc`,
 ///   `terraform.rc`, `auth.json` (Composer), `.bash_history`, `.zsh_history`,
