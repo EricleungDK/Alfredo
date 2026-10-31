@@ -170,6 +170,10 @@ impl View {
         self
     }
 
+    pub fn from_verified_for(task: &crate::tasks::Task, raw: &str) -> Result<Self, String> {
+        Self::from_verified(task.id, raw)
+    }
+
     /// Call only after the store validates the run binding and evidence digest.
     pub fn from_verified(task: u64, raw: &str) -> Result<Self, String> {
         let evidence: Evidence =
