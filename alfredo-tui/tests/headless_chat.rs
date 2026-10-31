@@ -692,6 +692,114 @@ fn approve_is_headless_chat_only_and_validated() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// `run` with `input` piped to stdin (the child may exit before reading it all).
+fn run_with_stdin(root: &Path, fixture: &Fixture, extra: &[&str], input: &[u8]) -> Output {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--model", "fixture", "--endpoint", &fixture.endpoint])
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .args(extra)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&input);
+    });
+    let output = child.wait_with_output().unwrap();
+    writer.join().unwrap();
+    output
+}
+
+#[test]
+fn chat_dash_reads_the_prompt_from_stdin() {
+    let root = repository("stdin-prompt");
+    let fixture = scripted_chat(vec![done("ok")]);
+    let output = run_with_stdin(
+        &root,
+        &fixture,
+        &["--chat", "-", "--headless"],
+        b"from stdin\n",
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(result(&output)["state"], "done");
+    assert_eq!(user_message(&fixture).trim_end(), "from stdin");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn chat_dash_with_empty_or_blank_or_closed_stdin_is_a_usage_error() {
+    let root = repository("stdin-empty");
+    let fixture = scripted_chat(vec![done("unused")]);
+    for input in [&b""[..], b"  \n\t\n"] {
+        let output = run_with_stdin(&root, &fixture, &["--chat", "-", "--headless"], input);
+        let text = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{input:?}: {text}");
+        assert!(
+            text.contains("--chat - needs a nonempty prompt on stdin"),
+            "{input:?}: {text}"
+        );
+        assert!(output.stdout.is_empty(), "{input:?}");
+    }
+    let output = run(&root, &fixture, &["--chat", "-", "--headless"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("--chat - needs a nonempty prompt on stdin"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn chat_dash_refuses_stdin_over_256_kib_and_invalid_utf8() {
+    let root = repository("stdin-limits");
+    let fixture = scripted_chat(vec![done("unused")]);
+    let at_cap = vec![b'a'; 256 * 1024];
+    let output = run_with_stdin(&root, &fixture, &["--chat", "-", "--headless"], &at_cap);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let mut over = at_cap.clone();
+    over.push(b'a');
+    let output = run_with_stdin(&root, &fixture, &["--chat", "-", "--headless"], &over);
+    let text = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{text}");
+    assert!(text.contains("256 KiB"), "{text}");
+    assert!(output.stdout.is_empty());
+    let output = run_with_stdin(
+        &root,
+        &fixture,
+        &["--chat", "-", "--headless"],
+        &[b'o', b'k', 0xff, 0xfe],
+    );
+    let text = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{text}");
+    assert!(text.contains("UTF-8"), "{text}");
+    assert!(output.stdout.is_empty());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn chat_without_a_value_says_it_needs_a_prompt_not_headless() {
+    let root = repository("chat-missing");
+    let fixture = scripted_chat(vec![done("unused")]);
+    for args in [
+        &["--chat"][..],
+        &["--chat", "--headless"],
+        &["--headless", "--chat"],
+        &["--chat", "--approve", "workspace-edits", "--headless"],
+    ] {
+        let output = run(&root, &fixture, args);
+        let text = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {text}");
+        assert!(text.contains("--chat needs a PROMPT"), "{args:?}: {text}");
+        assert!(!text.contains("needs --headless"), "{args:?}: {text}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn unreachable_model_server_is_a_setup_error() {
     let root = repository("down");
