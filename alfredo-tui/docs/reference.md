@@ -304,6 +304,12 @@ excluded names are refused; at most 8 files and 32 KiB per prompt). Each mention
 attached gets one stderr line (`@path: not attached (reason)`), and the JSON result gains
 `"attached": ["a.txt"]` only when something was attached.
 
+PROMPT `-` reads the prompt from stdin to EOF (`git diff | alfredo-tui --chat - --headless`).
+It must be nonempty UTF-8 and at most 256 KiB; otherwise nothing runs and the exit is 2 with
+`Error: --chat - needs a nonempty prompt on stdin`, `--chat - needs UTF-8 text on stdin` or
+`--chat - prompt on stdin is over the 256 KiB limit`. A flag, or nothing, right after `--chat`
+is `Error: --chat needs a PROMPT` (exit 2).
+
 There is no other policy and no interactive equivalent: interactive chat always asks
 (ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
 `--headless`. Each outcome is appended to `chat-approvals.jsonl` like an interactive

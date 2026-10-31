@@ -395,6 +395,9 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         terminal = self.terminal(resume=False)
         terminal.send('/plan add answer function\r')
         self.screen_has(terminal, 'Not saved or approved', 60)
+        # The draft header renders before the planner job clears; /plan-save sent in
+        # that window is refused by design (#547).
+        self.wait_until('draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
         terminal.send('/plan-save\r')
         self.screen_has(terminal, 'Plan saved', 30)
         terminal.send('/run 1\r')
