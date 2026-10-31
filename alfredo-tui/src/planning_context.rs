@@ -916,6 +916,73 @@ mod tests {
         }
     }
 
+    /// Issue #540: more shell and database histories, and token files under `.config`.
+    #[test]
+    fn secret_covers_issue_540_credential_files() {
+        let mut missed = vec![];
+        for path in [
+            ".zsh_history",
+            "home/.ZSH_HISTORY",
+            ".zhistory",
+            ".mysql_history",
+            ".psql_history",
+            ".python_history",
+            ".node_repl_history",
+            ".sqlite_history",
+            "home/.Sqlite_History",
+            ".authinfo",
+            "home/.AUTHINFO",
+            ".sentryclirc",
+            "app/.sentryclirc",
+            ".config/git/credentials",
+            "home/.Config/Git/Credentials",
+            ".config/pip/pip.conf",
+            "x/.config/pip/pip.conf",
+            ".config/netrc",
+            "home/.CONFIG/NETRC",
+            ".config/./git//credentials",
+            ".config/git/x/../credentials",
+        ] {
+            if !secret(path) {
+                missed.push(path);
+            }
+        }
+        assert!(missed.is_empty(), "not secret: {missed:?}");
+    }
+
+    /// Issue #540 near misses. The `.config` chain rules need the leading dot directory,
+    /// like `.pip/pip.conf` and `.config/rclone/rclone.conf`: `config/git/credentials`
+    /// stays readable.
+    #[test]
+    fn secret_leaves_issue_540_near_misses_alone() {
+        for path in [
+            "docs/history.md",
+            "history",
+            "zsh_history_notes.md",
+            "zsh_history",
+            "zhistory.md",
+            "python_history.md",
+            ".zsh_history.md",
+            "config/git/credentials-guide.md",
+            "config/git/credentials",
+            "config/pip/pip.conf",
+            "config/netrc",
+            ".config/git/config",
+            ".config/git/credentials.md",
+            ".config/git/credentials-guide.md",
+            ".config/pip/pip.conf.md",
+            ".config/pip/other.conf",
+            ".config/netrc.md",
+            ".config/netrcs",
+            "docs/.config/git/notes/credentials",
+            "authinfo.md",
+            "sentryclirc.md",
+            ".sentryclirc.md",
+        ] {
+            assert!(!secret(path), "{path} must stay readable");
+        }
+    }
+
     #[test]
     fn generated_trees_stay_excluded_and_unchanged() {
         assert!(excluded("node_modules/x.js"));
