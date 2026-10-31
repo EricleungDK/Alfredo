@@ -239,7 +239,7 @@ to save; their diff is kept in the run's evidence. See
 | `--endpoint URL` | `http://127.0.0.1:11434` (env `OLLAMA_HOST`) | Ollama HTTP origin |
 | `--go GOAL` | off | Start autopilot on launch |
 | `--headless` | off | With `--go GOAL`: no terminal needed. One stderr line per autopilot state change, then one JSON object on stdout. Exit 0 all accepted, 1 partial/failed/interrupted, 2 setup or usage error (including Ollama unreachable or model missing); waits for and reports an `--on-finish` hook |
-| `--chat PROMPT` | – | With `--headless`: run one Chat Agent turn (tools, approvals) without a terminal and print one JSON result. Mutating calls are denied unless `--approve` allows them |
+| `--chat PROMPT` | – | With `--headless`: run one Chat Agent turn (tools, approvals) without a terminal and print one JSON result. Mutating calls are denied unless `--approve` allows them. PROMPT `-` reads the prompt from stdin to EOF (UTF-8, at most 256 KiB, nonempty; otherwise exit 2), e.g. `git diff \| alfredo-tui --chat - --headless` |
 | `--resume` | – | Only with `--headless`: continue the mission's paused run (as `/resume` does) with the same stderr lines, JSON and exit codes as `--go`; exit 2 when there is nothing to resume. `--go GOAL --headless` over a paused run exits 2 naming it and plans nothing; use `--conversation NAME` for a separate run |
 | `--approve workspace-edits` | deny all | Only with `--chat … --headless`: approve `edit_file`/`write_file` inside the repository, deny everything else (outcomes logged to `chat-approvals.jsonl`). Interactive chat always asks |
 | `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |
