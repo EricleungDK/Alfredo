@@ -170,12 +170,19 @@ impl View {
         self
     }
 
-    pub fn from_verified_for(task: &crate::tasks::Task, raw: &str) -> Result<Self, String> {
-        Self::from_verified(task.id, raw)
-    }
-
     /// Call only after the store validates the run binding and evidence digest.
     pub fn from_verified(task: u64, raw: &str) -> Result<Self, String> {
+        Self::build(task, raw, None)
+    }
+
+    /// Like `from_verified`, but the status line and command hints follow the
+    /// task's current state rather than the review prompt stored at run time.
+    pub fn from_verified_for(task: &crate::tasks::Task, raw: &str) -> Result<Self, String> {
+        Self::build(task.id, raw, Some(task))
+    }
+
+    fn build(task: u64, raw: &str, current: Option<&crate::tasks::Task>) -> Result<Self, String> {
+        use crate::tasks::status_label;
         let evidence: Evidence =
             serde_json::from_str(raw).map_err(|_| "Cannot display malformed run evidence")?;
         let mut lines = vec![
@@ -183,12 +190,26 @@ impl View {
                 "Task #{task} · worker result {:?}",
                 evidence.status
             )),
-            Line::from(safe(&evidence.detail)),
+            Line::from(match current.filter(|t| !t.can_review()) {
+                Some(t) => format!(
+                    "Task #{task} is {}; recorded at run time: {}",
+                    status_label(&t.status),
+                    safe(&evidence.detail)
+                ),
+                None => safe(&evidence.detail),
+            }),
             Line::from(format!("Run: {}", safe(&evidence.run))),
             Line::from(format!("Baseline: {}", safe(&evidence.baseline))),
-            Line::from(format!(
-                "/review {task} JSON · /accept {task} · /reject {task} · /repair {task} reason"
-            )),
+            Line::from(match current.filter(|t| !t.can_review()) {
+                Some(t) if t.can_repair() => format!("/repair {task} reason"),
+                Some(t) => format!(
+                    "No review commands apply to a {} task.",
+                    status_label(&t.status)
+                ),
+                None => format!(
+                    "/review {task} JSON · /accept {task} · /reject {task} · /repair {task} reason"
+                ),
+            }),
             Line::from("Accepted changes remain in the isolated worktree."),
             Line::default(),
             heading("Check result"),

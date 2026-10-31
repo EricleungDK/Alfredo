@@ -417,14 +417,16 @@ fn accepted_task_evidence_names_status_and_offers_no_review_commands() {
 fn review_ready_task_keeps_stored_text_and_every_review_command() {
     let (detail, rest) = status_and_hints(&current_task(TaskStatus::ReviewReady, true, true));
     assert_eq!(detail, "Approved check passed; changes await human review");
-    assert!(rest.contains(
-        "/review 42 JSON · /accept 42 · /reject 42 · /repair 42 reason"
-    ));
+    assert!(rest.contains("/review 42 JSON · /accept 42 · /reject 42 · /repair 42 reason"));
 }
 
 #[test]
 fn terminal_unsuccessful_tasks_list_only_commands_that_would_succeed() {
-    for status in [TaskStatus::Failed, TaskStatus::Rejected, TaskStatus::Cancelled] {
+    for status in [
+        TaskStatus::Failed,
+        TaskStatus::Rejected,
+        TaskStatus::Cancelled,
+    ] {
         let (detail, rest) = status_and_hints(&current_task(status, true, true));
         assert!(detail.contains("Task #42 is "), "{detail}");
         assert!(rest.contains("/repair 42 reason"), "{rest}");
