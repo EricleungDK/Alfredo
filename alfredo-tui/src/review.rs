@@ -43,6 +43,31 @@ fn heading(text: impl Into<String>) -> Line<'static> {
     )
 }
 
+const RECORDED: &str = "; recorded at run time: ";
+
+fn detail_line(task: u64, stored: &str, current: Option<&crate::tasks::Task>) -> String {
+    match current.filter(|t| !t.can_review()) {
+        Some(t) => format!(
+            "Task #{task} is {}{RECORDED}{stored}",
+            crate::tasks::status_label(&t.status)
+        ),
+        None => stored.to_owned(),
+    }
+}
+
+fn hint_line(task: u64, current: Option<&crate::tasks::Task>) -> String {
+    match current.filter(|t| !t.can_review()) {
+        Some(t) if t.can_repair() => format!("/repair {task} reason"),
+        Some(t) => format!(
+            "No review commands apply; the task is {}.",
+            crate::tasks::status_label(&t.status)
+        ),
+        None => {
+            format!("/review {task} JSON · /accept {task} · /reject {task} · /repair {task} reason")
+        }
+    }
+}
+
 impl View {
     pub fn lines(&self) -> &[Line<'static>] {
         &self.lines
@@ -103,6 +128,47 @@ impl View {
                 .min(u16::MAX as usize) as u16,
             maximum,
         }
+    }
+
+    /// Re-derive the status and command lines for the task's current state, so
+    /// an open view follows `/accept`, `/reject` and other status changes.
+    pub fn with_current(mut self, current: &crate::tasks::Task) -> Self {
+        let task = self.task;
+        let Some(run) = self
+            .lines
+            .iter()
+            .position(|line| line.to_string().starts_with("Run: "))
+        else {
+            return self;
+        };
+        let shown = self.lines[run - 1].to_string();
+        let prefix = format!("Task #{task} is ");
+        let stored = match shown
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.split_once(RECORDED))
+        {
+            Some((_, stored)) => stored.to_owned(),
+            None => shown,
+        };
+        let detail = detail_line(task, &stored, Some(current));
+        let mut changed = self.lines[run - 1].to_string() != detail;
+        self.lines[run - 1] = Line::from(detail);
+        let hint = self.lines.iter().position(|line| {
+            let text = line.to_string();
+            text.starts_with(&format!("/review {task} JSON"))
+                || text == format!("/repair {task} reason")
+                || text.starts_with("No review commands apply")
+        });
+        if let Some(hint) = hint {
+            let text = hint_line(task, Some(current));
+            changed |= self.lines[hint].to_string() != text;
+            self.lines[hint] = Line::from(text);
+        }
+        // An unchanged view keeps its measured layout; only a rewrite invalidates it.
+        if changed {
+            *self.layout.get_mut() = None;
+        }
+        self
     }
 
     pub fn with_assessment(self, assessment: Option<&crate::assessment::Assessment>) -> Self {
@@ -172,6 +238,16 @@ impl View {
 
     /// Call only after the store validates the run binding and evidence digest.
     pub fn from_verified(task: u64, raw: &str) -> Result<Self, String> {
+        Self::build(task, raw, None)
+    }
+
+    /// Like `from_verified`, but the status line and command hints follow the
+    /// task's current state rather than the review prompt stored at run time.
+    pub fn from_verified_for(task: &crate::tasks::Task, raw: &str) -> Result<Self, String> {
+        Self::build(task.id, raw, Some(task))
+    }
+
+    fn build(task: u64, raw: &str, current: Option<&crate::tasks::Task>) -> Result<Self, String> {
         let evidence: Evidence =
             serde_json::from_str(raw).map_err(|_| "Cannot display malformed run evidence")?;
         let mut lines = vec![
@@ -179,12 +255,10 @@ impl View {
                 "Task #{task} · worker result {:?}",
                 evidence.status
             )),
-            Line::from(safe(&evidence.detail)),
+            Line::from(detail_line(task, &safe(&evidence.detail), current)),
             Line::from(format!("Run: {}", safe(&evidence.run))),
             Line::from(format!("Baseline: {}", safe(&evidence.baseline))),
-            Line::from(format!(
-                "/review {task} JSON · /accept {task} · /reject {task} · /repair {task} reason"
-            )),
+            Line::from(hint_line(task, current)),
             Line::from("Accepted changes remain in the isolated worktree."),
             Line::default(),
             heading("Check result"),
@@ -324,5 +398,49 @@ mod tests {
         assert!(view.layout.borrow().is_none());
         view.page(60, 24, 0);
         assert_eq!(view.measured_lines.get(), 198_001);
+    }
+
+    fn task(status: crate::tasks::TaskStatus) -> crate::tasks::Task {
+        serde_json::from_value(serde_json::json!({
+            "id": 7, "title": "t", "model": "m", "dependencies": [], "status": status,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn refresh_keeps_the_measured_layout_unless_a_line_changed() {
+        use crate::tasks::TaskStatus;
+        let raw = serde_json::to_string(&Evidence {
+            agent: None,
+            candidate_commit: None,
+            model_metrics: None,
+            failure_code: None,
+            generation: None,
+            project_notes: None,
+            run: "r".into(),
+            baseline: "b".into(),
+            status: TaskStatus::ReviewReady,
+            detail: "stored".into(),
+            patch: String::new(),
+            check: None,
+        })
+        .unwrap();
+        let view = View::from_verified_for(&task(TaskStatus::Accepted), &raw).unwrap();
+        view.page(40, 10, 0);
+        let measured = view.measured_lines.get();
+        assert!(measured > 0);
+        let view = view.with_current(&task(TaskStatus::Accepted));
+        view.page(40, 10, 0);
+        assert_eq!(
+            view.measured_lines.get(),
+            measured,
+            "unchanged view re-measured"
+        );
+        let view = view.with_current(&task(TaskStatus::Failed));
+        view.page(40, 10, 0);
+        assert!(
+            view.measured_lines.get() > measured,
+            "changed view kept stale layout"
+        );
     }
 }

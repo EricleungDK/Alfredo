@@ -232,6 +232,24 @@ pub struct Task {
 }
 
 impl Task {
+    /// `/accept`, `/reject` and `/review` act only on a review-ready task.
+    pub fn can_review(&self) -> bool {
+        self.status == TaskStatus::ReviewReady
+    }
+
+    /// `/repair` needs a failed, rejected or cancelled governed run with retained evidence.
+    pub fn can_repair(&self) -> bool {
+        matches!(
+            self.status,
+            TaskStatus::Failed | TaskStatus::Rejected | TaskStatus::Cancelled
+        ) && self.policy.is_some()
+            && self
+                .run
+                .as_ref()
+                .and_then(|r| r.evidence_sha256.as_ref())
+                .is_some()
+    }
+
     pub fn validate_assignment(&self, model: &str) -> Result<()> {
         if !text_valid(model, 200) {
             return Err("Invalid worker model identity".into());
@@ -1376,7 +1394,7 @@ impl TaskStore {
                 if matches!(
                     request.action,
                     Action::Review { .. } | Action::Assess { .. }
-                ) && item.status != TaskStatus::ReviewReady
+                ) && !item.can_review()
                 {
                     // Name the status before the evidence lookup can fail on a task
                     // that never produced evidence (proposed, approved, running).
@@ -1777,16 +1795,7 @@ impl TaskStore {
                     .find(|t| t.id == *task)
                     .ok_or("Unknown repair parent")?
                     .clone();
-                if !matches!(
-                    parent.status,
-                    TaskStatus::Failed | TaskStatus::Rejected | TaskStatus::Cancelled
-                ) || parent.policy.is_none()
-                    || parent
-                        .run
-                        .as_ref()
-                        .and_then(|r| r.evidence_sha256.as_ref())
-                        .is_none()
-                {
+                if !parent.can_repair() {
                     return Err("Repair requires a failed, rejected or cancelled run with retained evidence".into());
                 }
                 if snapshot.tasks.iter().any(|t| {

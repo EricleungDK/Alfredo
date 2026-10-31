@@ -804,19 +804,24 @@ impl TaskControl {
             runtime.spawn(async move {
                 let result = tokio::task::spawn_blocking(move || {
                     let snapshot = store.snapshot()?;
-                    let evidence =
-                        crate::review::View::from_verified(task, &store.evidence(task)?)?
-                            .with_acceptance(snapshot.acceptance_for_task(task))
-                            .with_review(snapshot.review_summary_for_task(task).as_deref())
-                            .with_inputs(
-                                snapshot
-                                    .tasks
-                                    .iter()
-                                    .find(|item| item.id == task)
-                                    .and_then(|item| item.run.as_ref())
-                                    .map(|run| run.inputs.as_slice())
-                                    .unwrap_or_default(),
-                            );
+                    let raw = store.evidence(task)?;
+                    let current = snapshot
+                        .tasks
+                        .iter()
+                        .find(|item| item.id == task)
+                        .ok_or_else(|| crate::tasks::unknown_task(task))?;
+                    let evidence = crate::review::View::from_verified_for(current, &raw)?
+                        .with_acceptance(snapshot.acceptance_for_task(task))
+                        .with_review(snapshot.review_summary_for_task(task).as_deref())
+                        .with_inputs(
+                            snapshot
+                                .tasks
+                                .iter()
+                                .find(|item| item.id == task)
+                                .and_then(|item| item.run.as_ref())
+                                .map(|run| run.inputs.as_slice())
+                                .unwrap_or_default(),
+                        );
                     Ok(Projection {
                         snapshot,
                         notice: format!(

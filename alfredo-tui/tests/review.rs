@@ -381,3 +381,156 @@ fn resolving_review_replaces_old_notes_without_losing_contract_or_dependency_inp
         .join("\n");
     assert!(first.contains("Limitation: performance unmeasured"));
 }
+
+fn current_task(status: TaskStatus, governed: bool, evidence: bool) -> alfredo_tui::tasks::Task {
+    serde_json::from_value(serde_json::json!({
+        "id": 42, "title": "t", "model": "m", "dependencies": [],
+        "status": status,
+        "policy": if governed { serde_json::json!({"files": ["calc.py"], "check": ["true"]}) } else { serde_json::Value::Null },
+        "run": {"id": "task-42-run-3", "baseline": "a".repeat(40),
+                "evidence_sha256": if evidence { serde_json::json!("c".repeat(64)) } else { serde_json::Value::Null },
+                "detail": "d"},
+    }))
+    .unwrap()
+}
+
+fn status_and_hints(task: &alfredo_tui::tasks::Task) -> (String, String) {
+    let mut value: serde_json::Value = serde_json::from_str(&fixture()).unwrap();
+    value["status"] = serde_json::json!(TaskStatus::ReviewReady);
+    value["detail"] = "Approved check passed; changes await human review".into();
+    let view = View::from_verified_for(task, &value.to_string()).unwrap();
+    let text: Vec<String> = view.lines().iter().map(|l| l.to_string()).collect();
+    (text[1].clone(), text[4..].join("\n"))
+}
+
+#[test]
+fn accepted_task_evidence_names_status_and_offers_no_review_commands() {
+    let (detail, rest) = status_and_hints(&current_task(TaskStatus::Accepted, true, true));
+    assert_eq!(
+        detail,
+        "Task #42 is accepted; recorded at run time: Approved check passed; changes await human review"
+    );
+    assert!(
+        rest.contains("No review commands apply; the task is accepted."),
+        "{rest}"
+    );
+    for gone in ["/accept", "/reject", "/repair", "/review"] {
+        assert!(!rest.contains(gone), "{gone} offered for accepted: {rest}");
+    }
+}
+
+#[test]
+fn review_ready_task_keeps_stored_text_and_every_review_command() {
+    let (detail, rest) = status_and_hints(&current_task(TaskStatus::ReviewReady, true, true));
+    assert_eq!(detail, "Approved check passed; changes await human review");
+    assert!(rest.contains("/review 42 JSON · /accept 42 · /reject 42 · /repair 42 reason"));
+}
+
+#[test]
+fn terminal_unsuccessful_tasks_list_only_commands_that_would_succeed() {
+    for (status, word) in [
+        (TaskStatus::Failed, "failed"),
+        (TaskStatus::Rejected, "rejected"),
+        (TaskStatus::Cancelled, "cancelled"),
+    ] {
+        let (detail, rest) = status_and_hints(&current_task(status, true, true));
+        assert_eq!(
+            detail,
+            format!("Task #42 is {word}; recorded at run time: Approved check passed; changes await human review")
+        );
+        assert!(rest.contains("/repair 42 reason"), "{rest}");
+        for gone in ["/accept", "/reject", "/review"] {
+            assert!(!rest.contains(gone), "{gone} offered: {rest}");
+        }
+    }
+    for task in [
+        current_task(TaskStatus::Failed, false, true),
+        current_task(TaskStatus::Failed, true, false),
+        current_task(TaskStatus::NeedsHumanReview, true, true),
+    ] {
+        let (_, rest) = status_and_hints(&task);
+        for gone in ["/accept", "/reject", "/review", "/repair"] {
+            assert!(!rest.contains(gone), "{gone} offered: {rest}");
+        }
+        assert!(rest.contains("No review commands apply"), "{rest}");
+    }
+}
+
+#[test]
+fn review_and_repair_eligibility_match_the_store_refusal_rules() {
+    assert!(current_task(TaskStatus::ReviewReady, true, true).can_review());
+    assert!(!current_task(TaskStatus::Accepted, true, true).can_review());
+    assert!(current_task(TaskStatus::Cancelled, true, true).can_repair());
+    assert!(!current_task(TaskStatus::Accepted, true, true).can_repair());
+}
+
+#[test]
+fn refreshing_an_open_view_matches_a_view_built_for_the_new_status() {
+    let mut value: serde_json::Value = serde_json::from_str(&fixture()).unwrap();
+    value["status"] = serde_json::json!(TaskStatus::ReviewReady);
+    value["detail"] = "Approved check passed; changes await human review".into();
+    let raw = value.to_string();
+    let lines =
+        |view: &View| -> Vec<String> { view.lines().iter().map(|l| l.to_string()).collect() };
+    for status in [
+        TaskStatus::Accepted,
+        TaskStatus::Rejected,
+        TaskStatus::Cancelled,
+        TaskStatus::ReviewReady,
+    ] {
+        let task = current_task(status, true, true);
+        let open =
+            View::from_verified_for(&current_task(TaskStatus::ReviewReady, true, true), &raw)
+                .unwrap()
+                .with_current(&task);
+        assert_eq!(
+            lines(&open),
+            lines(&View::from_verified_for(&task, &raw).unwrap())
+        );
+        // Refreshing twice, or from an already refreshed view, keeps the stored detail.
+        let again = open.with_current(&current_task(TaskStatus::Failed, true, true));
+        assert_eq!(
+            lines(&again),
+            lines(
+                &View::from_verified_for(&current_task(TaskStatus::Failed, true, true), &raw)
+                    .unwrap()
+            )
+        );
+    }
+}
+
+#[test]
+fn refreshing_an_open_view_discards_the_cached_layout() {
+    let mut value: serde_json::Value = serde_json::from_str(&fixture()).unwrap();
+    value["status"] = serde_json::json!(TaskStatus::ReviewReady);
+    value["detail"] = "Approved check passed; changes await human review".into();
+    let raw = value.to_string();
+    let view =
+        View::from_verified_for(&current_task(TaskStatus::ReviewReady, true, true), &raw).unwrap();
+    // Lay out at a narrow width first so a stale cache would hide the longer line.
+    let before = view.page(20, 3, 0);
+    assert!(before
+        .lines
+        .iter()
+        .all(|l| !l.to_string().contains("is accepted")));
+    let view = view.with_current(&current_task(TaskStatus::Accepted, true, true));
+    let after = view.page(20, 3, 0);
+    assert!(
+        after
+            .lines
+            .iter()
+            .any(|l| l.to_string().contains("Task #42 is accepted")),
+        "{:?}",
+        after
+            .lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        after.maximum > before.maximum,
+        "{} vs {}",
+        after.maximum,
+        before.maximum
+    );
+}
