@@ -512,7 +512,7 @@ fn step(
         }
     }
     if !stopping && pending.is_none() {
-        crate::submit_autopilot(runtime, work, pending);
+        crate::command_staging::submit_autopilot(runtime, work, pending);
     }
     if !stopping && pending.is_none() {
         stage_dispatch(work, pending);
@@ -530,7 +530,7 @@ fn step(
     }
     if !stopping {
         if let Some((origin, command)) =
-            crate::saved_pending_command(&work.app, &work.autosave, pending)
+            crate::command_staging::saved_pending_command(&work.app, &work.autosave, pending)
         {
             *pending = None;
             let state = match work.tasks.dispatch_prepared(runtime, &command.intent) {
@@ -566,7 +566,10 @@ fn step(
 fn stage_dispatch(work: &mut Workstation, pending: &mut Option<(usize, String)>) {
     match work.tasks.prepare_architect() {
         Ok(Some(request)) => {
-            match crate::stage_automatic_command(work, Intent::ArchitectDraft { request }) {
+            match crate::command_staging::stage_automatic_command(
+                work,
+                Intent::ArchitectDraft { request },
+            ) {
                 Ok(staged) => *pending = Some(staged),
                 Err(error) => say(format!("Automatic Architect not started: {error}")),
             }
@@ -580,7 +583,7 @@ fn stage_dispatch(work: &mut Workstation, pending: &mut Option<(usize, String)>)
     }
     match work.tasks.prepare_dispatch() {
         Ok(Some(request)) => {
-            match crate::stage_automatic_command(
+            match crate::command_staging::stage_automatic_command(
                 work,
                 Intent::DispatchRun {
                     request: request.clone(),
