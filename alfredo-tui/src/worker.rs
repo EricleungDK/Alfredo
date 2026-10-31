@@ -441,6 +441,26 @@ pub(crate) fn config_refusal(key: &str) -> String {
     )
 }
 
+/// How the interactive TUI shows a [`config_refusal`] sentence that the one-line footer
+/// would cut before its fix: the footer leads with the command, and the transcript rows
+/// carry the whole sentence with the command on a row of its own (#537). `None` for any
+/// other message.
+pub fn config_refusal_view(message: &str) -> Option<(String, Vec<String>)> {
+    const FIX: &str = "Remove it with: ";
+    if !message.starts_with(CONFIG_REFUSAL_PREFIX) {
+        return None;
+    }
+    let (reason, command) = message.split_once(FIX)?;
+    Some((
+        format!("/go refused: {command} (see the chat rows above)"),
+        vec![
+            format!("✗ Not started · {}", reason.trim_end()),
+            FIX.trim_end().to_string(),
+            format!("  {command}"),
+        ],
+    ))
+}
+
 /// Why `workspace` cannot run coding work because of its Git config, read the bounded,
 /// hardened way (`git config --list` through [`git_blocking`], never an unbounded git). `Ok`
 /// also when the config cannot be read: the worker launch check still refuses (#525).
@@ -3560,6 +3580,22 @@ mod host_git_tests {
 
     /// Issue #525: the refusal shows each key as git documents it (config lists them
     /// lowercased), the reason, and the exact fix; an odd key is quoted for the shell.
+    #[test]
+    fn config_refusal_view_leads_the_footer_with_the_fix_and_keeps_the_sentence() {
+        let message = super::config_refusal("core.excludesfile");
+        let (notice, rows) = super::config_refusal_view(&message).expect("config refusal");
+        assert_eq!(
+            notice,
+            "/go refused: git config --local --unset core.excludesFile (see the chat rows above)"
+        );
+        assert!(rows[0].contains("core.excludesFile"), "{rows:?}");
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some("  git config --local --unset core.excludesFile")
+        );
+        assert_eq!(super::config_refusal_view("Unknown task 9"), None);
+    }
+
     #[test]
     fn config_refusal_names_the_key_as_written_and_the_fix() {
         for (listed, written) in [
