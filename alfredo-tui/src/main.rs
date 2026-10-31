@@ -991,11 +991,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 work.tasks.refuse_dispatch(request, &error);
                             }
+                            if matches!(
+                                &command.intent,
+                                alfredo_tui::command_intent::Intent::DispatchRun { .. }
+                                    | alfredo_tui::command_intent::Intent::Wayfinder { .. }
+                            ) {
+                                // Their withdrawal paths already word the footer.
+                            } else {
+                                // The reason must not live only in the chat rows (#538).
+                                work.app.notice = error.clone();
+                            }
                             alfredo_tui::console_command::CommandState::Refused {
                                 reason: alfredo_tui::console_command::bounded_reason(&error),
                             }
                         }
                     };
+                    // Esc on a generating plan request has no other footer line (#538).
+                    if matches!(state, alfredo_tui::console_command::CommandState::Submitted)
+                        && matches!(&command.intent, alfredo_tui::command_intent::Intent::Planner { request }
+                            if matches!(request.operation, alfredo_tui::planner_command::Operation::Cancel { .. }))
+                    {
+                        work.app.notice = work.tasks.planner.notice.clone();
+                    }
                     work.app.sessions[origin].set_command_state(&command.id, state);
                     dirty = true;
                 }

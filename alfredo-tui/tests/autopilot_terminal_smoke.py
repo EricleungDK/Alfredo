@@ -389,6 +389,51 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertNotIn('Esc cancel plan', screen)
         self.quit(terminal)
 
+    def test_run_refusals_reach_the_footer_while_the_task_panel_is_shown(self):
+        # Issue #538: the reason used to live only in the chat transcript (F2).
+        self.fixture.release_app.set()
+        terminal = self.terminal(resume=False)
+        terminal.send('/plan add answer function\r')
+        self.screen_has(terminal, 'Not saved or approved', 60)
+        terminal.send('/plan-save\r')
+        self.screen_has(terminal, 'Plan saved', 30)
+        terminal.send('/run 1\r')
+        self.screen_has(terminal, 'Task #1 is proposed; /approve 1 first')
+        self.assertNotIn('Task #1 · accepted', terminal.screen())
+        terminal.send('/approve 2\r')
+        self.screen_has(terminal, 'Task #2 saved · revision 2')
+        terminal.send('/run 2\r')
+        self.screen_has(terminal, 'Dependency #1 is not accepted')
+        self.assertEqual(self.fixture.markers(), ['PLAN'])
+        self.assertEqual(self.statuses(), [(1, 'proposed', None), (2, 'approved', None)])
+        # A run that starts leaves no refusal behind in the footer.
+        terminal.send('/approve 1\r')
+        self.wait_until('task 1 approved', lambda: self.statuses()[0][1] == 'approved')
+        terminal.send('/run 1\r')
+        self.wait_until('worker asked', lambda: 'CALC' in self.fixture.markers(), 60)
+        self.assertNotIn('is not accepted', terminal.screen())
+        self.assertNotIn('is proposed; /approve', terminal.screen())
+        self.quit(terminal)
+
+    def test_esc_on_a_generating_plan_revise_says_the_earlier_draft_was_kept(self):
+        # Issue #538: Esc left the footer on a stale message and the pane on "No tasks".
+        terminal = self.terminal(resume=False)
+        terminal.send('/plan add b\r')
+        self.screen_has(terminal, 'Make answer return 42', 60)
+        self.wait_until('first draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
+        self.fixture.hold_plan = threading.Event()
+        terminal.send('/plan-revise add boundary coverage\r')
+        self.wait_until('revise asked', lambda: self.fixture.markers() == ['PLAN', 'PLAN'], 60)
+        self.screen_has(terminal, 'Esc cancel plan')
+        terminal.send(b'\x1b')
+        self.screen_has(terminal, 'Revision request stopped; the earlier draft was kept', 5)
+        screen = terminal.screen()
+        self.assertNotIn('No tasks proposed yet', screen)
+        self.assertIn('Make answer return 42', screen)
+        self.assertNotIn('Esc cancel plan', screen)
+        self.fixture.hold_plan.set()
+        self.quit(terminal)
+
     def test_repair_after_a_failed_go_reenters_the_loop_and_builds_the_branch(self):
         self.fixture.bad_repairs = True
         self.fixture.release_app.set()
