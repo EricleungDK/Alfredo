@@ -522,6 +522,18 @@ class AutopilotTerminalSmoke(unittest.TestCase):
     def test_go_refused_repo_config_shows_the_fix_command_at_80_columns(self):
         self.assert_go_refused_config_shows_the_fix(80)
 
+    def test_go_refused_repo_config_from_the_task_view_shows_the_fix_command_at_80_columns(self):
+        self.git('config', '--local', 'core.excludesFile', '/x')
+        terminal = self.terminal(resume=False, height=24, width=80)
+        terminal.send(b'\x1bOQ')  # F2: task view
+        self.wait_until('task view open', lambda: 'Chat 1' not in terminal.screen())
+        terminal.send('/go add something\r')
+        self.screen_has(terminal, 'git config --local --unset core.excludesFile')
+        # The footer points at the chat rows, so they must be on screen, not behind the task view.
+        self.screen_has(terminal, 'Not started')
+        self.assertEqual(self.fixture.markers(), [])
+        self.quit(terminal)
+
 
 if __name__ == '__main__':
     unittest.main()
