@@ -280,6 +280,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/chat_tools/allow.rs` | Chat always-allow rules: per-mission store, strict matching, `/allow` |
 | `src/chat_tools/undo.rs` | `/undo`: pre-images of the last chat turn's approved edits in the State Directory, per-file refusal when changed since |
 | `src/compaction.rs` | Chat compaction: summarise older turns into a note, `/clear`, `/compact` |
+| `src/console_log.rs` | Console command history on `Session` (child of `model`): sequences, admission, budget eviction, task receipts |
 | `src/side_pane.rs`, `src/theme.rs` | Side pane projection and keys; icons, status glyphs, palette, spinner |
 | `src/autopilot.rs` | `/go` loop, auto-review, bounded repair, integration branch |
 | `src/tasks.rs`, `src/task_control.rs`, `src/task_control/commands.rs`, `src/dispatch.rs` | Durable task store, commands (`prepare_command`, `dispatch_prepared`, `command`, `parse`), dispatch |
@@ -291,6 +292,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/execution.rs` | Bounded process execution: limits, sandbox, process-group cleanup, execution receipts |
 | `src/wake.rs` | Run-loop wake source: one channel for terminal input and "a result is ready" wakes |
 | `src/headless.rs` | `--go GOAL --headless`: autopilot without a terminal; `--chat PROMPT --headless`: one Chat Agent turn with a scripted approval policy; JSON result on stdout |
+| `src/command_staging.rs` | Binary-only helpers `run()` uses to stage, submit and withdraw wayfinder, owner and autopilot commands, start compaction jobs and cancel a chat turn |
 | `src/on_finish.rs` | `--on-finish PROGRAM` completion hook (no shell, outside the sandbox, 10 s limit) |
 | `src/clean.rs` | `/clean`: removes retained worktrees of finished runs only |
 | `src/chat_mentions.rs`, `src/chat_context.rs`, `src/project_notes.rs` | `@path` mentions (working-tree content) and harness context (plus root `AGENTS.md` project notes) for plain chat turns |
