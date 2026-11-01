@@ -280,6 +280,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/chat_tools/allow.rs` | Chat always-allow rules: per-mission store, strict matching, `/allow` |
 | `src/chat_tools/undo.rs` | `/undo`: pre-images of the last chat turn's approved edits in the State Directory, per-file refusal when changed since |
 | `src/compaction.rs` | Chat compaction: summarise older turns into a note, `/clear`, `/compact` |
+| `src/console_log.rs` | Console command history on `Session` (child of `model`): sequences, admission, budget eviction, task receipts |
 | `src/side_pane.rs`, `src/theme.rs` | Side pane projection and keys; icons, status glyphs, palette, spinner |
 | `src/autopilot.rs` | `/go` loop, auto-review, bounded repair, integration branch |
 | `src/tasks.rs`, `src/task_control.rs`, `src/task_control/commands.rs`, `src/dispatch.rs` | Durable task store, commands (`prepare_command`, `dispatch_prepared`, `command`, `parse`), dispatch |
