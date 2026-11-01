@@ -199,9 +199,10 @@ class ZeroCeremonyStart(unittest.TestCase):
 class DispatchSurvivesBusyStore(unittest.TestCase):
     def test_dispatch_stays_on_when_the_task_store_is_briefly_busy(self):
         # Issue #565: dispatch refreshes the task store every 250 ms, and the store lock
-        # gives up after 250 ms. Another holder (a worker finishing, a slow disk) makes a
-        # read-only refresh fail with "busy"; that must not switch dispatch off, or an
-        # approved task such as #5 never starts although nothing refused it.
+        # gives up quickly. Another holder (a worker finishing, a slow disk) makes a
+        # read-only refresh fail with "busy"; up to TRANSIENT_LIMIT (5) such ticks in a row
+        # must not switch dispatch off, or an approved task such as #5 never starts
+        # although nothing refused it.
         binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
             str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
         with tempfile.TemporaryDirectory(prefix='alfredo-busy-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-busy-repo-') as repo:
@@ -217,8 +218,8 @@ class DispatchSurvivesBusyStore(unittest.TestCase):
                 with open(lock, 'rb') as held:
                     fcntl.flock(held, fcntl.LOCK_EX)
                     try:
-                        # Several refresh periods pass while the store stays busy.
-                        deadline = time.monotonic() + 2.5
+                        # Three or four refresh periods pass while the store stays busy.
+                        deadline = time.monotonic() + 0.8
                         while time.monotonic() < deadline:
                             if select.select([terminal.master], [], [], 0.05)[0]:
                                 chunk = os.read(terminal.master, 65536)
@@ -229,6 +230,44 @@ class DispatchSurvivesBusyStore(unittest.TestCase):
                         fcntl.flock(held, fcntl.LOCK_UN)
                 header = terminal.screen().split('\n')[0]
                 self.assertIn('dispatch on', header, terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+
+
+class DispatchStopsWhenBusyStoreStaysBusy(unittest.TestCase):
+    def test_dispatch_turns_off_when_the_task_store_stays_busy(self):
+        # Issue #565: the busy-store allowance is bounded. More than TRANSIENT_LIMIT (5)
+        # consecutive busy refreshes (about 1.25 s at one per 250 ms) still switch dispatch
+        # off, so a wedged store cannot keep an unattended dispatcher running blind.
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-stuck-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-stuck-repo-') as repo:
+            root = os.path.realpath(repo)
+            subprocess.run(['git', '-C', root, 'init', '-q', '--template='], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], root, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'/dispatch on\r')
+                terminal.wait_for('   dispatch on')
+                lock = next(Path(state).rglob('tasks.lock'))
+                with open(lock, 'rb') as held:
+                    fcntl.flock(held, fcntl.LOCK_EX)
+                    try:
+                        # Well past six refresh periods with the store busy.
+                        deadline = time.monotonic() + 2.5
+                        while time.monotonic() < deadline:
+                            if select.select([terminal.master], [], [], 0.05)[0]:
+                                chunk = os.read(terminal.master, 65536)
+                                terminal.output.extend(chunk)
+                                if b'\x1b[6n' in chunk:
+                                    os.write(terminal.master, b'\x1b[1;1R')
+                    finally:
+                        fcntl.flock(held, fcntl.LOCK_UN)
+                header = terminal.screen().split('\n')[0]
+                self.assertNotIn('dispatch on', header, terminal.screen())
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
             finally:
