@@ -1251,6 +1251,49 @@ mod tests {
     }
 
     #[test]
+    fn progress_starts_a_task_first_seen_repairing_before_its_repair_event() {
+        let mut progress = Progress::default();
+        progress.lines(
+            &status(RunState::Running, 0),
+            &[outcome(1, TaskStatus::Failed, 1, None)],
+        );
+        let names: Vec<_> = progress.events.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["task_started", "repair"]);
+        assert_eq!(progress.events[0].1, serde_json::json!({"id": 1}));
+    }
+
+    #[test]
+    fn progress_reports_a_settled_task_once_across_repeated_polls() {
+        let mut progress = Progress::default();
+        let outcomes = [
+            outcome(1, TaskStatus::Accepted, 0, Some(Ok(()))),
+            outcome(2, TaskStatus::Failed, 0, Some(Err("bad".into()))),
+        ];
+        let mut lines = Vec::new();
+        for _ in 0..2 {
+            lines.extend(progress.lines(&status(RunState::Running, 0), &outcomes));
+        }
+        assert_eq!(lines.iter().filter(|l| *l == "#1 accepted").count(), 1);
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with("#2 failed")).count(),
+            1
+        );
+        let checks: Vec<_> = progress
+            .events
+            .iter()
+            .filter(|(name, _)| *name == "check")
+            .map(|(_, fields)| fields.clone())
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                serde_json::json!({"id": 1, "passed": true}),
+                serde_json::json!({"id": 2, "passed": false, "reason": "bad"}),
+            ]
+        );
+    }
+
+    #[test]
     fn repair_line_names_its_trigger_and_failed_task_carries_the_last_failure() {
         use alfredo_tui::autopilot::RepairCause;
         let mut progress = Progress::default();
