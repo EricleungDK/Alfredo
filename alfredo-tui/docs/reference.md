@@ -2137,7 +2137,8 @@ rule `a` would add.
   `G=git; $G push`, `git -c alias.p=push p`) is not detected by that check. A HOST run
   of such a command never gets `a` (issue #311), and a sandboxed run has no network, so
   it cannot push to a remote outside the workspace. A sandboxed prefix rule can still
-  cover such a spelling; that is a known gap. Read tools and `propose_plan` are never
+  cover such a spelling, so it can push to a local remote inside the workspace (verified
+  by probe); that is a known gap. Read tools and `propose_plan` are never
   gated, so no rule applies to them.
 - **HOST runs always ask (issue #311).** A red HOST card (`escalate: true`) is never
   offered `a`: its key line reads `… · a not offered: HOST runs always ask`, and no rule
