@@ -2655,6 +2655,52 @@ mod refusal_notice_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    fn poll_until(control: &mut TaskControl, done: impl Fn(&TaskControl) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done(control) && std::time::Instant::now() < deadline {
+            control.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(done(control), "background refresh result never arrived");
+    }
+
+    #[test]
+    fn background_refresh_of_a_free_store_delivers_a_snapshot_and_resets_the_count() {
+        let (mut control, root) = dispatching();
+        control.refresh_transient = 3;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(control.snapshot.is_none());
+        control.refresh_background(&runtime);
+        poll_until(&mut control, |c| c.snapshot.is_some());
+        assert_eq!(control.refresh_transient, 0);
+        assert!(control.dispatch.enabled);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn background_refresh_of_a_held_store_arrives_as_busy_and_is_counted() {
+        let (mut control, root) = dispatching();
+        let lock = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(
+                control
+                    .store
+                    .conversation_directory()
+                    .unwrap()
+                    .join("tasks.lock"),
+            )
+            .unwrap();
+        assert!(lock.try_lock().is_ok());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        control.refresh_background(&runtime);
+        poll_until(&mut control, |c| c.refresh_transient == 1);
+        assert!(control.dispatch.enabled);
+        assert!(control.snapshot.is_none());
+        drop(lock);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn busy_refreshes_up_to_the_limit_keep_dispatch_on_and_the_snapshot() {
         let (mut control, root) = dispatching();
