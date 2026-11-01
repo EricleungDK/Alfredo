@@ -2109,8 +2109,8 @@ default false), `timeout_seconds` (1–600, default 120).
   needs one (sudo password, ssh passphrase or host key, git credentials) fails with a
   note to use ssh-agent or a credential helper instead of drawing over the TUI. Escalated
   outcomes are logged with `"escalated": true` and show as `Chat run_command (HOST) …` in
-  F4. An always-allow rule covers an escalated card only when the rule is itself
-  escalated (see [always-allow rules](#chat-always-allow-rules)).
+  F4. `a` is never offered on an escalated card, so every HOST run asks (issue #311; see
+  [always-allow rules](#chat-always-allow-rules)).
 - **Result.** The model gets `exit code N · sandboxed|host · cwd …`, then `stdout:` and
   `stderr:`; each keeps its last 10 KiB / 5 KiB behind a `[cut: …]` marker (failures
   print last). Error results are capped at 16 KiB too. The cwd must resolve to the same
@@ -2151,20 +2151,27 @@ rule `a` would add.
   `git_merge`: every call of that tool. `run_command`: one command prefix, matched on whole
   whitespace-separated words (`cargo test` covers `cargo test --lib`, not `cargo testx`).
   A sandboxed rule allows ANY arguments after its words (`cargo test --config …`), so its
-  reach is bounded only by the Sandbox; the card says so. A host (escalated) rule matches
-  only its exact command. Rules ignore `cwd`.
+  reach is bounded only by the Sandbox; the card says so. Rules ignore `cwd`.
   A command containing any of `; & | ` `` ` `` `$ > < ( ) \` or a newline matches only a
   rule that is exactly that command (`cargo test; rm -rf ~` never matches `cargo test`).
 - **Never push.** `git_push` cards (Push tier, `Tier::allowlistable` false) offer no `a`,
-  and no rule matches them, including rules added by hand to the file. The same holds for
-  a `run_command` that invokes `git … push` (`git -C x push`, `git -c k=v push`, any
-  path to git): its card reads `push: asked every time`. Read tools and
-  `propose_plan` are never gated, so no rule applies to them.
-- **Escalated runs.** A rule records whether it is for host (`escalate: true`) runs. A
-  sandboxed rule never covers a host run and a host rule never covers a sandboxed one;
-  a host rule never matches extra arguments.
-  `a` on a red HOST card reads `a always allow on HOST (escalated rule) …` and adds a host
-  rule.
+  and no rule matches them, including rules added by hand to the file. A `run_command`
+  whose plain words invoke `git … push` (`git -C x push`, `git -c k=v push`, any path to
+  git) is detected: its card reads `push: asked every time` and offers no `a`. Detection
+  works on words, so a spelling that hides `push` (`g''it push`, `git pu''sh`,
+  `G=git; $G push`, `git -c alias.p=push p`) is not detected by that check. A HOST run
+  of such a command never gets `a` (issue #311), and a sandboxed run has no network, so
+  it cannot push to a remote outside the workspace. A sandboxed prefix rule can still
+  cover such a spelling, so it can push to a local remote inside the workspace (verified
+  by probe); that is a known gap. Read tools and `propose_plan` are never
+  gated, so no rule applies to them.
+- **HOST runs always ask (issue #311).** A red HOST card (`escalate: true`) is never
+  offered `a`: its key line reads `… · a not offered: HOST runs always ask`, and no rule
+  is added for it, whatever its command, cwd or spelling (`./build.sh` from `sub`, or
+  `g''it push origin main`, is asked every time). A sandboxed rule never covers a host
+  run. A rule with `"escalated": true` from before this change stays in
+  `chat-allow.json`, never matches, and `/allow` lists it as `inactive`; `/allow clear ID`
+  removes it.
 - **The hint shows the whole command (issue #409).** For `run_command` the key line shows
   the command exactly as the card's `$` lines draw it: a tab as `→` plus padding (stops
   counted from the start of the line, `$ ` included), a literal `→` or `↵` as
@@ -2174,7 +2181,8 @@ rule `a` would add.
   characters, holds a control character other than tab and newline (checked before
   trimming, so `ls` + carriage return is refused), or contains text that looks like a
   `<U+` escape; the key line then reads `… · a not offered: too long to always-allow …`
-  (or the matching reason). Answer `y` or `n`. Rules already in the file still match.
+  (or the matching reason). Answer `y` or `n`. Sandboxed rules already in the file still
+  match.
 - **Still checked.** A rule only replaces the keypress: refusals before asking still
   refuse, and the fingerprint (file content, repository state, cwd) is still checked at
   apply. The outcome goes to `chat-approvals.jsonl` with `"rule": ID`; F4 shows
@@ -2186,8 +2194,9 @@ rule `a` would add.
   `/allow clear` and `/allow clear ID` refuse to write, leaving the file as it is. The
   message gives the move-aside command (`mv FILE FILE.bad`). At most 200 rules.
 - **`/allow`** lists every rule in full, one wrapped row per rule under the transcript
-  (`#ID`, tool, the exact command / ANY arguments / every call, sandboxed or HOST) until
-  the next key; `/allow clear` removes all; `/allow clear ID` removes one.
+  (`#ID`, tool, the exact command / ANY arguments / every call, sandboxed, or a HOST rule
+  from before issue #311 marked `inactive`) until the next key; `/allow clear` removes
+  all; `/allow clear ID` removes one.
 - **Rule marker.** The `⚙` row of a call a rule approved reads `⚙ run_command (rule #N) …`;
   calls approved with `y` or `a` on a card have no marker. A rule-approved `run_command`
   shows `running run_command · Ns · Esc stops` while it runs. The marker is display

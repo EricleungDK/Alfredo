@@ -54,7 +54,7 @@ F1 on an empty prompt lists every command. Most used:
 | `/tasks [QUERY\|#ID]`, `/activity [QUERY\|#ID]`, `/chat`, `/refresh` | Views |
 | `/clean`, `/clean yes` | List, then remove, the worktrees of finished runs (see below) |
 | `/models`, `/model NAME`, `/workspace` | Model and workspace switching |
-| `/allow`, `/allow clear [ID]` | List or remove always-allow rules. `a` on a chat approval card approves and adds a rule for that tool (or `run_command` command prefix) in this mission; never for `git_push` (see `docs/reference.md#chat-always-allow-rules`) |
+| `/allow`, `/allow clear [ID]` | List or remove always-allow rules. `a` on a chat approval card approves and adds a rule for that tool (or `run_command` command prefix) in this mission; never for `git_push` or HOST (escalated) runs (see `docs/reference.md#chat-always-allow-rules`) |
 | `/exit`, `/quit` | Quit like Ctrl+Q (see `docs/reference.md`) |
 | `/clear`, `/compact` | Restart this conversation (tasks are kept), or summarise its older turns now. Long chats are summarised automatically near the size limit instead of stopping (see `docs/reference.md#long-conversations-compaction-and-clear`) |
 | `/scope [JSON]`, `/scope-confirm REV`, `@wayfinder REQUEST` | Project scope agreement |
