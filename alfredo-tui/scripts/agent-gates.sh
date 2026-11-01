@@ -15,9 +15,14 @@ while [ $# -gt 0 ]; do case "$1" in
 LOG="${TMPDIR:-/tmp}/agent-gates.$$"; mkdir -p "$LOG"
 names=(); results=(); notes=()
 gate() { # gate NAME CMD...
-  local name="$1"; shift; local f="$LOG/$(echo "$name" | tr -c 'a-zA-Z0-9' _).log"
+  # printf, not echo: echo's trailing newline became a "_", so "cargo test" logged to cargo_test_.log
+  local name="$1"; shift; local f; f="$LOG/$(printf '%s' "$name" | tr -c 'a-zA-Z0-9' _).log"
   if "$@" >"$f" 2>&1; then names+=("$name"); results+=(PASS); notes+=("")
-  else names+=("$name"); results+=(FAIL); notes+=("$(grep -E 'error|FAILED|panicked|failed' "$f" | head -3 | tr '\n' ' ' | cut -c1-200) (log: $f)"); fi
+  else names+=("$name"); results+=(FAIL); notes+=("$(failed_targets "$f")$(grep -E 'error|FAILED|panicked|failed' "$f" | head -3 | tr '\n' ' ' | cut -c1-200) (log: $f)"); fi
+}
+failed_targets() { # names the failing cargo test binaries, e.g. "failing: --test chat_approval; "
+  local t; t=$(grep -oE '`--(test|lib|bin|doc|example|bench)[^`]*`' "$1" 2>/dev/null | tr -d '`' | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+  [ -n "$t" ] && printf 'failing: %s; ' "$t"
 }
 M=alfredo-tui/Cargo.toml
 gate "fmt"     cargo fmt --manifest-path $M -- --check
