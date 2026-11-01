@@ -689,6 +689,92 @@ fn escalated_rules_match_only_the_exact_command() {
     let _ = fs::remove_dir_all(state);
 }
 
+/// Issue #311: a HOST (escalated) run_command is never offered `a`, so no rule can make a
+/// later host run skip its card. On main these five all got `a`: four are push commands
+/// the `git push` word check misses, and `./build.sh` is a repeatable host command.
+#[test]
+fn host_runs_are_never_offered_always_allow_so_no_rule_can_skip_their_card() {
+    let root = dir("host-never");
+    fs::create_dir(root.join("sub")).unwrap();
+    let state = dir("host-never-state");
+    let rules = Rules::new(&state);
+    let host = |command: &str, cwd: Option<&str>| {
+        let mut arguments = json!({"command": command, "escalate": true});
+        if let Some(cwd) = cwd {
+            arguments["cwd"] = json!(cwd);
+        }
+        approval::card(
+            &root,
+            &alfredo_tui::model::ToolCall {
+                name: "run_command".into(),
+                arguments,
+            },
+        )
+        .unwrap()
+    };
+    for command in [
+        "g''it push origin main",
+        "git pu''sh origin main",
+        "G=git; $G push origin main",
+        "git -c alias.p=push p origin main",
+        "./build.sh",
+    ] {
+        for cwd in [None, Some("sub")] {
+            let card = host(command, cwd);
+            assert!(card.escalated(), "{command} {cwd:?}");
+            assert!(!allow::offered(&card), "{command} {cwd:?}: offered");
+            assert_eq!(allow::offer(&card), None, "{command} {cwd:?}: hinted");
+            assert!(
+                rules.add_for(&card).is_err(),
+                "{command} {cwd:?}: a rule was added"
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(state);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #311: an escalated rule in `chat-allow.json` (written before the fix) never
+/// matches a host run, whatever its cwd: `./build.sh` at the root was repointed to a
+/// `sub` card, and push obfuscations matched with no card.
+#[test]
+fn an_old_escalated_rule_never_matches_a_host_run_from_any_cwd() {
+    let root = dir("host-old-rule");
+    fs::create_dir(root.join("sub")).unwrap();
+    let state = dir("host-old-rule-state");
+    fs::write(
+        state.join(allow::FILE),
+        r#"[{"id":1,"tool":"run_command","command":"./build.sh","escalated":true},{"id":2,"tool":"run_command","command":"g''it push origin main","escalated":true}]"#,
+    )
+    .unwrap();
+    let rules = Rules::new(&state);
+    assert_eq!(rules.list().unwrap().len(), 2);
+    let host = |command: &str, cwd: Option<&str>| {
+        let mut arguments = json!({"command": command, "escalate": true});
+        if let Some(cwd) = cwd {
+            arguments["cwd"] = json!(cwd);
+        }
+        approval::card(
+            &root,
+            &alfredo_tui::model::ToolCall {
+                name: "run_command".into(),
+                arguments,
+            },
+        )
+        .unwrap()
+    };
+    for cwd in [None, Some("sub")] {
+        assert_eq!(rules.matching(&host("./build.sh", cwd)), None, "{cwd:?}");
+        assert_eq!(
+            rules.matching(&host("g''it push origin main", cwd)),
+            None,
+            "{cwd:?}"
+        );
+    }
+    let _ = fs::remove_dir_all(state);
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn git_push_through_run_command_is_never_allowlistable() {
     let state = dir("shell-push");
