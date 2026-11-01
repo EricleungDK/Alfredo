@@ -60,9 +60,9 @@ pub(crate) fn path_valid(path: &str) -> bool {
 ///   without the dot stays readable, like `pip/pip.conf` next to `.pip/pip.conf`).
 ///   Only those names: `.docker/daemon.json`, `.cargo/config.toml` and `.m2/` files other than
 ///   `settings.xml` stay readable.
-/// - Names: `.env*` (except the exact final names `.env.example`, `.env.sample` and
-///   `.env.template`, which hold no secrets; a directory of that name exempts nothing),
-///   `.npmrc`, `.netrc`, `_netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+/// - Names: `.env*` (`secret` refuses all of them; [`read_secret`] lets reads through the
+///   exact final names `.env.example`, `.env.sample` and `.env.template`, which hold no
+///   secrets; a directory of that name exempts nothing), `.npmrc`, `.netrc`, `_netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
 ///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `.my.cnf`, `.terraformrc`,
 ///   `terraform.rc`, `auth.json` (Composer), `.bash_history`, `.zsh_history`,
 ///   `.zhistory`, `.mysql_history`, `.psql_history`, `.python_history`,
@@ -87,12 +87,24 @@ pub(crate) fn path_valid(path: &str) -> bool {
 /// Directory-scoped rules look at the component directly above the name, or at the whole
 /// directory chain for the longer paths, so a nested `sub/.docker/config.json` is refused too.
 pub(crate) fn secret(path: &str) -> bool {
+    secret_by(path, false)
+}
+
+/// [`secret`] for the read consumers only (read tools, `@path`, planner context, diff
+/// display): the exact final names `.env.example`, `.env.sample` and `.env.template` are
+/// readable. Writes and commits keep using [`secret`] and refuse them.
+pub(crate) fn read_secret(path: &str) -> bool {
+    secret_by(path, true)
+}
+
+fn secret_by(path: &str, templates_readable: bool) -> bool {
     let lower = path.to_lowercase();
     let raw: Vec<&str> = lower
         .split('/')
         .filter(|part| !part.is_empty() && *part != ".")
         .collect();
-    secret_components(&raw) || secret_components(&resolve_parent_refs(&raw))
+    secret_components(&raw, templates_readable)
+        || secret_components(&resolve_parent_refs(&raw), templates_readable)
 }
 
 /// `parts` with each `..` resolved against the component before it. A `..` with nothing
@@ -109,11 +121,11 @@ fn resolve_parent_refs<'a>(parts: &[&'a str]) -> Vec<&'a str> {
     resolved
 }
 
-/// The `.env*` names that stay readable: committed templates that hold no secrets.
+/// The `.env*` names that reads may open: secret-free templates (see [`read_secret`]).
 const ENV_TEMPLATES: [&str; 3] = [".env.example", ".env.sample", ".env.template"];
 
 /// Whether one of the normalised, lowercased `parts` is a secret (see [`secret`]).
-fn secret_components(parts: &[&str]) -> bool {
+fn secret_components(parts: &[&str], templates_readable: bool) -> bool {
     parts.iter().enumerate().any(|(index, &part)| {
         // The component directly above this one, for the rules scoped to a directory.
         let parent = index.checked_sub(1).map(|up| parts[up]);
@@ -121,7 +133,8 @@ fn secret_components(parts: &[&str]) -> bool {
         let chain = &parts[..=index];
         // A committed, secret-free env template: only as the final component, so a
         // directory of that name does not exempt what is inside it.
-        let env_template = index + 1 == parts.len() && ENV_TEMPLATES.contains(&part);
+        let env_template =
+            templates_readable && index + 1 == parts.len() && ENV_TEMPLATES.contains(&part);
         let json = Path::new(part).extension().is_some_and(|ext| ext == "json");
         matches!(
             part,
@@ -231,6 +244,11 @@ pub(crate) fn excluded(lower: &str) -> bool {
     secret(lower) || generated(lower)
 }
 
+/// [`excluded`] for reads: the env templates of [`read_secret`] are not excluded.
+pub(crate) fn read_excluded(lower: &str) -> bool {
+    read_secret(lower) || generated(lower)
+}
+
 /// A committed file named by a check or task text; `content` is Err with the
 /// reason it was not read.
 #[derive(Debug)]
@@ -324,7 +342,7 @@ pub async fn named_sources(
             });
             continue;
         }
-        let content = if excluded(&path.to_lowercase()) {
+        let content = if read_excluded(&path.to_lowercase()) {
             Err("excluded as possible secret or generated file")
         } else if size
             .parse::<usize>()
@@ -506,7 +524,7 @@ pub async fn capture_with_record_limit(
                 return Ok(true);
             }
             let lower = path.to_lowercase();
-            if excluded(&lower) {
+            if read_excluded(&lower) {
                 return Ok(true);
             }
             let base = lower.rsplit('/').next().unwrap_or(&lower);
@@ -594,7 +612,7 @@ pub async fn capture_with_record_limit(
 
 #[cfg(test)]
 mod tests {
-    use super::{excluded, secret};
+    use super::{excluded, read_excluded, read_secret, secret};
 
     /// Issue #312: credential files that must never be model inputs, in the forms a
     /// repository commonly holds them.
@@ -1021,24 +1039,28 @@ mod tests {
     #[test]
     fn secret_exempts_only_the_exact_env_template_basenames() {
         for name in [".env.example", ".env.sample", ".env.template"] {
-            assert!(!secret(name), "{name}");
-            assert!(!secret(&format!("config/{name}")), "config/{name}");
-            assert!(!secret(&format!("./{name}")), "./{name}");
-            assert!(!secret(&format!("a//b/{name}")), "a//b/{name}");
-            assert!(!secret(&name.to_uppercase()), "{name} upper");
-            assert!(!excluded(name), "excluded {name}");
+            assert!(!read_secret(name), "{name}");
+            assert!(!read_secret(&format!("config/{name}")), "config/{name}");
+            assert!(!read_secret(&format!("./{name}")), "./{name}");
+            assert!(!read_secret(&format!("a//b/{name}")), "a//b/{name}");
+            assert!(!read_secret(&name.to_uppercase()), "{name} upper");
+            assert!(!read_excluded(name), "read_excluded {name}");
+            // The strict list, used by writes and commits, still refuses every template.
+            assert!(secret(name), "strict {name}");
+            assert!(excluded(name), "strict excluded {name}");
+            assert!(secret(&format!("config/{name}")), "strict config/{name}");
             // A directory with that name does not exempt its contents or `..` escapes.
-            assert!(secret(&format!("{name}/x.txt")), "{name}/x.txt");
-            assert!(secret(&format!("{name}/.env")), "{name}/.env");
-            assert!(secret(&format!("{name}/..")), "{name}/..");
-            assert!(secret(&format!("{name}/../.env")), "{name}/../.env");
+            assert!(read_secret(&format!("{name}/x.txt")), "{name}/x.txt");
+            assert!(read_secret(&format!("{name}/.env")), "{name}/.env");
+            assert!(read_secret(&format!("{name}/..")), "{name}/..");
+            assert!(read_secret(&format!("{name}/../.env")), "{name}/../.env");
             // Near misses: an added or missing character, or a second suffix.
-            assert!(secret(&format!("{name}x")), "{name}x");
-            assert!(secret(&format!("{name}.local")), "{name}.local");
-            assert!(secret(&format!("{name}.env")), "{name}.env");
-            assert!(!secret(&format!("x{name}")), "x{name}");
+            assert!(read_secret(&format!("{name}x")), "{name}x");
+            assert!(read_secret(&format!("{name}.local")), "{name}.local");
+            assert!(read_secret(&format!("{name}.env")), "{name}.env");
+            assert!(!read_secret(&format!("x{name}")), "x{name}");
             assert!(
-                secret(&name[..name.len() - 1]),
+                read_secret(&name[..name.len() - 1]),
                 "{}",
                 &name[..name.len() - 1]
             );
@@ -1053,7 +1075,7 @@ mod tests {
             ".envrc",
             "config/.env.local",
         ] {
-            assert!(secret(name), "{name}");
+            assert!(read_secret(name), "{name}");
         }
     }
 }

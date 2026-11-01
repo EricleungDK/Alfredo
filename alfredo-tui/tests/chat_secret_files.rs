@@ -1073,3 +1073,25 @@ fn issue_505_templates_stay_refused_for_writes_and_commits() {
         git(&repo.root, &["reset", "-q", "--", path]);
     }
 }
+
+/// Issue #505: `git_diff` is a read, so it shows a changed template like `read_file`
+/// does, and still hides a changed `.env.local` beside it.
+#[test]
+fn issue_505_git_diff_shows_a_changed_template_but_not_other_env_files() {
+    let repo = Repo::plain();
+    for path in [".env.example", ".env.local"] {
+        repo.write(path, "DIFF-505 v1\n");
+    }
+    git(&repo.root, &["add", "-f", "-A"]);
+    git(&repo.root, &["commit", "-q", "-m", "env files"]);
+    for path in [".env.example", ".env.local"] {
+        repo.write(path, "DIFF-505 v2\n");
+    }
+    for arguments in [json!({}), json!({"path": ".env.example"})] {
+        let diff = repo.run("git_diff", arguments.clone());
+        assert!(diff.contains("DIFF-505 v2"), "git_diff {arguments}: {diff}");
+        assert!(!diff.contains(".env.local"), "git_diff {arguments}: {diff}");
+    }
+    let local = repo.run("git_diff", json!({"path": ".env.local"}));
+    assert!(local.contains("excluded"), "{local}");
+}

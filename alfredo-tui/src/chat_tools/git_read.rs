@@ -2,7 +2,7 @@
 //! Coding Workspace. Strictly read-only: no fetch, no optional locks (the index is not
 //! refreshed), hooks and fsmonitor off, and model arguments cannot become options
 //! (refs starting with `-` are refused, `--end-of-options` and `--` separate them).
-use super::{excluded, text_arg, Tier, Tool, MAX_OUTPUT};
+use super::{excluded, read_excluded, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
 use std::os::unix::fs::FileTypeExt;
 use std::{
@@ -169,7 +169,7 @@ fn diff_output(root: &Path, arguments: &Value) -> Result<String, String> {
         Some(Value::Bool(staged)) => *staged,
         Some(_) => return Err("argument staged must be true or false".into()),
     };
-    let path = path_arg(arguments)?;
+    let path = read_path_arg(arguments)?;
     let mut selector: Vec<String> = Vec::new();
     if staged {
         selector.push("--cached".into());
@@ -276,7 +276,7 @@ fn secret_names(listing: &str) -> Result<Vec<String>, String> {
         };
         if names
             .iter()
-            .any(|name| crate::planning_context::secret(name))
+            .any(|name| crate::planning_context::read_secret(name))
         {
             found.extend(names.into_iter().map(String::from));
         }
@@ -306,6 +306,15 @@ pub(crate) fn ref_arg<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'a
 
 /// Optional repository-relative path: no options, pathspec magic, `..` or exclusions.
 pub(crate) fn path_arg(arguments: &Value) -> Result<Option<String>, String> {
+    path_arg_by(arguments, excluded)
+}
+
+/// [`path_arg`] for `git_diff`, which shows what reads show: the env templates pass.
+fn read_path_arg(arguments: &Value) -> Result<Option<String>, String> {
+    path_arg_by(arguments, read_excluded)
+}
+
+fn path_arg_by(arguments: &Value, excluded: fn(&str) -> bool) -> Result<Option<String>, String> {
     let Some(path) = text_arg(arguments, "path")?.map(str::trim) else {
         return Ok(None);
     };
