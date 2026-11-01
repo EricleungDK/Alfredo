@@ -154,6 +154,42 @@ fn scripted_policy_approves_workspace_edits_and_logs_them() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Issue #510: a rewrite whose first and last lines changed is a four-line change, so
+/// the card fits under the 80-line cap and the scripted policy applies it.
+#[test]
+fn scattered_write_file_changes_get_a_minimal_card_and_are_applied() {
+    let root = repository("minimal-hunks");
+    let old: String = (1..=100).map(|n| format!("x{n}\n")).collect();
+    let new = old
+        .replacen("x1\n", "first\n", 1)
+        .replacen("x100\n", "last\n", 1);
+    fs::write(root.join("workspace/mod.py"), &old).unwrap();
+    let fixture = scripted_chat(vec![
+        tool_calls(&[("write_file", json!({"path": "mod.py", "content": &new}))]),
+        done("done"),
+    ]);
+    let output = run(
+        &root,
+        &fixture,
+        &[
+            "--chat",
+            "tweak first and last line",
+            "--headless",
+            "--approve",
+            "workspace-edits",
+        ],
+    );
+    let value = result(&output);
+    assert_eq!(value["calls"][0]["error"], false, "{value}");
+    assert_eq!(value["approvals"][0]["tool"], "write_file", "{value}");
+    assert_eq!(value["approvals"][0]["outcome"], "applied", "{value}");
+    assert_eq!(
+        fs::read_to_string(root.join("workspace/mod.py")).unwrap(),
+        new
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// A final frame carrying the server's counts, as Ollama sends them (issue #283).
 fn counted(reply: Reply, prompt: u64, eval: u64, total_ns: u64) -> Reply {
     let Reply::Stream(mut frames, delay) = reply else {
