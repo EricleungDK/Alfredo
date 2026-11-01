@@ -797,6 +797,23 @@ fn resolve_for_containment(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
+/// Clean an absolute path without touching the filesystem: repeated separators and `.` go
+/// (`components` already drops them), and `..` removes the component before it (it stays at
+/// the root). Run paths are built from this, so they match what `canonicalize` reports.
+fn lexically_clean(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                clean.pop();
+            }
+            other => clean.push(other.as_os_str()),
+        }
+    }
+    clean
+}
+
 impl TaskStore {
     pub fn new(root: &Path, workspace: &Path, mission: &str) -> Result<Self> {
         let workspace = workspace
@@ -816,7 +833,17 @@ impl TaskStore {
                 .join(root)
         };
         // State is separate from the coding workspace and all legacy mission files.
-        let resolved = resolve_for_containment(&root)?;
+        // Store the lexically clean root so run paths are canonical (`.`, `..`, `//` never
+        // reach the check boundary). It is not canonicalized: symlinked ancestors must stay
+        // visible to `lock_checked`.
+        let clean = lexically_clean(&root);
+        let resolved = resolve_for_containment(&clean)?;
+        if resolve_for_containment(&root)? != resolved {
+            return Err(format!(
+                "Task state {} passes through a symlink before a `..`; name the real directory instead",
+                root.display()
+            ));
+        }
         if resolved.starts_with(&workspace) {
             return Err(format!(
                 "Task state must live outside the coding workspace: state {} is inside workspace {}",
@@ -827,7 +854,7 @@ impl TaskStore {
         let identity = serde_json::to_vec(&(&workspace, mission)).map_err(|e| e.to_string())?;
         let namespace = format!("{:x}", Sha256::digest(identity));
         Ok(Self {
-            root: root.join("rust-tasks-v1").join(namespace),
+            root: clean.join("rust-tasks-v1").join(namespace),
             workspace,
             mission: mission.into(),
         })
