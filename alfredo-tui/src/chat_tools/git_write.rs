@@ -325,8 +325,12 @@ const ALLOWED_LOCAL_KEYS: [&str; 18] = [
     "user.name",
 ];
 
-/// Whether a repository-local `key` (lowercase) with `value` is on the allowlist. Remote
-/// and branch keys are per name (`remote.<name>.url`); `commit.gpgsign` only when false.
+/// Whether a repository-local `key` (lowercase) with `value` is on the allowlist. Remote,
+/// branch and submodule keys are per name (`remote.<name>.url`); `commit.gpgsign` only when
+/// false. For a submodule only `url` and a boolean `active` (what `git submodule add` and
+/// `update --init` write, #539) are inert: `url` is read only by `submodule update`, `sync`
+/// and `add`, which no chat git write runs; `update` can be `!command` and `ignore` makes
+/// git open the submodule, so they stay refused with every other submodule key.
 fn allowed_local_key(key: &str, value: &str) -> bool {
     if key == "commit.gpgsign" {
         return matches!(
@@ -345,6 +349,14 @@ fn allowed_local_key(key: &str, value: &str) -> bool {
                 variable,
                 "remote" | "merge" | "rebase" | "pushremote" | "description"
             ),
+            "submodule" => match variable {
+                "url" => true,
+                "active" => matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "true" | "false" | "yes" | "no" | "on" | "off" | "1" | "0"
+                ),
+                _ => false,
+            },
             _ => false,
         },
         _ => false,

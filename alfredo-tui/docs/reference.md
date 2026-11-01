@@ -2038,6 +2038,14 @@ credentials). Each call pauses for Approval like a file edit.
   config when it merges, switches or stages it. A `.gitmodules` that is not a small regular
   file is refused unopened. Repositories without the override, branch creation and
   commits of other files are unaffected.
+- **Initialised submodules (#539).** `git submodule add` and `update --init` write
+  `submodule.<name>.url` and `submodule.<name>.active=true` to the repository config, and
+  both are on the allowlist: `url` is read only by `git submodule update`, `sync` and
+  `add`, which no chat git tool runs, and `active` is accepted only as a git boolean
+  (`true`, `false`, `yes`, `no`, `on`, `off`, `1` or `0`, any case). Every other
+  `submodule.*` key stays refused, including `.update` (it can be `!command`), `.ignore`
+  (see above), `.branch`, `submodule.recurse` and `fetch.recurseSubmodules`. A name with
+  dots or odd characters is split at its last dot, like `remote.<name>` and `branch.<name>`.
 - **Push URL.** Push takes only `https://`, `ssh://` and scp-style `user@host:path`
   remotes. A local path, `file://`, `git://`, `http://` or `ext::` URL is refused before
   the card. The card shows the push URLs (`pushurl` included). A push sends only the
