@@ -1805,6 +1805,126 @@ fn state_dir_through_a_symlink_into_the_workspace_is_rejected() {
     assert!(TaskStore::new(&fixture.root.join("sublink/../state"), &workspace, "m").is_err());
 }
 
+/// The state root as stored, for a state directory spelled `spelling` under the fixture root.
+fn stored_state_root(fixture: &Fixture, spelling: &str) -> PathBuf {
+    let workspace = fixture.root.join("workspace");
+    let store = TaskStore::new(&PathBuf::from(spelling), &workspace, "mission")
+        .unwrap_or_else(|e| panic!("{spelling} should be accepted: {e}"));
+    // <state>/rust-tasks-v1/<namespace>
+    store
+        .state_directory()
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn state_root_is_stored_lexically_clean() {
+    let fixture = Fixture::new();
+    let root = fixture.root.canonicalize().unwrap();
+    let r = root.display().to_string();
+    let clean = root.join("a");
+    for spelling in [
+        format!("{r}/./a"),
+        format!("{r}//a"),
+        format!("{r}///a"),
+        format!("{r}/a/."),
+        format!("{r}/a/"),
+        format!("{r}/b/../a"),
+        format!("{r}/b/c/../../a"),
+        format!("{r}/a/b/.."),
+        format!("/../..{r}/a"),
+        format!("{r}/../{}/a", root.file_name().unwrap().to_str().unwrap()),
+    ] {
+        assert_eq!(stored_state_root(&fixture, &spelling), clean, "{spelling}");
+    }
+}
+
+#[test]
+fn state_root_with_dot_components_runs_checks() {
+    use alfredo_tui::{execution::ExecutionCallbacks, run_boundary, worker};
+    let fixture = Fixture::new();
+    let root = fixture.root.canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    fs::create_dir(root.join("existing")).unwrap();
+    let r = root.display();
+    for state in [
+        format!("{r}/d0/./s"),
+        format!("{r}/d1/x/../s"),
+        format!("{r}/existing/../d2/s"),
+        format!("{r}/d3/s/."),
+        format!("{r}//d4//s"),
+        format!("{r}/d5/../d5/s"),
+    ]
+    .into_iter()
+    {
+        let store = TaskStore::new(&PathBuf::from(&state), &workspace, "mission")
+            .unwrap_or_else(|e| panic!("{state}: {e}"));
+        let mut revision = 0;
+        for action in [
+            Action::Propose {
+                title: "Run a check".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+            },
+            Action::Permit {
+                task: 1,
+                policy: alfredo_tui::tasks::WorkPolicy {
+                    files: vec!["calc.py".into()],
+                    check: vec!["/usr/bin/true".into()],
+                },
+            },
+            Action::Approve { task: 1 },
+            Action::Start {
+                task: 1,
+                baseline: "a".repeat(40),
+                inputs: vec![],
+            },
+        ] {
+            revision = store
+                .transact(Request {
+                    correlation: format!("c{revision}"),
+                    expected_revision: revision,
+                    action,
+                })
+                .unwrap()
+                .0
+                .revision;
+        }
+        let task = store.snapshot().unwrap().tasks[0].clone();
+        let directory = store.run_directory(&task.run.as_ref().unwrap().id).unwrap();
+        fs::create_dir_all(directory.join("worktree")).unwrap();
+        fs::write(directory.join("worktree/.git"), "fixture git metadata\n").unwrap();
+        run_boundary::record_start(&directory, &task).unwrap();
+        let request = worker::check_request(&directory.join("worktree"), &task, "mission").unwrap();
+        let receipt = run_boundary::execute_check(
+            &directory,
+            &task,
+            "mission",
+            &request,
+            &mut ExecutionCallbacks::none(),
+        )
+        .unwrap_or_else(|e| panic!("{state}: {e}"));
+        assert_eq!(receipt.status, "completed", "{state}: {receipt:?}");
+    }
+}
+
+#[test]
+fn state_dir_through_a_symlink_before_dotdot_is_refused_not_cleaned_around() {
+    let fixture = Fixture::new();
+    let root = fixture.root.canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(root.join("elsewhere/deep")).unwrap();
+    std::os::unix::fs::symlink(root.join("elsewhere/deep"), root.join("link")).unwrap();
+    // Lexically `root/state`; the OS resolves it to `root/elsewhere/state`.
+    let message = TaskStore::new(&root.join("link/../state"), &workspace, "m")
+        .err()
+        .expect("a `..` after a symlink must be refused");
+    assert!(message.contains("symlink"), "{message}");
+    assert!(!root.join("state").exists());
+}
+
 #[test]
 fn approve_without_policy_is_refused_with_the_permit_next_step() {
     let fixture = Fixture::new();

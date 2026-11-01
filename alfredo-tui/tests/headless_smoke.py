@@ -96,6 +96,40 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD'), head)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
+    def goal_with_state_spelling(self, state, cwd):
+        # A state directory spelled with `.`, `..` or `//` names the same directory as its clean form.
+        self.fixture.single_task = True
+        args = [str(self.binary), '--model', 'fixture', '--endpoint', self.fixture.endpoint,
+                '--workspace', str(self.workspace), '--state-dir', state, '--go', 'Make answer return 42', '--headless']
+        process = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=90,
+                                 cwd=cwd, env=dict(os.environ, ALFREDO_MODEL='fixture'))
+        self.assertEqual(process.returncode, 0, process.stderr)
+        result = self.result(process.stdout)
+        self.assertEqual((result['state'], result['accepted'], result['total'], result['failed']), ('done', 1, 1, []))
+        self.assertNotIn('canonical managed run', process.stderr)
+        self.assertEqual(self.git('show', f"{result['branch']}:calc.py"), 'def answer():\n    return 42')
+
+    def outside_cwd(self):
+        cwd = self.workspace.parent / 'elsewhere'
+        cwd.mkdir()
+        return cwd
+
+    def test_state_dir_spelled_with_parent_component_from_outside_the_repo_completes(self):
+        self.goal_with_state_spelling('../state-parent', self.outside_cwd())
+
+    def test_state_dir_spelled_with_current_dir_component_from_outside_the_repo_completes(self):
+        self.goal_with_state_spelling('./state-current', self.outside_cwd())
+
+    def test_state_dir_spelled_absolute_with_parent_component_completes(self):
+        (self.workspace.parent / 'x').mkdir()
+        self.goal_with_state_spelling(f'{self.workspace.parent}/x/../state-abs-parent', self.outside_cwd())
+
+    def test_state_dir_spelled_absolute_with_current_dir_component_completes(self):
+        self.goal_with_state_spelling(f'{self.workspace.parent}/./state-abs-current', self.outside_cwd())
+
+    def test_state_dir_spelled_absolute_with_double_separator_completes(self):
+        self.goal_with_state_spelling(f'{self.workspace.parent}//state-abs-double', self.outside_cwd())
+
     def test_usage_sums_planner_worker_and_repair_counts_from_the_server(self):
         self.fixture.usage = {'prompt_eval_count': 50, 'eval_count': 3, 'total_duration': 2_000_000_000}
         code, out, err = self.run_headless('--headless')
