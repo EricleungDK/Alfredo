@@ -1759,6 +1759,61 @@ mod tests {
         assert!(check_ignore_listing("").is_ok());
     }
 
+    /// #539: an initialised submodule's `url` and boolean `active` are inert; every other
+    /// submodule key can make git run or fetch something, so it stays refused.
+    #[test]
+    fn only_submodule_url_and_boolean_active_are_allowed_local_keys() {
+        for key in [
+            "submodule.sub.url",
+            "submodule.a.b.url",
+            "submodule.we ird=n\"ame.url",
+            "submodule.update.url",
+            "submodule.sub.url.url",
+        ] {
+            assert!(allowed_local_key(key, "https://example.com/x.git"), "{key}");
+        }
+        for value in [
+            "true", "false", "yes", "no", "on", "off", "1", "0", "TRUE", "No",
+        ] {
+            assert!(allowed_local_key("submodule.sub.active", value), "{value}");
+            assert!(allowed_local_key("submodule.a.b.active", value), "{value}");
+        }
+        for value in [
+            "", " ", "!touch x", "2", "-1", "maybe", "ture", "true;x", "y", "t",
+        ] {
+            assert!(
+                !allowed_local_key("submodule.sub.active", value),
+                "{value:?}"
+            );
+        }
+        for key in [
+            "submodule.sub.ignore",
+            "submodule.sub.update",
+            "submodule.sub.branch",
+            "submodule.sub.path",
+            "submodule.sub.shallow",
+            "submodule.sub.fetchrecursesubmodules",
+            "submodule.a.b.update",
+            "submodule.a.b.ignore",
+            "submodule.sub.url.update",
+            "submodule.sub.active.update",
+            "submodule.url",
+            "submodule.active",
+            "submodule.recurse",
+            "submodule.fetchjobs",
+            "submodule.",
+            "fetch.recursesubmodules",
+            "submodulex.sub.url",
+        ] {
+            let value = if key.ends_with("active") {
+                "true"
+            } else {
+                "all"
+            };
+            assert!(!allowed_local_key(key, value), "{key}");
+        }
+    }
+
     #[test]
     fn terminal_failures_keep_git_error_and_add_the_hint() {
         let https =
