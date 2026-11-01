@@ -3,13 +3,16 @@
 //! checks ([`crate::worker::sandbox_argv`]): Coding Workspace writable, `.git` and
 //! system roots read-only, network off. `escalate: true` runs it on the host
 //! (network on) behind a visibly different card. Both run in their own process
-//! group: a timeout kills the whole tree; output is capped. A sandbox that cannot
-//! start is reported with a suggestion to escalate; nothing is retried on the host.
+//! group: a timeout kills the whole tree; output is capped. Secret files and directories
+//! in the workspace are masked inside the sandbox (issue #469, [`sandbox_masks`]); a run
+//! that cannot mask them all is refused. A sandbox that cannot start is reported with a
+//! suggestion to escalate; nothing is retried on the host.
 use super::{display, git_read, needed_terminal, resolve, text_arg, Tier, Tool};
 use crate::execution::{
     self, ControlSignal, ExecutionAuthority, ExecutionCallbacks, ExecutionLimits, ExecutionRequest,
     ExecutionSandbox, ProcessOutcomeStatus, RustExecutionProvider,
 };
+use sandbox_masks::EmptyDir;
 use serde_json::{json, Value};
 use std::{
     cell::RefCell,
@@ -436,6 +439,322 @@ impl Drop for Hold {
     }
 }
 
+mod sandbox_masks {
+    //! Secret masks for the chat sandbox (issue #469). The sandbox binds the Coding Workspace
+    //! read-write, so a rule-approved or carded `run_command` could read a secret file that
+    //! the read tools refuse. Before each sandboxed run, every workspace entry the secret
+    //! predicate ([`crate::planning_context::secret`]) matches is hidden: a secret file is
+    //! bound over with `/dev/null`, and a secret directory with an empty read-only directory.
+    //!
+    //! The walk is bounded and does not follow symbolic links. It includes git-ignored files,
+    //! which are exactly the ones a `.gitignore` leaves out of Git. It skips `.git` at every
+    //! depth: Git needs its own directory, the root `.git` is already read-only in the sandbox,
+    //! and its contents are not masked one by one. When the walk cannot finish (an unreadable
+    //! directory, the visit or depth budget, the mask cap, a secret-named symbolic link or a
+    //! name that is not UTF-8), it refuses, so the caller runs nothing rather than run unmasked.
+    use crate::planning_context;
+    use std::{
+        fs,
+        path::Path,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    /// Most masks (files and directories together) one run may carry. The masks are read-only
+    /// binds declared with the sandbox's other read-only bindings, which the execution
+    /// validator caps at 256 entries; the rest of the run takes a handful of those.
+    pub(crate) const LIMIT: usize = 128;
+    /// Entries one walk may visit before it refuses, so a huge tree cannot stall a run.
+    const VISIT_LIMIT: usize = 250_000;
+    /// Directory depth one walk may descend before it refuses.
+    const DEPTH_LIMIT: usize = 64;
+
+    /// The workspace entries the sandbox must not see. Paths are absolute and canonical, so
+    /// they match the mount destinations the sandbox is built with.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    pub(crate) struct Masks {
+        /// Non-directory entries (regular files, and anything else not a directory) that are
+        /// bound over with `/dev/null`.
+        pub(crate) files: Vec<String>,
+        /// Secret directories, bound over with an empty read-only directory (see [`EmptyDir`]).
+        pub(crate) dirs: Vec<String>,
+    }
+
+    impl Masks {
+        fn len(&self) -> usize {
+            self.files.len() + self.dirs.len()
+        }
+    }
+
+    /// Walk `root` (canonical) and collect its masks, or say why they cannot be collected.
+    pub(crate) fn scan(root: &Path) -> Result<Masks, String> {
+        scan_with(root, VISIT_LIMIT)
+    }
+
+    fn scan_with(root: &Path, visit_limit: usize) -> Result<Masks, String> {
+        let mut scan = Scan {
+            masks: Masks::default(),
+            visits: 0,
+            visit_limit,
+        };
+        scan.directory(root, "", 0)?;
+        Ok(scan.masks)
+    }
+
+    struct Scan {
+        masks: Masks,
+        visits: usize,
+        visit_limit: usize,
+    }
+
+    impl Scan {
+        /// One directory: `path` on disk, `relative` its `/`-separated path in the workspace
+        /// ("" for the root), `depth` how many directories down it is.
+        fn directory(&mut self, path: &Path, relative: &str, depth: usize) -> Result<(), String> {
+            if depth > DEPTH_LIMIT {
+                return Err(format!(
+                    "the tree is nested deeper than {DEPTH_LIMIT} directories"
+                ));
+            }
+            let entries = fs::read_dir(path)
+                .map_err(|error| format!("{} could not be listed: {error}", shown(relative)))?;
+            for entry in entries {
+                let entry = entry
+                    .map_err(|error| format!("{} could not be listed: {error}", shown(relative)))?;
+                self.visits += 1;
+                if self.visits > self.visit_limit {
+                    return Err(format!(
+                        "the workspace has more than {} entries to scan",
+                        self.visit_limit
+                    ));
+                }
+                let name = entry.file_name();
+                // Git's own directory, at any depth: see the module docs.
+                if name.to_str() == Some(".git") {
+                    continue;
+                }
+                let name = name.to_string_lossy().into_owned();
+                let child = if relative.is_empty() {
+                    name
+                } else {
+                    format!("{relative}/{name}")
+                };
+                let file_type = entry
+                    .file_type()
+                    .map_err(|error| format!("{child} could not be read: {error}"))?;
+                let secret = planning_context::secret(&child);
+                if file_type.is_symlink() {
+                    // A symlink is never followed. A secret-named one cannot be masked: bwrap
+                    // would mount over whatever it points at, so the run is refused instead.
+                    if secret {
+                        return Err(format!(
+                            "{child} is a symbolic link named like a secret file, and a link cannot be masked safely; remove it or rename it"
+                        ));
+                    }
+                    continue;
+                }
+                if secret {
+                    let text = entry.path().into_os_string().into_string().map_err(|_| {
+                        format!("{child} is not valid UTF-8 and matches a secret file name")
+                    })?;
+                    if file_type.is_dir() {
+                        self.masks.dirs.push(text);
+                    } else {
+                        self.masks.files.push(text);
+                    }
+                    if self.masks.len() > LIMIT {
+                        return Err(format!(
+                            "the workspace has more than {LIMIT} secret files and directories to hide"
+                        ));
+                    }
+                    continue;
+                }
+                if file_type.is_dir() {
+                    self.directory(&entry.path(), &child, depth + 1)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn shown(relative: &str) -> &str {
+        if relative.is_empty() {
+            "the Coding Workspace"
+        } else {
+            relative
+        }
+    }
+
+    /// An empty directory on the host, made for one sandboxed run and removed when the run
+    /// ends. Each secret directory is bound over with it read-only, so the sandbox sees the
+    /// directory with nothing in it.
+    #[derive(Debug)]
+    pub(crate) struct EmptyDir(String);
+
+    static EMPTY_DIRS: AtomicU64 = AtomicU64::new(0);
+
+    impl EmptyDir {
+        pub(crate) fn create() -> Result<Self, String> {
+            let path = std::env::temp_dir().join(format!(
+                "alfredo-mask-{}-{}",
+                std::process::id(),
+                EMPTY_DIRS.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path)
+                .map_err(|error| format!("no empty directory for masks: {error}"))?;
+            // Canonical, as the sandbox validator requires of every bound path.
+            let canonical = path
+                .canonicalize()
+                .and_then(|canonical| {
+                    canonical
+                        .into_os_string()
+                        .into_string()
+                        .map_err(|_| std::io::Error::other("not UTF-8"))
+                })
+                .map_err(|error| {
+                    let _ = fs::remove_dir(&path);
+                    format!("no empty directory for masks: {error}")
+                })?;
+            Ok(Self(canonical))
+        }
+
+        pub(crate) fn path(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl Drop for EmptyDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir(&self.0);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::{os::unix::ffi::OsStrExt, path::PathBuf};
+
+        fn scratch(tag: &str) -> PathBuf {
+            let root = std::env::temp_dir().join(format!(
+                "alfredo-masks-{tag}-{}-{}",
+                std::process::id(),
+                EMPTY_DIRS.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            root.canonicalize().unwrap()
+        }
+
+        fn text(path: &Path) -> String {
+            path.to_string_lossy().into_owned()
+        }
+
+        #[test]
+        fn secret_files_and_directories_are_masked_and_nothing_else() {
+            let root = scratch("walk");
+            fs::create_dir_all(root.join(".ssh")).unwrap();
+            fs::write(root.join(".ssh/id_rsa"), "k").unwrap();
+            fs::create_dir_all(root.join("sub/deeper")).unwrap();
+            fs::write(root.join("sub/.env"), "x").unwrap();
+            fs::write(root.join("sub/deeper/token.pem"), "x").unwrap();
+            fs::write(root.join("README.md"), "hi").unwrap();
+            fs::write(root.join(".gitignore"), ".env\n").unwrap();
+            fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+            fs::write(root.join("node_modules/pkg/.env"), "x").unwrap();
+            let masks = scan(&root).unwrap();
+            let mut files = masks.files.clone();
+            files.sort();
+            assert_eq!(
+                files,
+                vec![
+                    text(&root.join("node_modules/pkg/.env")),
+                    text(&root.join("sub/.env")),
+                    text(&root.join("sub/deeper/token.pem")),
+                ]
+            );
+            assert_eq!(masks.dirs, vec![text(&root.join(".ssh"))]);
+            let _ = fs::remove_dir_all(root);
+        }
+
+        #[test]
+        fn git_directories_are_skipped_at_every_depth() {
+            let root = scratch("git");
+            fs::create_dir_all(root.join(".git/objects")).unwrap();
+            fs::write(root.join(".git/config"), "[remote]\n").unwrap();
+            fs::create_dir_all(root.join("nested/.git")).unwrap();
+            fs::write(root.join("nested/.git/.env"), "x").unwrap();
+            assert_eq!(scan(&root).unwrap(), Masks::default());
+            let _ = fs::remove_dir_all(root);
+        }
+
+        #[test]
+        fn a_symlink_is_never_followed_and_a_secret_named_one_is_refused() {
+            let root = scratch("links");
+            fs::create_dir_all(root.join("outside")).unwrap();
+            fs::write(root.join("outside/.env"), "x").unwrap();
+            std::os::unix::fs::symlink("outside", root.join("alias")).unwrap();
+            std::os::unix::fs::symlink("README.md", root.join("link.txt")).unwrap();
+            assert_eq!(
+                scan(&root).unwrap().files,
+                vec![text(&root.join("outside/.env"))]
+            );
+            std::os::unix::fs::symlink("outside", root.join(".env")).unwrap();
+            let error = scan(&root).unwrap_err();
+            assert!(error.contains(".env is a symbolic link"), "{error}");
+            let _ = fs::remove_dir_all(root);
+        }
+
+        #[test]
+        fn a_visit_budget_refuses_instead_of_stopping_early() {
+            let root = scratch("budget");
+            for index in 0..10 {
+                fs::write(root.join(format!("file{index}")), "x").unwrap();
+            }
+            let error = scan_with(&root, 5).unwrap_err();
+            assert!(error.contains("more than 5 entries"), "{error}");
+            assert!(scan_with(&root, 10).is_ok());
+            let _ = fs::remove_dir_all(root);
+        }
+
+        #[test]
+        fn a_tree_nested_past_the_depth_limit_refuses() {
+            let root = scratch("depth");
+            let mut deep = root.clone();
+            for _ in 0..=DEPTH_LIMIT {
+                deep = deep.join("d");
+            }
+            fs::create_dir_all(&deep).unwrap();
+            let error = scan(&root).unwrap_err();
+            assert!(error.contains("nested deeper"), "{error}");
+            let _ = fs::remove_dir_all(root);
+        }
+
+        #[test]
+        fn a_secret_name_that_is_not_utf8_refuses_and_a_plain_one_is_ignored() {
+            let root = scratch("utf8");
+            let plain = root.join(std::ffi::OsStr::from_bytes(b"\xffplain.txt"));
+            fs::write(plain, "x").unwrap();
+            assert_eq!(scan(&root).unwrap(), Masks::default());
+            let secret = root.join(std::ffi::OsStr::from_bytes(b".env\xff"));
+            fs::write(secret, "x").unwrap();
+            let error = scan(&root).unwrap_err();
+            assert!(error.contains("not valid UTF-8"), "{error}");
+            let _ = fs::remove_dir_all(root);
+        }
+
+        #[test]
+        fn an_empty_directory_is_made_for_a_run_and_removed_after_it() {
+            let path = {
+                let empty = EmptyDir::create().unwrap();
+                let path = PathBuf::from(empty.path());
+                assert!(path.is_dir());
+                assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+                path
+            };
+            assert!(!path.exists(), "the empty directory outlived its run");
+        }
+    }
+}
+
 /// Run in the bubblewrap Sandbox at `bwrap`: the worker check boundary rooted at the
 /// Coding Workspace, then `cd` to the cwd inside it.
 fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<String, String> {
@@ -451,6 +770,17 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
         .to_str()
         .ok_or("Coding Workspace path is not UTF-8")?
         .to_string();
+    // Secret files and directories are masked before anything is reserved or written, so a
+    // refused run leaves no placeholder behind. A refusal never offers escalation: a host
+    // run has no masks.
+    let masks = sandbox_masks::scan(&root).map_err(|reason| {
+        format!("the sandbox cannot hide every secret file in the Coding Workspace ({reason}); nothing ran")
+    })?;
+    let empty_dir = if masks.dirs.is_empty() {
+        None
+    } else {
+        Some(EmptyDir::create().map_err(|reason| format!("{reason}; nothing ran"))?)
+    };
     let git = root.join(".git");
     // Held until this function returns, on every path, so the placeholder is removed after
     // the run (issue #522).
@@ -481,10 +811,23 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
         .iter()
         .position(|a| a == "--chdir")
         .unwrap_or(argv.len());
-    let binds: Vec<String> = extras
+    let mut binds: Vec<String> = extras
         .iter()
         .flat_map(|p| ["--ro-bind".to_string(), p.clone(), p.clone()])
         .collect();
+    // Secret masks shadow the writable workspace bind above: a file is bound over with
+    // /dev/null, a secret directory with the empty read-only directory of this run.
+    let mut mask_readonly: Vec<(String, String)> = Vec::new();
+    for file in &masks.files {
+        binds.extend(["--ro-bind".into(), "/dev/null".into(), file.clone()]);
+        mask_readonly.push(("/dev/null".into(), file.clone()));
+    }
+    if let Some(empty) = &empty_dir {
+        for dir in &masks.dirs {
+            binds.extend(["--ro-bind".into(), empty.path().into(), dir.clone()]);
+            mask_readonly.push((empty.path().into(), dir.clone()));
+        }
+    }
     argv.splice(at..at, binds);
     argv.extend([
         "/bin/sh".into(),
@@ -500,6 +843,7 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
         .iter()
         .chain(&extras)
         .map(|p| (p.clone(), p.clone()))
+        .chain(mask_readonly)
         .collect();
     let mut request = request(
         argv,

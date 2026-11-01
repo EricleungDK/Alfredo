@@ -1763,6 +1763,10 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `config.txt` by an approved `run_command` or by hand) is not detected. A copy search git cuts short past its
   rename limit is refused, not shown. git_diff reads the changed names and the patch in
   two git calls, so a file changed between them is not covered.
+  In a sandboxed `run_command` the same list is enforced by masking instead of refusing:
+  each workspace file it matches reads as empty and each matching directory appears empty, so
+  no approved command, including one an always-allow rule covers, returns a secret's contents
+  (issue #469). See **Sandboxed** under `run_command` for the limits.
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
   tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
   no external diff or textconv. `ref`, `base` and `target` must be plain ref names
@@ -2072,6 +2076,22 @@ default false), `timeout_seconds` (1–600, default 120).
   is removed when the last run holding it ends; if the process is killed mid-run, the
   marker file stays until the next sandboxed run in that workspace replaces it, and the git
   tools refuse it meanwhile.
+  Secret files are masked in every sandboxed run, including one an always-allow rule covers
+  (issue #469). Before the run the workspace is scanned with the secret list (see **Secret
+  files** above), git-ignored files included, without following symbolic links and skipping
+  `.git`. Each matching file is bound over with `/dev/null` and each matching directory with
+  an empty read-only directory, so `cat .env` prints nothing, `ls .ssh` lists nothing, and a
+  masked file cannot be written. The run is refused, with `nothing ran` and the reason, rather
+  than started unmasked, when the scan cannot finish: more than 128 masks, more than 250,000
+  entries, nesting past 64 directories, an unreadable directory, a name that is not UTF-8 and
+  matches the list, or a symbolic link whose own name matches the list (remove or rename it).
+  A link to a masked file reads the mask. Not covered: a file the command creates during the
+  run; an `escalate: true` run, which is on the host and unmasked (its card says it runs outside
+  the sandbox); a non-secret name hard-linked to a secret, which the read tools also allow; the `.git`
+  directory, which stays read-only and readable, including `.git/config`; and committed
+  history: `git show <rev>:.env` inside the sandbox can print a secret that was committed and
+  later removed. The git read tools check the paths they are given against the list, the
+  sandbox does not, so this is an open gap in the sandbox.
   Every capability is dropped (`--cap-drop ALL`), so even as root the sandbox cannot remount
   a read-only bind and write `.git` or the host (#517).
   The card reads `? Approve run_command · run sh test.sh` with

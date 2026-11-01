@@ -61,14 +61,36 @@ fn sandboxed_prefix_rule_never_hands_secret_files_to_the_model() {
     std::fs::write(root.join(".env"), "API_TOKEN=s3cr3t\n").unwrap();
     std::fs::write(root.join("README.md"), "hi\n").unwrap();
     assert!(chat_tools::resolve(&root, ".env").is_err());
-    let seed = Card { tool: "run_command".into(), arguments: json!({"command": "cat README.md", "escalate": false}),
-        kind: CardKind::Shell { escalated: false }, summary: String::new(), preview: String::new(), fingerprint: "/x".into() };
+    let seed = Card {
+        tool: "run_command".into(),
+        arguments: json!({"command": "cat README.md", "escalate": false}),
+        kind: CardKind::Shell { escalated: false },
+        summary: String::new(),
+        preview: String::new(),
+        fingerprint: "/x".into(),
+    };
     let rule = allow::rule_for(&seed).unwrap();
     let call = json!({"command": "cat README.md .env"});
-    let card = approval::card(&root, &ToolCall { name: "run_command".into(), arguments: call.clone() }).unwrap();
+    let card = approval::card(
+        &root,
+        &ToolCall {
+            name: "run_command".into(),
+            arguments: call.clone(),
+        },
+    )
+    .unwrap();
     let auto = allow::matches(&rule, &card);
-    let out = chat_tools::dispatch(&root, &ToolCall { name: "run_command".into(), arguments: call });
-    assert!(!(auto && out.contains("s3cr3t")), "rule-approved command read a secret file: {out}");
+    let out = chat_tools::dispatch(
+        &root,
+        &ToolCall {
+            name: "run_command".into(),
+            arguments: call,
+        },
+    );
+    assert!(
+        !(auto && out.contains("s3cr3t")),
+        "rule-approved command read a secret file: {out}"
+    );
 }
 
 #[test]
@@ -78,7 +100,10 @@ fn a_rule_approved_recursive_grep_does_not_return_env_contents() {
     write(&root, "README.md", "the TOKEN_OK marker\n");
     let out = run(&root, "grep -r TOKEN . ; echo END");
     assert!(out.contains("END"), "the command did not run: {out}");
-    assert!(out.contains("TOKEN_OK"), "a visible file is not searched: {out}");
+    assert!(
+        out.contains("TOKEN_OK"),
+        "a visible file is not searched: {out}"
+    );
     assert!(!out.contains(SECRET), "grep returned .env contents: {out}");
     let _ = fs::remove_dir_all(root);
 }
@@ -88,10 +113,20 @@ fn a_secret_directory_is_hidden_from_the_sandbox() {
     let root = workspace("ssh");
     write(&root, ".ssh/id_rsa", &format!("PRIVATE {SECRET}\n"));
     write(&root, ".ssh/config", "Host example\n");
-    let out = run(&root, "cat .ssh/id_rsa; ls -A .ssh; grep -r PRIVATE . ; echo END");
+    let out = run(
+        &root,
+        "cat .ssh/id_rsa 2>/dev/null; grep -r PRIVATE . ; echo END",
+    );
     assert!(out.contains("END"), "the command did not run: {out}");
     assert!(!out.contains(SECRET), "a .ssh file leaked: {out}");
-    assert!(!out.contains("id_rsa"), "a .ssh name leaked: {out}");
+    // The listing alone: the command's own stderr may echo a name the model typed.
+    let listing = run(&root, "ls -A .ssh; echo END");
+    assert!(
+        listing.contains("END"),
+        "the listing did not run: {listing}"
+    );
+    assert!(!listing.contains("id_rsa"), "a .ssh name leaked: {listing}");
+    assert!(!listing.contains("config"), "a .ssh name leaked: {listing}");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -106,7 +141,10 @@ fn a_nested_secret_file_is_hidden_and_the_host_copy_is_unchanged() {
     );
     assert!(out.contains("END"), "the command did not run: {out}");
     assert!(!out.contains(SECRET), "a nested .env leaked: {out}");
-    assert!(out.contains("visible"), "a non-secret file is unreadable: {out}");
+    assert!(
+        out.contains("visible"),
+        "a non-secret file is unreadable: {out}"
+    );
     assert_eq!(
         fs::read_to_string(root.join("sub/.env")).unwrap(),
         format!("NESTED={SECRET}\n"),
@@ -118,14 +156,21 @@ fn a_nested_secret_file_is_hidden_and_the_host_copy_is_unchanged() {
 #[test]
 fn a_gitignored_secret_file_in_a_repository_is_hidden() {
     let root = workspace("ignored");
-    let git = Command::new("git").arg("init").arg("-q").current_dir(&root).status();
+    let git = Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(&root)
+        .status();
     assert!(git.is_ok_and(|s| s.success()), "git init failed");
     write(&root, ".gitignore", ".env\n");
     write(&root, ".env", &format!("IGNORED={SECRET}\n"));
     write(&root, "src/lib.txt", "tracked\n");
     let out = run(&root, "grep -r IGNORED . ; cat src/lib.txt; echo END");
     assert!(out.contains("END"), "the command did not run: {out}");
-    assert!(out.contains("tracked"), "a tracked file is unreadable: {out}");
+    assert!(
+        out.contains("tracked"),
+        "a tracked file is unreadable: {out}"
+    );
     assert!(!out.contains(SECRET), "a gitignored .env leaked: {out}");
     let _ = fs::remove_dir_all(root);
 }
