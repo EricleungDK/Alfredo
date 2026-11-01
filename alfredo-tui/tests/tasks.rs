@@ -863,6 +863,7 @@ fn run_on_a_proposed_task_names_approve_not_the_internal_worker_owner_rule() {
     assert!(store.snapshot().unwrap().tasks[0].run.is_none());
 }
 
+/// Statuses reached through `task_in_status`; a Cancelled task there never ran.
 const RUN_REFUSALS: [(TaskStatus, &str); 6] = [
     (
         TaskStatus::Accepted,
@@ -882,13 +883,15 @@ const RUN_REFUSALS: [(TaskStatus, &str); 6] = [
     ),
     (
         TaskStatus::Cancelled,
-        "Task #1 is cancelled; /requeue 1 to approve it again",
+        "Task #1 was cancelled before it ran; /task describes new work to do instead",
     ),
     (
         TaskStatus::NeedsHumanReview,
         "Task #1 is needs-human-review; /review 1 JSON",
     ),
 ];
+
+const CANCELLED_DURING_RUN_REFUSAL: &str = "Task #1 is cancelled; /requeue 1 to approve it again";
 
 #[test]
 fn run_on_a_non_approved_task_names_its_status_and_the_next_command() {
@@ -916,17 +919,68 @@ fn run_on_a_non_approved_task_names_its_status_and_the_next_command() {
 }
 
 #[test]
+fn cancelled_during_run_task_run_hint_requeue_is_accepted_by_the_store() {
+    let fixture = Fixture::new();
+    let (store, revision) = cancelled_after_run(&fixture);
+    let task = store.snapshot().unwrap().tasks[0].clone();
+    assert!(task.run.is_some() && task.policy.is_some());
+    assert!(task.can_requeue());
+    let (control, messages) = run_then_render(&store, &["/run 1"]);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == CANCELLED_DURING_RUN_REFUSAL),
+        "{messages:?}"
+    );
+    assert!(!control.dispatch.failures.contains_key(&1));
+    assert_eq!(store.snapshot().unwrap().revision, revision);
+    let (control, _) = run_then_render(&store, &["/run 1", "/requeue 1"]);
+    assert_eq!(
+        store.snapshot().unwrap().tasks[0].status,
+        TaskStatus::Approved
+    );
+    assert!(!control.dispatch.failures.contains_key(&1));
+}
+
+#[test]
 fn only_approved_and_running_tasks_have_no_pre_start_run_refusal() {
     use alfredo_tui::tasks::run_refusal;
-    assert_eq!(run_refusal(1, &TaskStatus::Approved), None);
-    assert_eq!(run_refusal(1, &TaskStatus::Running), None);
+    let task_with = |status: TaskStatus| {
+        let fixture = Fixture::new();
+        let (store, _) = task_in_status(&fixture, status, true);
+        store.snapshot().unwrap().tasks[0].clone()
+    };
+    assert_eq!(run_refusal(&task_with(TaskStatus::Approved)), None);
+    let mut proposed = task_with(TaskStatus::Proposed);
+    proposed.id = 7;
     assert_eq!(
-        run_refusal(7, &TaskStatus::Proposed).as_deref(),
+        run_refusal(&proposed).as_deref(),
         Some("Task #7 is proposed; /approve 7 first")
     );
+    let running = task_with(TaskStatus::Running);
+    assert_eq!(
+        run_refusal(&running).as_deref(),
+        Some(
+            "Task #1 is running; wait for it to finish, /stop it, or /recover 1 if its worker died"
+        )
+    );
     for (status, expected) in RUN_REFUSALS {
-        assert_eq!(run_refusal(1, &status).as_deref(), Some(expected));
+        assert_eq!(run_refusal(&task_with(status)).as_deref(), Some(expected));
     }
+    let fixture = Fixture::new();
+    let (store, _) = cancelled_after_run(&fixture);
+    let mut cancelled = store.snapshot().unwrap().tasks[0].clone();
+    assert_eq!(
+        run_refusal(&cancelled).as_deref(),
+        Some(CANCELLED_DURING_RUN_REFUSAL)
+    );
+    // A cancelled run without a policy cannot be requeued, so the hint must not say so.
+    cancelled.policy = None;
+    assert!(!cancelled.can_requeue());
+    assert_eq!(
+        run_refusal(&cancelled).as_deref(),
+        Some("Task #1 is cancelled; /tasks shows what can still be reviewed")
+    );
 }
 
 #[test]
@@ -956,6 +1010,123 @@ fn run_on_a_running_task_keeps_its_own_refusal_not_the_status_hint() {
     let joined = messages.join(" | ");
     assert!(!joined.contains("nothing is left to run"), "{joined}");
     assert!(!joined.contains("/repair 1"), "{joined}");
+}
+
+#[test]
+fn cancelled_never_ran_task_run_hint_is_a_command_the_store_accepts() {
+    let fixture = Fixture::new();
+    let (store, revision) = task_in_status(&fixture, TaskStatus::Cancelled, true);
+    assert!(store.snapshot().unwrap().tasks[0].run.is_none());
+    // The store refuses what the old hint recommended.
+    let error = refusal(&fixture, &store, revision, Action::Requeue { task: 1 });
+    assert!(error.contains("Requeue requires"), "{error}");
+    let (control, messages) = run_then_render(&store, &["/run 1", "/task Replacement work"]);
+    let joined = messages.join(" | ");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Task #1 was cancelled before it ran")),
+        "{joined}"
+    );
+    assert!(joined.contains("/task"), "{joined}");
+    assert!(!joined.contains("/requeue"), "{joined}");
+    assert!(!joined.contains("/run 1 first"), "{joined}");
+    assert!(!control.dispatch.failures.contains_key(&1));
+    // The command it names is accepted: it adds new work and leaves #1 cancelled.
+    let snapshot = store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks.len(), 2, "{joined}");
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Cancelled);
+}
+
+#[test]
+fn not_run_view_for_cancelled_task_names_task_command() {
+    let fixture = Fixture::new();
+    let (store, _) = task_in_status(&fixture, TaskStatus::Cancelled, true);
+    let before = fs::read(fixture.file()).unwrap();
+    for command in ["/evidence 1", "/accept 1"] {
+        let (_, messages) = run_then_render(&store, &[command]);
+        let joined = messages.join(" | ");
+        assert!(!joined.contains("/run 1"), "{command}: {joined}");
+        assert!(!joined.contains("/requeue"), "{command}: {joined}");
+        if command != "/accept 1" {
+            assert!(
+                joined.contains("Task #1 was cancelled before it ran; /task"),
+                "{command}: {joined}"
+            );
+        }
+    }
+    assert_eq!(fs::read(fixture.file()).unwrap(), before);
+}
+
+#[test]
+fn branch_record_for_a_task_cancelled_before_it_ran_names_task_not_run() {
+    let fixture = Fixture::new();
+    let (store, revision) = task_in_status(&fixture, TaskStatus::Cancelled, true);
+    let error = refusal(
+        &fixture,
+        &store,
+        revision,
+        Action::Branch {
+            task: 1,
+            name: "alfredo/task-1".into(),
+            commit: "a".repeat(40),
+        },
+    );
+    assert_eq!(
+        error,
+        "Task #1 was cancelled before it ran; /task describes new work to do instead"
+    );
+}
+
+#[test]
+fn run_on_running_task_without_worker_names_status_not_internal_rule() {
+    let fixture = Fixture::new();
+    let (store, _) = task_in_status(&fixture, TaskStatus::Running, true);
+    let before = fs::read(fixture.file()).unwrap();
+    let (mut control, messages) = run_then_render(&store, &["/run 1"]);
+    let joined = messages.join(" | ");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.starts_with("Task #1 is running")),
+        "{joined}"
+    );
+    assert!(joined.contains("/recover 1"), "{joined}");
+    assert!(!joined.contains("acquire a new worker owner"), "{joined}");
+    assert!(control.workers.is_empty());
+    assert!(!control.dispatch.failures.contains_key(&1), "{joined}");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    control.command(&runtime, "/tasks #1", "fixture").unwrap();
+    let text = inspector_text(&control);
+    assert!(text.contains("Task #1"), "{text}");
+    assert!(!text.contains("start paused"), "{text}");
+    assert_eq!(fs::read(fixture.file()).unwrap(), before);
+    assert_eq!(
+        store.snapshot().unwrap().tasks[0].status,
+        TaskStatus::Running
+    );
+}
+
+#[test]
+fn accept_cancel_task_and_repair_on_running_task_without_worker_name_recover() {
+    let fixture = Fixture::new();
+    let (store, _) = task_in_status(&fixture, TaskStatus::Running, true);
+    let before = fs::read(fixture.file()).unwrap();
+    for command in ["/accept 1", "/cancel-task 1", "/repair 1 try again"] {
+        let (_, messages) = run_then_render(&store, &[command]);
+        let joined = messages.join(" | ");
+        assert!(joined.contains("Task #1 is running"), "{command}: {joined}");
+        assert!(joined.contains("/recover 1"), "{command}: {joined}");
+        assert!(
+            !joined.contains("no evidence receipt"),
+            "{command}: {joined}"
+        );
+        assert!(
+            !joined.contains("needs a proposed or approved"),
+            "{command}: {joined}"
+        );
+    }
+    assert_eq!(fs::read(fixture.file()).unwrap(), before);
 }
 
 #[test]
@@ -1658,6 +1829,21 @@ fn approve_without_policy_is_refused_with_the_permit_next_step() {
 
 /// Task 1 (from a one-step plan) in `status`, with two acceptance criteria when `criteria` is set.
 fn task_in_status(fixture: &Fixture, status: TaskStatus, criteria: bool) -> (TaskStore, u64) {
+    task_in_state(fixture, status, criteria, false)
+}
+
+/// Task 1 cancelled by a stopped run (it started, so it has a run and a policy).
+fn cancelled_after_run(fixture: &Fixture) -> (TaskStore, u64) {
+    task_in_state(fixture, TaskStatus::Cancelled, true, true)
+}
+
+/// `task_in_status`, where `started` lets a Cancelled task have run first.
+fn task_in_state(
+    fixture: &Fixture,
+    status: TaskStatus,
+    criteria: bool,
+    started: bool,
+) -> (TaskStore, u64) {
     let store = fixture.store("mission");
     let plan = alfredo_tui::planner::Plan {
         prompt: "goal".into(),
@@ -1691,13 +1877,14 @@ fn task_in_status(fixture: &Fixture, status: TaskStatus, criteria: bool) -> (Tas
     if status != TaskStatus::Proposed {
         actions.push(Action::Approve { task: 1 });
     }
-    if status == TaskStatus::Cancelled {
+    if status == TaskStatus::Cancelled && !started {
         actions.push(Action::Cancel { task: 1 });
     }
-    let ran = !matches!(
-        status,
-        TaskStatus::Proposed | TaskStatus::Approved | TaskStatus::Cancelled
-    );
+    let ran = started
+        || !matches!(
+            status,
+            TaskStatus::Proposed | TaskStatus::Approved | TaskStatus::Cancelled
+        );
     if ran {
         actions.push(Action::Start {
             task: 1,

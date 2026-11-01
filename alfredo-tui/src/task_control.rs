@@ -1669,7 +1669,7 @@ impl TaskControl {
                 .tasks
                 .iter()
                 .find(|item| item.id == task)
-                .and_then(|item| crate::tasks::run_refusal(item.id, &item.status))
+                .and_then(crate::tasks::run_refusal)
         }) {
             return Err(refusal);
         }

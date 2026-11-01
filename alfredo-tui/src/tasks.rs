@@ -44,6 +44,20 @@ pub fn status_label(status: &TaskStatus) -> &'static str {
     }
 }
 
+/// A running task: wait, `/stop` a worker of this process, or record a dead worker with
+/// `/recover`. Shown wherever the store holds Running but this process has no worker.
+fn running_hint(task: u64) -> String {
+    format!(
+        "Task #{task} is running; wait for it to finish, /stop it, or /recover {task} if its worker died"
+    )
+}
+
+/// A task cancelled before any run has nothing to requeue, review or evidence; new
+/// work is the way forward.
+fn cancelled_before_run(task: u64) -> String {
+    format!("Task #{task} was cancelled before it ran; /task describes new work to do instead")
+}
+
 /// Refusal for `/accept`/`/reject`/`/review` on a task that is not review-ready.
 fn review_refusal(task: u64, status: &TaskStatus) -> String {
     match status {
@@ -51,7 +65,7 @@ fn review_refusal(task: u64, status: &TaskStatus) -> String {
             format!("Task #{task} is already {}", status_label(status))
         }
         TaskStatus::Failed => format!("Task #{task} failed; /repair {task} <hint>"),
-        TaskStatus::Running => format!("Task #{task} is running; wait for it to finish or /stop"),
+        TaskStatus::Running => running_hint(task),
         TaskStatus::Proposed => {
             format!("Task #{task} is proposed; /approve {task}, then /run {task}")
         }
@@ -73,27 +87,41 @@ pub fn proposed_run(task: u64) -> String {
     format!("Task #{task} is proposed; /approve {task} first")
 }
 
-/// Refusal for `/run` on a task whose status can never start a worker, naming the
-/// next command. `None` for approved (may run) and running (the worker or store
-/// reports it), so those keep their own messages.
-pub fn run_refusal(task: u64, status: &TaskStatus) -> Option<String> {
-    let label = status_label(status);
-    let hint = match status {
+/// Refusal for `/run` on a task that cannot start a worker, naming the next command
+/// the store accepts. `None` only for approved. A running task is reported here only
+/// when this process has no worker for it (the caller checks its own workers first),
+/// so the way out is `/recover`, not the store's internal owner rule.
+pub fn run_refusal(item: &Task) -> Option<String> {
+    let task = item.id;
+    let label = status_label(&item.status);
+    let hint = match &item.status {
         TaskStatus::Proposed => return Some(proposed_run(task)),
-        TaskStatus::Approved | TaskStatus::Running => return None,
+        TaskStatus::Approved => return None,
+        TaskStatus::Running => return Some(running_hint(task)),
         TaskStatus::Accepted => "nothing is left to run".to_owned(),
         TaskStatus::Failed | TaskStatus::Rejected => {
             format!("/repair {task} <hint> to try again")
         }
         TaskStatus::ReviewReady => format!("/accept {task} or /review {task} JSON"),
-        TaskStatus::Cancelled => format!("/requeue {task} to approve it again"),
+        TaskStatus::Cancelled if item.can_requeue() => {
+            format!("/requeue {task} to approve it again")
+        }
+        TaskStatus::Cancelled if item.run.is_none() => {
+            return Some(cancelled_before_run(task));
+        }
+        TaskStatus::Cancelled => "/tasks shows what can still be reviewed".to_owned(),
         TaskStatus::NeedsHumanReview => format!("/review {task} JSON"),
     };
     Some(format!("Task #{task} is {label}; {hint}"))
 }
 
-pub fn not_run(task: u64) -> String {
-    format!("Task #{task} has not run; /run {task} first")
+/// Why a task has no run to read, naming a next step the store accepts for it.
+pub fn not_run(item: &Task) -> String {
+    let task = item.id;
+    match item.status {
+        TaskStatus::Cancelled => cancelled_before_run(task),
+        _ => format!("Task #{task} has not run; /run {task} first"),
+    }
 }
 
 /// Why a transaction wrote nothing. Transient refusals leave no receipt, so the
@@ -254,6 +282,12 @@ impl Task {
     /// `/accept`, `/reject` and `/review` act only on a review-ready task.
     pub fn can_review(&self) -> bool {
         self.status == TaskStatus::ReviewReady
+    }
+
+    /// `/requeue` needs a task cancelled during a governed run; one cancelled before it
+    /// ran has no run to replay.
+    pub fn can_requeue(&self) -> bool {
+        self.status == TaskStatus::Cancelled && self.run.is_some() && self.policy.is_some()
     }
 
     /// `/repair` needs a failed, rejected or cancelled governed run with retained evidence.
@@ -1355,7 +1389,7 @@ impl TaskStore {
                     .iter()
                     .find(|item| item.id == *task)
                     .ok_or_else(|| unknown_task(*task))?;
-                let run = item.run.as_ref().ok_or_else(|| not_run(*task))?;
+                let run = item.run.as_ref().ok_or_else(|| not_run(item))?;
                 let raw = self.read_evidence(
                     &run.id,
                     run.evidence_sha256
@@ -1419,7 +1453,12 @@ impl TaskStore {
                     // that never produced evidence (proposed, approved, running).
                     return Err(review_refusal(*task, &item.status).into());
                 }
-                let run = item.run.as_ref().ok_or_else(|| not_run(*task))?;
+                if item.status == TaskStatus::Running {
+                    // Reviews and repairs need a finished run; name the way out of a
+                    // running one before the evidence lookup fails on its absence.
+                    return Err(running_hint(*task).into());
+                }
+                let run = item.run.as_ref().ok_or_else(|| not_run(item))?;
                 self.read_evidence(
                     &run.id,
                     run.evidence_sha256
@@ -1866,6 +1905,9 @@ impl TaskStore {
                             status_label(&item.status)
                         ))
                     }
+                    Action::Cancel { .. } if item.status == TaskStatus::Running => {
+                        return Err(running_hint(*task))
+                    }
                     _ => {
                         return Err(format!(
                             "Task #{task} is {}; /cancel-task needs a proposed or approved task",
@@ -1881,10 +1923,7 @@ impl TaskStore {
                     .iter_mut()
                     .find(|t| t.id == *task)
                     .ok_or_else(|| unknown_task(*task))?;
-                if item.status != TaskStatus::Cancelled
-                    || item.run.is_none()
-                    || item.policy.is_none()
-                {
+                if !item.can_requeue() {
                     return Err("Requeue requires a task cancelled during a run".into());
                 }
                 item.status = TaskStatus::Approved;
@@ -2044,7 +2083,7 @@ impl TaskStore {
                 ) {
                     return Err("Review outcomes require retained review-ready, failed or human-review work".into());
                 }
-                let run = item.run.as_ref().ok_or_else(|| not_run(*task))?;
+                let run = item.run.as_ref().ok_or_else(|| not_run(item))?;
                 let passed = snapshot.receipts.iter().any(|receipt| matches!(&receipt.request.action,
                     Action::Finish { task: id, run: run_id, status: TaskStatus::ReviewReady, .. } if *id == *task && run_id == &run.id));
                 if decision.outcome.approves() && !passed {
@@ -2342,9 +2381,9 @@ impl TaskStore {
             let observation = match self.recovery_owner(task.id) {
                 Ok(None) => "Worker owner active in another process".into(),
                 Ok(Some(_owner)) => match self.recovery_request(task.id, snapshot) {
-                    Ok(_) => "Worker stopped · saved result available · /recover ID".into(),
-                    Err(_) if task.run.as_ref().and_then(|run| self.run_directory(&run.id).ok()).is_some_and(|path| crate::run_boundary::interrupted_before_check(&path, task).is_ok()) => "Worker stopped before check launch · /recover ID records interruption without replay".into(),
-                    Err(_) if task.run.as_ref().and_then(|run| self.run_directory(&run.id).ok()).is_some_and(|path| crate::run_boundary::interrupted_after_check(&path, task, &snapshot.mission).is_ok()) => "Worker stopped after check · saved terminal check result · /recover ID records failure without replay".into(),
+                    Ok(_) => format!("Worker stopped · saved result available · /recover {}", task.id),
+                    Err(_) if task.run.as_ref().and_then(|run| self.run_directory(&run.id).ok()).is_some_and(|path| crate::run_boundary::interrupted_before_check(&path, task).is_ok()) => format!("Worker stopped before check launch · /recover {} records interruption without replay", task.id),
+                    Err(_) if task.run.as_ref().and_then(|run| self.run_directory(&run.id).ok()).is_some_and(|path| crate::run_boundary::interrupted_after_check(&path, task, &snapshot.mission).is_ok()) => format!("Worker stopped after check · saved terminal check result · /recover {} records failure without replay", task.id),
                     Err(_) => "Worker stopped · outcome unknown · inspect retained run; do not rerun effects".into(),
                 },
                 Err(_) => "Worker ownership unverified · inspect retained run; do not rerun effects".into(),
@@ -2529,7 +2568,7 @@ impl TaskStore {
             .iter()
             .find(|t| t.id == task)
             .ok_or_else(|| unknown_task(task))?;
-        let run = item.run.as_ref().ok_or_else(|| not_run(task))?;
+        let run = item.run.as_ref().ok_or_else(|| not_run(item))?;
         self.read_evidence(
             &run.id,
             run.evidence_sha256

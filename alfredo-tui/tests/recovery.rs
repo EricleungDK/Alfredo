@@ -138,6 +138,7 @@ fn dead_process_releases_owner_and_saved_result_recovers_exactly_once() {
     assert!(observation.unwrap()[&1].contains("owner active"));
     let pending = fixture.store.snapshot().unwrap();
     assert!(fixture.store.run_observations(&pending)[&1].contains("saved result available"));
+    assert!(fixture.store.run_observations(&pending)[&1].contains("/recover 1"));
     let (recovered, _) = fixture.store.recover(1).unwrap();
     assert_eq!(recovered.tasks[0].status, TaskStatus::Failed);
     assert_eq!(recovered.revision, pending.revision + 1);
@@ -223,7 +224,8 @@ fn reopened_terminal_offers_recovery_and_renders_acknowledged_result() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(text.contains("saved result available"));
-    assert!(text.contains("/recover ID"));
+    assert!(text.contains("/recover 1"), "{text}");
+    assert!(!text.contains("/recover ID"), "{text}");
     control.command(&runtime, "/recover 1", "fixture").unwrap();
     while control.pending {
         control.poll();
@@ -343,6 +345,7 @@ fn interrupted_before_check_recovers_once_and_repair_still_requires_approval() {
     drop(owner);
     let before = fixture.store.snapshot().unwrap();
     assert!(fixture.store.run_observations(&before)[&1].contains("before check launch"));
+    assert!(fixture.store.run_observations(&before)[&1].contains("/recover 1"));
     assert!(
         !directory.join("evidence.json").exists(),
         "observation must remain read-only"
