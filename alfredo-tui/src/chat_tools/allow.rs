@@ -6,10 +6,11 @@
 //! Strict by design:
 //! - Only [`super::Tier::allowlistable`] tools match; `git_push` and push cards never do, even
 //!   from a hand-edited file.
-//! - A run_command rule matches only runs with the same `escalated` flag, so a
-//!   sandboxed rule never covers a host run (and the reverse).
-//! - A host (escalated) rule matches only its exact command. A sandboxed rule is a
-//!   prefix: ANY arguments after it are allowed (the sandbox bounds the impact).
+//! - A host (escalated) run is never offered `a` and never matches a rule, so every
+//!   HOST run asks (issue #311). A rule written before that, with `escalated` set, is
+//!   kept only so `/allow` can show it, and it never matches.
+//! - A sandboxed rule is a prefix: ANY arguments after it are allowed (the sandbox
+//!   bounds the impact). A sandboxed rule never covers a host run.
 //! - A run_command invoking `git … push` ([`pushes`]) is never offered or matched.
 //! - Rules ignore the call's `cwd`.
 //! - Command prefixes match whole whitespace-separated words. A command holding a
@@ -43,17 +44,21 @@ pub struct Rule {
     /// run_command only: the command prefix (whole words).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    /// run_command only: covers host (escalated) runs, and only those.
+    /// run_command only. Set only by rules written before issue #311, when a HOST run could
+    /// be always-allowed. Such a rule never matches (HOST runs always ask); `/allow` shows
+    /// it as inactive.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub escalated: bool,
 }
 
 /// Whether `card` may be always-allowed: an allowlistable tool, not a push card, not a
-/// run_command that invokes `git … push`, and not a write_file that creates directories
-/// (issue #272: those always ask, so a rule for write_file never covers making directories;
-/// the card fingerprint carries `+dirs:` exactly then).
+/// run_command that invokes `git … push`, not a HOST (escalated) run (issue #311: a host
+/// run always asks, so no rule can skip its card), and not a write_file that creates
+/// directories (issue #272: those always ask, so a rule for write_file never covers making
+/// directories; the card fingerprint carries `+dirs:` exactly then).
 pub fn offered(card: &Card) -> bool {
     card.kind != CardKind::Push
+        && !card.escalated()
         && !(card.tool == "write_file" && card.fingerprint.contains("+dirs:"))
         && TOOLS
             .iter()
@@ -75,8 +80,8 @@ pub fn pushes(command: &str) -> bool {
         .is_some_and(|at| words[at + 1..].iter().any(|w| w == "push"))
 }
 
-/// Whether a rule only matches its exact command: host (escalated) rules, and commands
-/// holding shell operators.
+/// Whether a rule only matches its exact command: a host (escalated) rule from before
+/// issue #311 (it never matches, see [`matches`]), and commands holding shell operators.
 fn exact(rule: &Rule) -> bool {
     rule.escalated
         || rule
@@ -106,14 +111,16 @@ fn command_of(card: &Card) -> Option<&str> {
     card.arguments.get("command").and_then(|c| c.as_str())
 }
 
-/// Whether `rule` covers `card`.
+/// Whether `rule` covers `card`. A card that is not [`offered`] (a HOST run, a push) is
+/// never covered, so a rule from before issue #311 never matches a HOST run.
 pub fn matches(rule: &Rule, card: &Card) -> bool {
     if !offered(card) || rule.tool != card.tool {
         return false;
     }
     match card.kind {
         CardKind::Shell { escalated } => {
-            rule.escalated == escalated
+            !escalated
+                && !rule.escalated
                 && match (&rule.command, command_of(card)) {
                     (Some(text), Some(command)) if exact(rule) => text.trim() == command.trim(),
                     (Some(text), Some(command)) => command_matches(text, command),
@@ -130,7 +137,7 @@ pub fn rule_for(card: &Card) -> Result<Rule, String> {
         return Err(format!("{} can never be always-allowed", card.tool));
     }
     Ok(match card.kind {
-        CardKind::Shell { escalated } => {
+        CardKind::Shell { .. } => {
             let raw = command_of(card).ok_or("run_command has no command")?;
             // Checked before trimming: `ls\r` must not pass as `ls`.
             hint_command(raw)?;
@@ -142,7 +149,7 @@ pub fn rule_for(card: &Card) -> Result<Rule, String> {
                 id: 0,
                 tool: card.tool.clone(),
                 command: Some(command),
-                escalated,
+                escalated: false,
             }
         }
         _ => Rule {
@@ -215,9 +222,12 @@ fn hint_command(command: &str) -> Result<String, String> {
     Ok(shown)
 }
 
-/// Why `a` is not offered on `card` although the tool can be always-allowed (a command
-/// the hint cannot show in full), for the card's key line.
+/// Why `a` is not offered on `card`, for the card's key line: a HOST run always asks
+/// (issue #311), and a command the hint cannot show in full is refused (#409).
 pub fn unavailable_reason(card: &Card) -> Option<String> {
+    if card.escalated() {
+        return Some("HOST runs always ask".into());
+    }
     if !offered(card) {
         return None;
     }
@@ -248,7 +258,7 @@ pub fn describe(rule: &Rule) -> String {
                 " (ANY arguments after it, sandboxed only)"
             },
             if rule.escalated {
-                " · on HOST (escalated)"
+                " · on HOST (escalated): inactive, HOST runs always ask"
             } else {
                 " · sandboxed"
             }
@@ -263,12 +273,7 @@ pub fn offer(card: &Card) -> Option<String> {
     Some(match &rule.command {
         None => format!("a always allow {} in this mission", rule.tool),
         Some(command) => format!(
-            "a always allow{} `{}`{}",
-            if rule.escalated {
-                " on HOST (escalated rule)"
-            } else {
-                ""
-            },
+            "a always allow `{}`{}",
             hint_command(command).ok()?,
             if exact(&rule) {
                 " exactly"

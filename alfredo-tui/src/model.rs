@@ -1349,7 +1349,7 @@ impl Session {
     }
 
     /// The owner's key on the card: `y` approves, `n` denies, `a` always allows (not on
-    /// a push card; see [`crate::chat_tools::allow`]), and the card closes.
+    /// a push card or a HOST run; see [`crate::chat_tools::allow`]), and the card closes.
     /// Keys before the card is armed ([`crate::chat_tools::approval::ARM`] after it
     /// appeared), with text in the draft, or right after another key decide nothing
     /// (issue #264), and neither do other keys.
