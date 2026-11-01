@@ -1095,3 +1095,20 @@ fn issue_505_git_diff_shows_a_changed_template_but_not_other_env_files() {
     let local = repo.run("git_diff", json!({"path": ".env.local"}));
     assert!(local.contains("excluded"), "{local}");
 }
+
+/// Issue #505: the planner's repository capture includes a committed env template and
+/// still leaves out `.env.local` beside it.
+#[tokio::test]
+async fn issue_505_planner_capture_includes_templates_but_not_other_env_files() {
+    let repo = Repo::plain();
+    repo.write(".env.example", "CAPTURE-TEMPLATE-505\n");
+    repo.write(".env.local", "CAPTURE-LOCAL-505\n");
+    git(&repo.root, &["add", "-f", "--", "."]);
+    git(&repo.root, &["commit", "-q", "-m", "env files"]);
+    let context = planning_context::capture(&repo.root, "document the env example and local")
+        .await
+        .unwrap();
+    let serialized = serde_json::to_string(&context).unwrap();
+    assert!(serialized.contains("CAPTURE-TEMPLATE-505"), "{serialized}");
+    assert!(!serialized.contains("CAPTURE-LOCAL-505"), "{serialized}");
+}

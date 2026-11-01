@@ -62,7 +62,8 @@ pub(crate) fn path_valid(path: &str) -> bool {
 ///   `settings.xml` stay readable.
 /// - Names: `.env*` (`secret` refuses all of them; [`read_secret`] lets reads through the
 ///   exact final names `.env.example`, `.env.sample` and `.env.template`, which hold no
-///   secrets; a directory of that name exempts nothing), `.npmrc`, `.netrc`, `_netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+///   secrets; a directory of that name exempts nothing), `.npmrc`, `.netrc`, `_netrc`,
+///   `.pgpass`, `.git-credentials`, `.pypirc`,
 ///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `.my.cnf`, `.terraformrc`,
 ///   `terraform.rc`, `auth.json` (Composer), `.bash_history`, `.zsh_history`,
 ///   `.zhistory`, `.mysql_history`, `.psql_history`, `.python_history`,
