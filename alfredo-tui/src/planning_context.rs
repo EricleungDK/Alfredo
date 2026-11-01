@@ -60,7 +60,9 @@ pub(crate) fn path_valid(path: &str) -> bool {
 ///   without the dot stays readable, like `pip/pip.conf` next to `.pip/pip.conf`).
 ///   Only those names: `.docker/daemon.json`, `.cargo/config.toml` and `.m2/` files other than
 ///   `settings.xml` stay readable.
-/// - Names: `.env*`, `.npmrc`, `.netrc`, `_netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+/// - Names: `.env*` (except the exact final names `.env.example`, `.env.sample` and
+///   `.env.template`, which hold no secrets; a directory of that name exempts nothing),
+///   `.npmrc`, `.netrc`, `_netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
 ///   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `.my.cnf`, `.terraformrc`,
 ///   `terraform.rc`, `auth.json` (Composer), `.bash_history`, `.zsh_history`,
 ///   `.zhistory`, `.mysql_history`, `.psql_history`, `.python_history`,
@@ -107,6 +109,9 @@ fn resolve_parent_refs<'a>(parts: &[&'a str]) -> Vec<&'a str> {
     resolved
 }
 
+/// The `.env*` names that stay readable: committed templates that hold no secrets.
+const ENV_TEMPLATES: [&str; 3] = [".env.example", ".env.sample", ".env.template"];
+
 /// Whether one of the normalised, lowercased `parts` is a secret (see [`secret`]).
 fn secret_components(parts: &[&str]) -> bool {
     parts.iter().enumerate().any(|(index, &part)| {
@@ -114,6 +119,9 @@ fn secret_components(parts: &[&str]) -> bool {
         let parent = index.checked_sub(1).map(|up| parts[up]);
         // The components from the root down to this one, for the rules scoped to a path.
         let chain = &parts[..=index];
+        // A committed, secret-free env template: only as the final component, so a
+        // directory of that name does not exempt what is inside it.
+        let env_template = index + 1 == parts.len() && ENV_TEMPLATES.contains(&part);
         let json = Path::new(part).extension().is_some_and(|ext| ext == "json");
         matches!(
             part,
@@ -172,7 +180,7 @@ fn secret_components(parts: &[&str]) -> bool {
             || chain.ends_with(&[".config", "gcloud", "credentials.db"])
             || chain.ends_with(&[".config", "gcloud", "access_tokens.db"])
             || (part.contains(".tfstate.") && part.ends_with(".backup"))
-            || part.starts_with(".env")
+            || (part.starts_with(".env") && !env_template)
             || (part.starts_with("secrets.y") && part.ends_with("ml"))
             || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
                 .iter()

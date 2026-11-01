@@ -1724,7 +1724,10 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   context. Matching ignores case and applies to every path component:
   `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.azure` and `.password-store` directories
   (everything under them); `.config/gh` (everything under it); `.env*` and `*.env`
-  (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+  (`.env`, `prod.env`), except the three exact file names `.env.example`, `.env.sample` and
+  `.env.template` in any directory, which are secret-free templates and stay readable (a
+  directory of that name exempts nothing under it, and `.env.example.local` or `.envrc`
+  stay refused); `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
   `kubeconfig.yaml`, `kubeconfig.yml` and `application_default_credentials.json`;
   `_netrc`, `.my.cnf`, `.terraformrc`, `terraform.rc`, `auth.json` (Composer),
