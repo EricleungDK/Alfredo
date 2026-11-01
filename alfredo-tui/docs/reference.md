@@ -1903,9 +1903,10 @@ Approval (ADR 0004); there is no skip-approval mode.
   lines. The `args` line is a two-row excerpt of the raw arguments and is not part of this
   test; the preview is what the owner approves. Enlarging the terminal re-evaluates the
   card; on a terminal so short that the header cannot be drawn, only Esc answers.
+- **The card shows minimal hunks (issue #510).** A `write_file` or `edit_file` card draws only the changed lines, one `@@ line N @@` header per run of changes (N is the line in the current file); unchanged lines between hunks are not drawn, so a rewrite that changes lines 1 and 100 of a 100-line file is a 6-line card. A change that needs more than 160 added plus removed lines is drawn as one span from its first to its last change and is then refused by the cap below. One contiguous change reads as before.
 - **Over-cap changes are refused, not cut (issue #269).** A card never hides lines the
   owner is asked to approve. `write_file` and `edit_file` are refused when the card's
-  diff would pass 80 lines, counted as every line of the diff text: the `@@` header, the
+  diff would pass 80 lines, counted as every line of the diff text: each `@@` hunk header, the
   `-` and `+` lines, a line-ending note (`final newline added`, `line endings CRLF → LF`)
   and the `new directories:` line. Exactly 80 passes; 81 is refused with
   `the change's diff is 81 lines, over the 80-line approval card limit; nothing was written. Split it …`
