@@ -436,7 +436,7 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.wait_until('task 1 running', lambda: self.statuses() == [(1, 'running', None)])
         terminal.kill()  # kill -9: no worker survives, the store still says running
         self.fixture.hold_calc.set()
-        terminal = self.terminal(resume=True)
+        terminal = self.terminal(resume=True, width=220)
         for command in ('/run 1', '/accept 1', '/cancel-task 1', '/repair 1 try again'):
             terminal.send(command + '\r')
             self.screen_has(terminal, 'Task #1 is running; ')
@@ -445,12 +445,11 @@ class AutopilotTerminalSmoke(unittest.TestCase):
             for internal in ('acquire a new worker owner', 'start paused', 'no evidence receipt',
                              'needs a proposed or approved'):
                 self.assertNotIn(internal, screen, command)
-            # Clear the footer so the next command's message is its own.
-            terminal.send(b'/chat\r')
-            self.wait_until('footer cleared', lambda: 'Task #1 is running; ' not in terminal.screen())
-        terminal.send('/tasks #1\r')
+            # Replace the footer so the next command's message is its own.
+            terminal.send(b'/tasks #1\r')
+            self.wait_until('footer replaced', lambda: 'Task #1 is running; ' not in terminal.screen())
         self.screen_has(terminal, 'Stage')
-        self.screen_has(terminal, '/recover 1')
+        self.screen_has(terminal, '/recover 1 records interruption without replay')
         screen = terminal.screen()
         self.assertNotIn('/recover ID', screen)
         self.assertNotIn('start paused', screen)

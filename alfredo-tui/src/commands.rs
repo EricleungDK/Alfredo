@@ -58,7 +58,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/requeue",
-        "ID — run a task cancelled by /stop again, no repair",
+        "ID — run a task cancelled by /stop again, no repair (not one cancelled before it ran)",
     ),
     (
         "/branch",

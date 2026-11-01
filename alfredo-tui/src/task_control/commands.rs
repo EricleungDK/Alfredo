@@ -166,7 +166,7 @@ impl TaskControl {
                             run: item
                                 .run
                                 .as_ref()
-                                .ok_or_else(|| crate::tasks::not_run(task))?
+                                .ok_or_else(|| crate::tasks::not_run(item))?
                                 .id
                                 .clone(),
                         }
@@ -177,7 +177,7 @@ impl TaskControl {
                         run: item
                             .run
                             .as_ref()
-                            .ok_or_else(|| crate::tasks::not_run(task))?
+                            .ok_or_else(|| crate::tasks::not_run(item))?
                             .id
                             .clone(),
                         requeue,
