@@ -3,8 +3,11 @@
 //! checks ([`crate::worker::sandbox_argv`]): Coding Workspace writable, `.git` and
 //! system roots read-only, network off. `escalate: true` runs it on the host
 //! (network on) behind a visibly different card. Both run in their own process
-//! group: a timeout kills the whole tree; output is capped. A sandbox that cannot
-//! start is reported with a suggestion to escalate; nothing is retried on the host.
+//! group: a timeout kills the whole tree; output is capped. Secret files and directories
+//! in the workspace are masked inside the sandbox (issue #469, [`secret_masks`]); a run
+//! that cannot mask them all is refused. A sandbox that cannot start is reported with a
+//! suggestion to escalate; nothing is retried on the host.
+use super::secret_masks;
 use super::{display, git_read, needed_terminal, resolve, text_arg, Tier, Tool};
 use crate::execution::{
     self, ControlSignal, ExecutionAuthority, ExecutionCallbacks, ExecutionLimits, ExecutionRequest,
@@ -451,6 +454,14 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
         .to_str()
         .ok_or("Coding Workspace path is not UTF-8")?
         .to_string();
+    // Secret files and directories are masked before anything is reserved or written, so a
+    // refused run leaves no placeholder behind. A refusal never offers escalation: a host
+    // run has no masks.
+    let mounts = secret_masks::scan(&root)
+        .and_then(|masks| masks.mounts())
+        .map_err(|reason| {
+            format!("the sandbox cannot hide every secret file in the Coding Workspace ({reason}); nothing ran")
+        })?;
     let git = root.join(".git");
     // Held until this function returns, on every path, so the placeholder is removed after
     // the run (issue #522).
@@ -481,10 +492,17 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
         .iter()
         .position(|a| a == "--chdir")
         .unwrap_or(argv.len());
-    let binds: Vec<String> = extras
+    let mut binds: Vec<String> = extras
         .iter()
         .flat_map(|p| ["--ro-bind".to_string(), p.clone(), p.clone()])
         .collect();
+    // Secret masks shadow the writable workspace bind above (see `secret_masks`).
+    binds.extend(
+        mounts
+            .pairs
+            .iter()
+            .flat_map(|(source, dest)| ["--ro-bind".to_string(), source.clone(), dest.clone()]),
+    );
     argv.splice(at..at, binds);
     argv.extend([
         "/bin/sh".into(),
@@ -500,6 +518,7 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
         .iter()
         .chain(&extras)
         .map(|p| (p.clone(), p.clone()))
+        .chain(mounts.pairs.iter().cloned())
         .collect();
     let mut request = request(
         argv,
