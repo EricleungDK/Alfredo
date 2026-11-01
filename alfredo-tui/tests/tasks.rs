@@ -1059,6 +1059,26 @@ fn not_run_view_for_cancelled_task_names_task_command() {
 }
 
 #[test]
+fn branch_record_for_a_task_cancelled_before_it_ran_names_task_not_run() {
+    let fixture = Fixture::new();
+    let (store, revision) = task_in_status(&fixture, TaskStatus::Cancelled, true);
+    let error = refusal(
+        &fixture,
+        &store,
+        revision,
+        Action::Branch {
+            task: 1,
+            name: "alfredo/task-1".into(),
+            commit: "a".repeat(40),
+        },
+    );
+    assert_eq!(
+        error,
+        "Task #1 was cancelled before it ran; /task describes new work to do instead"
+    );
+}
+
+#[test]
 fn run_on_running_task_without_worker_names_status_not_internal_rule() {
     let fixture = Fixture::new();
     let (store, _) = task_in_status(&fixture, TaskStatus::Running, true);
