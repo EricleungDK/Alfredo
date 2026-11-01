@@ -218,7 +218,8 @@ class DispatchSurvivesBusyStore(unittest.TestCase):
                 with open(lock, 'rb') as held:
                     fcntl.flock(held, fcntl.LOCK_EX)
                     try:
-                        # Three or four refresh periods pass while the store stays busy.
+                        # Ticks come at most every ~250 ms (never faster), so 0.8 s holds at most 4 busy
+                        # ticks, below TRANSIENT_LIMIT (5), however fast the box; slower only means fewer.
                         deadline = time.monotonic() + 0.8
                         while time.monotonic() < deadline:
                             if select.select([terminal.master], [], [], 0.05)[0]:
@@ -247,8 +248,9 @@ class DispatchSurvivesBusyStore(unittest.TestCase):
 class DispatchStopsWhenBusyStoreStaysBusy(unittest.TestCase):
     def test_dispatch_turns_off_when_the_task_store_stays_busy(self):
         # Issue #565: the busy-store allowance is bounded. More than TRANSIENT_LIMIT (5)
-        # consecutive busy refreshes (about 1.25 s at one per 250 ms) still switch dispatch
-        # off, so a wedged store cannot keep an unattended dispatcher running blind.
+        # consecutive busy refreshes still switch dispatch off, so a wedged store cannot keep
+        # an unattended dispatcher running blind. The lock is held until that happens (30 s
+        # cap), so the test waits on the condition, not on tick arithmetic.
         binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
             str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
         with tempfile.TemporaryDirectory(prefix='alfredo-stuck-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-stuck-repo-') as repo:
@@ -264,9 +266,12 @@ class DispatchStopsWhenBusyStoreStaysBusy(unittest.TestCase):
                 with open(lock, 'rb') as held:
                     fcntl.flock(held, fcntl.LOCK_EX)
                     try:
-                        # Well past six refresh periods with the store busy.
-                        deadline = time.monotonic() + 2.5
+                        # Keep the store busy until dispatch goes off (the sixth busy tick),
+                        # however slowly the ticks arrive on a loaded runner.
+                        deadline = time.monotonic() + 30
                         while time.monotonic() < deadline:
+                            if 'dispatch on' not in terminal.screen().split('\n')[0]:
+                                break
                             if select.select([terminal.master], [], [], 0.05)[0]:
                                 chunk = os.read(terminal.master, 65536)
                                 terminal.output.extend(chunk)
