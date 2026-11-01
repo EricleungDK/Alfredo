@@ -472,6 +472,71 @@ fn doctor_with_workspace_set_to_a_subdirectory_behaves_like_the_root() {
     assert!(text.contains("PASS storage"), "{text}");
 }
 
+/// `--doctor` run with `home` as `$HOME`; the report text.
+fn doctor_with_home(home: &std::path::Path) -> String {
+    let fixture = Fixture::new();
+    let (endpoint, server) = catalog("initial-model");
+    let mut command = fixture.command(&endpoint);
+    command.env("HOME", home);
+    let output = command.output().unwrap();
+    server.join().unwrap();
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn doctor_home(tag: &str) -> PathBuf {
+    let home = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "doctor-home-{tag}-{}-{}",
+        std::process::id(),
+        ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(&home).unwrap();
+    home.canonicalize().unwrap()
+}
+
+#[test]
+fn doctor_notes_the_toolchain_roots_go_checks_mount() {
+    let home = doctor_home("found");
+    for dir in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+        fs::create_dir_all(home.join(dir)).unwrap();
+    }
+    fs::write(home.join(".rustup/settings.toml"), "x = 1\n").unwrap();
+    fs::write(home.join(".cargo/credentials.toml"), "token = \"x\"\n").unwrap();
+    let text = doctor_with_home(&home);
+    let note = text
+        .lines()
+        .find(|line| line.starts_with("NOTE check toolchain:"))
+        .unwrap_or_else(|| panic!("no toolchain note in:\n{text}"));
+    assert!(note.contains("/go checks mount read-only"), "{note}");
+    for mounted in [
+        ".cargo/bin",
+        ".cargo/registry",
+        ".rustup/toolchains",
+        ".rustup/settings.toml",
+    ] {
+        assert!(
+            note.contains(&format!("{}/{mounted}", home.display())),
+            "{note}"
+        );
+    }
+    // Entries that are absent and the credential files are never listed.
+    assert!(!note.contains(".cargo/git"), "{note}");
+    assert!(!note.contains("credentials"), "{note}");
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn doctor_notes_when_the_home_has_no_toolchain_for_go_checks() {
+    let home = doctor_home("none");
+    let text = doctor_with_home(&home);
+    assert!(
+        text.contains("NOTE check toolchain: none under $HOME (~/.cargo, ~/.rustup): /go checks see only programs on /usr/bin:/bin"),
+        "{text}"
+    );
+    assert!(!text.contains("/go checks mount read-only"), "{text}");
+    let _ = fs::remove_dir_all(home);
+}
+
 #[test]
 fn doctor_notes_the_context_window_setting() {
     let fixture = Fixture::new();

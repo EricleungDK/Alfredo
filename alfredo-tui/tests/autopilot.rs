@@ -1416,6 +1416,388 @@ fn sandbox_refusal_is_quoted_even_with_no_repair_budget() {
     sandbox_refused(0);
 }
 
+/// Marker the planted cargo credentials and token variables carry (issue #365).
+const TOOLCHAIN_SECRET: &str = "SECRET_TOKEN_365";
+/// Set in the child process of a toolchain test to its planted `$HOME`; `HOME` is read
+/// at call time, so a child process keeps the parent test process unchanged.
+const TOOLCHAIN_HOME_ENV: &str = "ALFREDO_TEST_TOOLCHAIN_HOME";
+
+/// The stand-in `cargo` every planted toolchain runs: one subcommand per invariant, each
+/// printing a marker only when the invariant held, and exiting 1 with a `LEAK`/`WRITABLE`
+/// line when it did not.
+const FAKE_CARGO: &str = r#"#!/bin/sh
+case "$1" in
+--version) echo "cargo 9.9.9 (fake)" ;;
+test)
+  echo "CARGO_HOME=$CARGO_HOME"
+  echo "RUSTUP_HOME=$RUSTUP_HOME"
+  echo "NET_OFFLINE=$CARGO_NET_OFFLINE"
+  echo "PATH=$PATH"
+  echo "WHICH=$(command -v cargo)"
+  ;;
+hidden)
+  [ -d "$CARGO_HOME/registry" ] || { echo "NO TOOLCHAIN MOUNT"; exit 1; }
+  for name in credentials.toml credentials config.toml config; do
+    if cat "$CARGO_HOME/$name" >/dev/null 2>&1; then echo "LEAK $name"; exit 1; fi
+  done
+  if ls -A "$CARGO_HOME" | grep -q credentials; then echo "LEAK listing"; exit 1; fi
+  if env | grep -q SECRET_TOKEN_365; then echo "LEAK environment"; exit 1; fi
+  echo HIDDEN_OK
+  ;;
+readonly)
+  for dir in "$CARGO_HOME/bin" "$CARGO_HOME/registry" "$CARGO_HOME/git" "$RUSTUP_HOME/toolchains"; do
+    [ -d "$dir" ] || { echo "MISSING $dir"; exit 1; }
+    if touch "$dir/probe" 2>/dev/null; then echo "WRITABLE $dir"; exit 1; fi
+  done
+  if (: >> "$RUSTUP_HOME/settings.toml") 2>/dev/null; then echo "WRITABLE settings"; exit 1; fi
+  if (: >> "$CARGO_HOME/bin/cargo") 2>/dev/null; then echo "WRITABLE cargo"; exit 1; fi
+  echo READONLY_OK
+  ;;
+net)
+  /usr/bin/python3 -c pass || { echo "NO PYTHON"; exit 1; }
+  if /usr/bin/python3 -c 'import socket, sys; s = socket.socket(); s.settimeout(3); s.connect(("127.0.0.1", int(sys.argv[1])))' "$2" 2>/dev/null; then
+    echo CONNECTED; exit 1
+  fi
+  echo NET_OFF
+  ;;
+esac
+"#;
+
+fn write_script(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A planted `$HOME` with a cargo/rustup toolchain and cargo credentials. It lives under
+/// the cargo target tmpdir, not `/tmp`, like the chat shell tests' fake home.
+fn toolchain_home(tag: &str) -> PathBuf {
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "toolchain-home-{tag}-{}-{}",
+        std::process::id(),
+        ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&home);
+    write_script(&home.join(".cargo/bin/cargo"), FAKE_CARGO);
+    write_script(
+        &home.join(".rustup/toolchains/stable/bin/rustc"),
+        "#!/bin/sh\necho rustc 9.9.9\n",
+    );
+    fs::write(
+        home.join(".rustup/settings.toml"),
+        "default_toolchain = \"stable\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(home.join(".cargo/registry/index")).unwrap();
+    fs::create_dir_all(home.join(".cargo/git/db")).unwrap();
+    for name in ["credentials.toml", "credentials", "config.toml", "config"] {
+        fs::write(
+            home.join(".cargo").join(name),
+            format!("token = \"{TOOLCHAIN_SECRET}\"\n"),
+        )
+        .unwrap();
+    }
+    home.canonicalize().unwrap()
+}
+
+/// Run `child` (a test of this file that does nothing without [`TOOLCHAIN_HOME_ENV`]) in a
+/// child process whose `HOME` is a planted toolchain home, with token variables and a
+/// decoy `CARGO_HOME`/`RUSTUP_HOME` in its environment.
+fn in_toolchain_home(child: &str) {
+    let home = toolchain_home(child);
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", child, "--nocapture", "--test-threads=1"])
+        .env("HOME", &home)
+        .env(TOOLCHAIN_HOME_ENV, &home)
+        .env("CARGO_REGISTRY_TOKEN", TOOLCHAIN_SECRET)
+        .env("CARGO_REGISTRIES_CRATES_IO_TOKEN", TOOLCHAIN_SECRET)
+        .env("GITHUB_TOKEN", TOOLCHAIN_SECRET)
+        .env("CARGO_HOME", "/nonexistent-alfredo-decoy/cargo")
+        .env("RUSTUP_HOME", "/nonexistent-alfredo-decoy/rustup")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+fn toolchain_child() -> Option<PathBuf> {
+    std::env::var_os(TOOLCHAIN_HOME_ENV).map(PathBuf::from)
+}
+
+/// What one `/go` with a single check did.
+struct Checked {
+    state: RunState,
+    report: String,
+    /// The check's receipt, when planning got as far as running it.
+    check: Option<alfredo_tui::execution::ExecutionReceipt>,
+}
+impl Checked {
+    /// The check ran, exited 0 and printed `marker`: a run that never reached the check
+    /// cannot satisfy this.
+    fn passed_with(&self, marker: &str) -> bool {
+        self.state == RunState::Done
+            && self
+                .check
+                .as_ref()
+                .is_some_and(|check| check.exit_code == Some(0) && check.stdout.contains(marker))
+    }
+    fn stdout(&self) -> &str {
+        self.check
+            .as_ref()
+            .map_or("", |check| check.stdout.as_str())
+    }
+}
+
+/// One `/go` whose only task has `check`, in a fixture repository `prepare` may extend.
+fn go_with_check(check: Value, prepare: impl FnOnce(&Fixture)) -> Checked {
+    let fixture = Fixture::new();
+    prepare(&fixture);
+    let server = Server::new(move |request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+            {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+             "dependencies": [], "policy": {"files": ["calc.py"], "check": check.clone()}},
+        ]})
+            .to_string();
+        }
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", 0, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "toolchain",
+        finished,
+    );
+    let state = autopilot.status(&control).unwrap().state;
+    let report = autopilot.report().unwrap().to_string();
+    let check = fixture
+        .store
+        .evidence(1)
+        .ok()
+        .and_then(|text| serde_json::from_str::<alfredo_tui::worker::Evidence>(&text).ok())
+        .and_then(|evidence| evidence.check);
+    Checked {
+        state,
+        report,
+        check,
+    }
+}
+
+#[test]
+fn go_check_runs_the_owners_cargo_toolchain_by_bare_name_and_absolute_path() {
+    in_toolchain_home("go_check_runs_the_owners_cargo_toolchain_child");
+}
+
+#[test]
+fn go_check_runs_the_owners_cargo_toolchain_child() {
+    let Some(home) = toolchain_child() else {
+        return;
+    };
+    let run = go_with_check(json!(["cargo", "test", "--offline"]), |_| {});
+    assert!(run.passed_with("CARGO_HOME="), "{}", run.report);
+    // The roots are the owner's HOME, never the CARGO_HOME/RUSTUP_HOME variables.
+    for expected in [
+        format!("CARGO_HOME={}", home.join(".cargo").display()),
+        format!("RUSTUP_HOME={}", home.join(".rustup").display()),
+        "NET_OFFLINE=true".to_string(),
+        format!("PATH=/usr/bin:/bin:{}", home.join(".cargo/bin").display()),
+        format!("WHICH={}", home.join(".cargo/bin/cargo").display()),
+    ] {
+        assert!(
+            run.stdout().lines().any(|line| line == expected),
+            "{expected:?} in {:?}",
+            run.stdout()
+        );
+    }
+    let absolute = home.join(".cargo/bin/cargo");
+    let run = go_with_check(json!([absolute, "--version"]), |_| {});
+    assert!(run.passed_with("cargo 9.9.9"), "{}", run.report);
+}
+
+#[test]
+fn go_check_cannot_see_cargo_credentials_or_token_variables() {
+    in_toolchain_home("go_check_cannot_see_cargo_credentials_or_token_variables_child");
+}
+
+#[test]
+fn go_check_cannot_see_cargo_credentials_or_token_variables_child() {
+    if toolchain_child().is_none() {
+        return;
+    }
+    let run = go_with_check(json!(["cargo", "hidden"]), |_| {});
+    assert!(
+        run.passed_with("HIDDEN_OK"),
+        "{} {:?}",
+        run.report,
+        run.stdout()
+    );
+    assert!(!run.stdout().contains(TOOLCHAIN_SECRET));
+}
+
+#[test]
+fn go_check_mounts_the_toolchain_read_only() {
+    in_toolchain_home("go_check_mounts_the_toolchain_read_only_child");
+}
+
+#[test]
+fn go_check_mounts_the_toolchain_read_only_child() {
+    let Some(home) = toolchain_child() else {
+        return;
+    };
+    let run = go_with_check(json!(["cargo", "readonly"]), |_| {});
+    assert!(
+        run.passed_with("READONLY_OK"),
+        "{} {:?}",
+        run.report,
+        run.stdout()
+    );
+    // Nothing reached the owner's real files.
+    for probe in [
+        ".cargo/bin",
+        ".cargo/registry",
+        ".cargo/git",
+        ".rustup/toolchains",
+    ] {
+        assert!(!home.join(probe).join("probe").exists(), "{probe}");
+    }
+}
+
+#[test]
+fn go_check_network_stays_off_with_the_toolchain_mounted() {
+    in_toolchain_home("go_check_network_stays_off_with_the_toolchain_mounted_child");
+}
+
+#[test]
+fn go_check_network_stays_off_with_the_toolchain_mounted_child() {
+    if toolchain_child().is_none() {
+        return;
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    let run = go_with_check(json!(["cargo", "net", port]), |_| {});
+    assert!(
+        run.passed_with("NET_OFF"),
+        "{} {:?}",
+        run.report,
+        run.stdout()
+    );
+    assert!(listener.accept().is_err(), "the check reached the host");
+}
+
+#[test]
+fn go_check_toolchain_roots_do_not_come_from_repository_files() {
+    in_toolchain_home("go_check_toolchain_roots_do_not_come_from_repository_files_child");
+}
+
+#[test]
+fn go_check_toolchain_roots_do_not_come_from_repository_files_child() {
+    let Some(home) = toolchain_child() else {
+        return;
+    };
+    let run = go_with_check(json!(["cargo", "test", "--offline"]), |fixture| {
+        // A repository that offers its own cargo, cargo home and toolchain pin.
+        write_script(
+            &fixture.workspace.join(".cargo/bin/cargo"),
+            "#!/bin/sh\necho REPOSITORY_CARGO\n",
+        );
+        fs::write(
+            fixture.workspace.join(".cargo/config.toml"),
+            "[env]\nCARGO_HOME = \"/repo\"\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.workspace.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"repo\"\n",
+        )
+        .unwrap();
+        git(&fixture.workspace, &["add", "-f", "."]);
+        git(
+            &fixture.workspace,
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                "decoy toolchain",
+            ],
+        );
+    });
+    assert!(run.passed_with("CARGO_HOME="), "{}", run.report);
+    assert!(!run.stdout().contains("REPOSITORY_CARGO"));
+    assert!(
+        run.stdout()
+            .lines()
+            .any(|line| line == format!("WHICH={}", home.join(".cargo/bin/cargo").display())),
+        "{:?}",
+        run.stdout()
+    );
+}
+
+/// Issue #365, the whole path with a real toolchain: `cargo test --offline` as a `/go`
+/// check on a Rust repository. Skips without `~/.cargo/bin/cargo`. The other tests use a
+/// planted toolchain so they run everywhere and stay fast.
+#[test]
+fn cargo_test_offline_passes_as_a_go_check_on_a_rust_repository() {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    if !home.join(".cargo/bin/cargo").exists() || !home.join(".rustup/toolchains").exists() {
+        eprintln!("SKIP: no ~/.cargo toolchain");
+        return;
+    }
+    let run = go_with_check(json!(["cargo", "test", "--offline"]), |fixture| {
+        fs::write(
+            fixture.workspace.join("Cargo.toml"),
+            "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.workspace.join("Cargo.lock"),
+            "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 3\n\n[[package]]\nname = \"tiny\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(fixture.workspace.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(fixture.workspace.join("src")).unwrap();
+        fs::write(
+            fixture.workspace.join("src/lib.rs"),
+            "pub fn two() -> u8 { 2 }\n#[test]\nfn it_works() { assert_eq!(two(), 2); }\n",
+        )
+        .unwrap();
+        git(&fixture.workspace, &["add", "."]);
+        git(
+            &fixture.workspace,
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                "rust crate",
+            ],
+        );
+    });
+    assert!(
+        run.passed_with("test result: ok. 1 passed"),
+        "{} {:?} {:?}",
+        run.report,
+        run.stdout(),
+        run.check.as_ref().map(|check| &check.stderr)
+    );
+}
+
 fn commit_files(fixture: &Fixture, files: &[(&str, usize)]) {
     for (name, bytes) in files {
         fs::write(fixture.workspace.join(name), "x = 1\n".repeat(bytes / 6)).unwrap();

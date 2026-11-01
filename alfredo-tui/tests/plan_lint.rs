@@ -385,6 +385,182 @@ fn sandbox_program_lookup_mirrors_the_check_sandbox_path() {
     assert!(plan_lint::sandbox_program("scripts/check.sh"));
 }
 
+/// Set in the child process of a toolchain test to its planted `$HOME`; `HOME` is read at
+/// call time, so a child process keeps the parent test process unchanged (issue #365).
+const TOOLCHAIN_HOME_ENV: &str = "ALFREDO_TEST_TOOLCHAIN_HOME";
+
+fn executable_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A planted `$HOME` (under the cargo target tmpdir) with the entries `toolchain` names
+/// as real directories, so a test chooses which parts of the toolchain exist.
+fn planted_home(tag: &str, toolchain: bool) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "lint-home-{tag}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(&home).unwrap();
+    if toolchain {
+        executable_file(&home.join(".cargo/bin/cargo"));
+        executable_file(&home.join(".cargo/bin/cargo-fmt"));
+        fs::write(home.join(".cargo/bin/not-executable"), "data").unwrap();
+        // Executable, but outside the entries the sandbox mounts.
+        executable_file(&home.join(".cargo/hook"));
+        fs::write(home.join(".cargo/credentials.toml"), "token = \"x\"\n").unwrap();
+        fs::create_dir_all(home.join(".cargo/registry")).unwrap();
+        executable_file(&home.join(".rustup/toolchains/stable/bin/rustc"));
+        fs::write(home.join(".rustup/settings.toml"), "x = 1\n").unwrap();
+        executable_file(&home.join(".rustup/other/bin/tool"));
+    }
+    home.canonicalize().unwrap()
+}
+
+fn in_home(child: &str, home: &Path, decoy: Option<&Path>) {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", child, "--nocapture", "--test-threads=1"])
+        .env("HOME", home)
+        .env(TOOLCHAIN_HOME_ENV, home);
+    if let Some(decoy) = decoy {
+        // The repository's own cargo home, offered through the variables and the cwd.
+        command
+            .env("CARGO_HOME", decoy.join(".cargo"))
+            .env("RUSTUP_HOME", decoy.join(".rustup"))
+            .current_dir(decoy);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn cargo_programs_are_accepted_when_the_owners_toolchain_is_mounted() {
+    let home = planted_home("mounted", true);
+    in_home(
+        "cargo_programs_are_accepted_when_mounted_child",
+        &home,
+        None,
+    );
+}
+
+#[test]
+fn cargo_programs_are_accepted_when_mounted_child() {
+    let Some(home) = std::env::var_os(TOOLCHAIN_HOME_ENV).map(PathBuf::from) else {
+        return;
+    };
+    // Bare names resolve on the toolchain's bin, after the system PATH.
+    assert!(plan_lint::sandbox_program("cargo"));
+    assert!(plan_lint::sandbox_program("cargo-fmt"));
+    assert!(plan_lint::sandbox_program("sh"));
+    assert!(!plan_lint::sandbox_program("not-executable"));
+    assert!(!plan_lint::sandbox_program("alfredo-no-such-program-x9"));
+    // Absolute paths under a mounted entry.
+    let cargo = home.join(".cargo/bin");
+    assert!(plan_lint::sandbox_program(
+        cargo.join("cargo").to_str().unwrap()
+    ));
+    assert!(plan_lint::sandbox_program(
+        home.join(".rustup/toolchains/stable/bin/rustc")
+            .to_str()
+            .unwrap()
+    ));
+    assert!(!plan_lint::sandbox_program(
+        cargo.join("alfredo-no-such-x9").to_str().unwrap()
+    ));
+    // Executable files elsewhere in those homes are not mounted.
+    for outside in [".cargo/hook", ".rustup/other/bin/tool"] {
+        assert!(
+            !plan_lint::sandbox_program(home.join(outside).to_str().unwrap()),
+            "{outside}"
+        );
+    }
+    assert!(!plan_lint::sandbox_program(
+        home.join(".cargo/credentials.toml").to_str().unwrap()
+    ));
+    // `..` cannot climb out of a mounted entry.
+    let climbing = format!("{}/bin/../hook", home.join(".cargo").display());
+    assert!(!plan_lint::sandbox_program(&climbing));
+    // Programs outside both the system PATH and the toolchain stay refused.
+    assert!(!plan_lint::sandbox_program("/opt/alfredo/bin/tool"));
+    // The lint accepts a cargo check and keeps its message for other missing programs.
+    let accepted = plan(vec![step(&["a.rs"], &["cargo", "test", "--offline"], &[])]);
+    assert_eq!(
+        plan_lint::lint(&accepted, &tracked, &plan_lint::sandbox_program, &size),
+        Vec::<String>::new()
+    );
+    let refused = plan(vec![step(&["a.py"], &["pytest", "a.py"], &[])]);
+    let findings = plan_lint::lint(&refused, &tracked, &plan_lint::sandbox_program, &size);
+    assert_eq!(
+        findings,
+        vec!["Task 1 check program \"pytest\" is not available in the check sandbox (PATH /usr/bin:/bin); use a program installed there, such as python3".to_string()]
+    );
+}
+
+#[test]
+fn cargo_programs_stay_refused_without_a_mounted_toolchain() {
+    // No toolchain under HOME, and a repository (cwd and variables) offering its own.
+    let home = planted_home("none", false);
+    let decoy = planted_home("decoy", true);
+    in_home("cargo_programs_stay_refused_child", &home, Some(&decoy));
+    let _ = fs::remove_dir_all(decoy);
+}
+
+#[test]
+fn cargo_programs_stay_refused_child() {
+    let Some(_home) = std::env::var_os(TOOLCHAIN_HOME_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let decoy = std::env::current_dir().unwrap();
+    assert!(decoy.join(".cargo/bin/cargo").exists());
+    assert!(!plan_lint::sandbox_program("cargo"));
+    assert!(!plan_lint::sandbox_program(
+        decoy.join(".cargo/bin/cargo").to_str().unwrap()
+    ));
+    assert!(!plan_lint::sandbox_program("rustc"));
+    // Relative to the worktree stays assumed available, as before.
+    assert!(plan_lint::sandbox_program("./run.sh"));
+}
+
+#[test]
+fn a_symlinked_or_missing_bin_entry_is_not_a_mounted_toolchain() {
+    let home = planted_home("links", true);
+    let elsewhere = home.join("elsewhere");
+    executable_file(&elsewhere.join("cargo"));
+    fs::remove_dir_all(home.join(".cargo/bin")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, home.join(".cargo/bin")).unwrap();
+    in_home("a_symlinked_bin_child", &home, None);
+}
+
+#[test]
+fn a_symlinked_bin_child() {
+    let Some(home) = std::env::var_os(TOOLCHAIN_HOME_ENV).map(PathBuf::from) else {
+        return;
+    };
+    // `~/.cargo/bin` is a symlink: not mounted, so neither the name nor the path resolves.
+    assert!(!plan_lint::sandbox_program("cargo"));
+    assert!(!plan_lint::sandbox_program(
+        home.join(".cargo/bin/cargo").to_str().unwrap()
+    ));
+    // The rustup entries are separate mounts and still count.
+    assert!(plan_lint::sandbox_program(
+        home.join(".rustup/toolchains/stable/bin/rustc")
+            .to_str()
+            .unwrap()
+    ));
+}
+
 #[test]
 fn runtime_data_files_in_policy_are_rejected_with_a_fix() {
     let bad = plan(vec![
