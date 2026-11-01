@@ -65,6 +65,22 @@ fn plain(tool: &str, kind: CardKind) -> Card {
     }
 }
 
+/// The approval card of a HOST (`escalate: true`) run_command, built as the tool loop builds it.
+fn host_card(root: &Path, command: &str, cwd: Option<&str>) -> Card {
+    let mut arguments = json!({"command": command, "escalate": true});
+    if let Some(cwd) = cwd {
+        arguments["cwd"] = json!(cwd);
+    }
+    approval::card(
+        root,
+        &alfredo_tui::model::ToolCall {
+            name: "run_command".into(),
+            arguments,
+        },
+    )
+    .unwrap()
+}
+
 #[test]
 fn command_prefixes_match_whole_words_and_refuse_shell_operators() {
     assert!(allow::command_matches("cargo test", "cargo test"));
@@ -723,20 +739,6 @@ fn host_runs_are_never_offered_always_allow_so_no_rule_can_skip_their_card() {
     fs::create_dir(root.join("sub")).unwrap();
     let state = dir("host-never-state");
     let rules = Rules::new(&state);
-    let host = |command: &str, cwd: Option<&str>| {
-        let mut arguments = json!({"command": command, "escalate": true});
-        if let Some(cwd) = cwd {
-            arguments["cwd"] = json!(cwd);
-        }
-        approval::card(
-            &root,
-            &alfredo_tui::model::ToolCall {
-                name: "run_command".into(),
-                arguments,
-            },
-        )
-        .unwrap()
-    };
     for command in [
         "g''it push origin main",
         "git pu''sh origin main",
@@ -745,7 +747,7 @@ fn host_runs_are_never_offered_always_allow_so_no_rule_can_skip_their_card() {
         "./build.sh",
     ] {
         for cwd in [None, Some("sub")] {
-            let card = host(command, cwd);
+            let card = host_card(&root, command, cwd);
             assert!(card.escalated(), "{command} {cwd:?}");
             assert!(!allow::offered(&card), "{command} {cwd:?}: offered");
             assert_eq!(allow::offer(&card), None, "{command} {cwd:?}: hinted");
@@ -760,44 +762,65 @@ fn host_runs_are_never_offered_always_allow_so_no_rule_can_skip_their_card() {
 }
 
 /// Issue #311: an escalated rule in `chat-allow.json` (written before the fix) never
-/// matches a host run, whatever its cwd: `./build.sh` at the root was repointed to a
-/// `sub` card, and push obfuscations matched with no card.
+/// matches a host run, whatever its command or cwd. Each of the five commands from the
+/// issue is a legacy rule, and a legacy tool-wide escalated rule is included.
 #[test]
 fn an_old_escalated_rule_never_matches_a_host_run_from_any_cwd() {
     let root = dir("host-old-rule");
     fs::create_dir(root.join("sub")).unwrap();
     let state = dir("host-old-rule-state");
-    fs::write(
-        state.join(allow::FILE),
-        r#"[{"id":1,"tool":"run_command","command":"./build.sh","escalated":true},{"id":2,"tool":"run_command","command":"g''it push origin main","escalated":true}]"#,
-    )
-    .unwrap();
+    let commands = [
+        "./build.sh",
+        "g''it push origin main",
+        "git pu''sh origin main",
+        "G=git; $G push origin main",
+        "git -c alias.p=push p origin main",
+    ];
+    let mut legacy: Vec<String> = commands
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            format!(
+                r#"{{"id":{},"tool":"run_command","command":{},"escalated":true}}"#,
+                index + 1,
+                json!(command)
+            )
+        })
+        .collect();
+    legacy.push(r#"{"id":9,"tool":"run_command","escalated":true}"#.into());
+    fs::write(state.join(allow::FILE), format!("[{}]", legacy.join(","))).unwrap();
     let rules = Rules::new(&state);
-    assert_eq!(rules.list().unwrap().len(), 2);
-    let host = |command: &str, cwd: Option<&str>| {
-        let mut arguments = json!({"command": command, "escalate": true});
-        if let Some(cwd) = cwd {
-            arguments["cwd"] = json!(cwd);
+    assert_eq!(rules.list().unwrap().len(), commands.len() + 1);
+    for command in commands {
+        for cwd in [None, Some("sub")] {
+            let card = host_card(&root, command, cwd);
+            assert_eq!(rules.matching(&card), None, "{command} {cwd:?}");
+            assert!(allow::offer(&card).is_none(), "{command} {cwd:?}");
         }
-        approval::card(
-            &root,
-            &alfredo_tui::model::ToolCall {
-                name: "run_command".into(),
-                arguments,
-            },
-        )
-        .unwrap()
-    };
-    for cwd in [None, Some("sub")] {
-        assert_eq!(rules.matching(&host("./build.sh", cwd)), None, "{cwd:?}");
-        assert_eq!(
-            rules.matching(&host("g''it push origin main", cwd)),
-            None,
-            "{cwd:?}"
-        );
     }
     let _ = fs::remove_dir_all(state);
     let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #311: a legacy escalated rule is listed as inactive in every form `/allow` shows,
+/// including a tool-wide one (`command` absent), which would otherwise read as coverage.
+#[test]
+fn every_legacy_escalated_rule_is_listed_inactive() {
+    let state = dir("legacy-inactive");
+    let rules = Rules::new(&state);
+    fs::write(
+        state.join(allow::FILE),
+        r#"[{"id":1,"tool":"run_command","command":"./build.sh","escalated":true},{"id":2,"tool":"run_command","escalated":true}]"#,
+    )
+    .unwrap();
+    let listed = rules.list().unwrap();
+    assert_eq!(listed.len(), 2);
+    for rule in &listed {
+        let text = allow::describe(rule);
+        assert!(text.contains("inactive, HOST runs always ask"), "{text}");
+        assert!(!text.contains("(every call)"), "{text}");
+    }
+    let _ = fs::remove_dir_all(state);
 }
 
 #[test]
