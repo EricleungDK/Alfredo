@@ -54,12 +54,9 @@ fn run(root: &Path, command: &str) -> String {
 
 #[test]
 fn sandboxed_prefix_rule_never_hands_secret_files_to_the_model() {
-    let root = std::env::temp_dir().join(format!("allow-exfil-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    let root = root.canonicalize().unwrap();
-    std::fs::write(root.join(".env"), "API_TOKEN=s3cr3t\n").unwrap();
-    std::fs::write(root.join("README.md"), "hi\n").unwrap();
+    let root = workspace("exfil");
+    write(&root, ".env", "API_TOKEN=s3cr3t\n");
+    write(&root, "README.md", "hi\n");
     assert!(chat_tools::resolve(&root, ".env").is_err());
     let seed = Card {
         tool: "run_command".into(),
@@ -91,6 +88,7 @@ fn sandboxed_prefix_rule_never_hands_secret_files_to_the_model() {
         !(auto && out.contains("s3cr3t")),
         "rule-approved command read a secret file: {out}"
     );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -242,5 +240,44 @@ fn secret_masks_up_to_the_cap_still_run() {
     let out = run(&root, "echo END");
     assert!(out.contains("END"), "the command did not run: {out}");
     assert!(out.contains("exit code 0"), "{out}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_nested_git_directory_is_hidden_from_the_sandbox() {
+    let root = workspace("nested-git");
+    write(
+        &root,
+        "notgit/.git/config",
+        &format!("[remote]\nurl = https://u:{SECRET}@host\n"),
+    );
+    write(
+        &root,
+        "notgit/.git/secret.env",
+        &format!("NESTED_GIT={SECRET}\n"),
+    );
+    let out = run(
+        &root,
+        "cat notgit/.git/config notgit/.git/secret.env; grep -r NESTED_GIT . ; echo END",
+    );
+    assert!(out.contains("END"), "the command did not run: {out}");
+    assert!(
+        !out.contains(SECRET),
+        "a nested .git directory leaked: {out}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_nested_git_file_is_masked() {
+    let root = workspace("nested-git-file");
+    write(
+        &root,
+        "ptr/.git",
+        &format!("gitdir: ../elsewhere {SECRET}\n"),
+    );
+    let out = run(&root, "cat ptr/.git; echo END");
+    assert!(out.contains("END"), "the command did not run: {out}");
+    assert!(!out.contains(SECRET), "a nested .git file leaked: {out}");
     let _ = fs::remove_dir_all(root);
 }

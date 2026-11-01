@@ -676,13 +676,25 @@ mod sandbox_masks {
         }
 
         #[test]
-        fn git_directories_are_skipped_at_every_depth() {
+        fn only_the_root_git_is_exempt_and_nested_git_is_masked() {
             let root = scratch("git");
             fs::create_dir_all(root.join(".git/objects")).unwrap();
             fs::write(root.join(".git/config"), "[remote]\n").unwrap();
             fs::create_dir_all(root.join("nested/.git")).unwrap();
-            fs::write(root.join("nested/.git/.env"), "x").unwrap();
-            assert_eq!(scan(&root).unwrap(), Masks::default());
+            fs::write(root.join("nested/.git/config"), "[remote]\n").unwrap();
+            fs::create_dir_all(root.join("notgit/.git")).unwrap();
+            fs::write(root.join("notgit/.git/secret.env"), "x").unwrap();
+            fs::create_dir_all(root.join("ptr")).unwrap();
+            fs::write(root.join("ptr/.git"), "gitdir: elsewhere\n").unwrap();
+            let masks = scan(&root).unwrap();
+            assert_eq!(
+                masks.dirs,
+                vec![
+                    text(&root.join("nested/.git")),
+                    text(&root.join("notgit/.git")),
+                ]
+            );
+            assert_eq!(masks.files, vec![text(&root.join("ptr/.git"))]);
             let _ = fs::remove_dir_all(root);
         }
 
