@@ -2631,6 +2631,31 @@ mod refusal_notice_tests {
     }
 
     #[test]
+    fn a_held_store_lock_reads_as_busy_and_a_free_one_as_a_snapshot() {
+        let (control, root) = control();
+        assert!(control.store.snapshot_checked().is_ok());
+        let lock = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(
+                control
+                    .store
+                    .conversation_directory()
+                    .unwrap()
+                    .join("tasks.lock"),
+            )
+            .unwrap();
+        assert!(lock.try_lock().is_ok());
+        assert!(matches!(
+            control.store.snapshot_checked(),
+            Err(Refusal::Busy)
+        ));
+        drop(lock);
+        assert!(control.store.snapshot_checked().is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn busy_refreshes_up_to_the_limit_keep_dispatch_on_and_the_snapshot() {
         let (mut control, root) = dispatching();
         control.notice = "kept".into();

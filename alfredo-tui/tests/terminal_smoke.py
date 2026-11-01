@@ -228,6 +228,14 @@ class DispatchSurvivesBusyStore(unittest.TestCase):
                                     os.write(terminal.master, b'\x1b[1;1R')
                     finally:
                         fcntl.flock(held, fcntl.LOCK_UN)
+                # Let a redraw after the last busy tick land before looking at the header.
+                deadline = time.monotonic() + 0.75
+                while time.monotonic() < deadline:
+                    if select.select([terminal.master], [], [], 0.05)[0]:
+                        chunk = os.read(terminal.master, 65536)
+                        terminal.output.extend(chunk)
+                        if b'\x1b[6n' in chunk:
+                            os.write(terminal.master, b'\x1b[1;1R')
                 header = terminal.screen().split('\n')[0]
                 self.assertIn('dispatch on', header, terminal.screen())
                 terminal.write(b'\x11')
@@ -266,6 +274,14 @@ class DispatchStopsWhenBusyStoreStaysBusy(unittest.TestCase):
                                     os.write(terminal.master, b'\x1b[1;1R')
                     finally:
                         fcntl.flock(held, fcntl.LOCK_UN)
+                # The notice redraw may lag the last refresh tick; wait for it.
+                deadline = time.monotonic() + 5
+                while 'dispatch on' in terminal.screen().split('\n')[0] and time.monotonic() < deadline:
+                    if select.select([terminal.master], [], [], 0.05)[0]:
+                        chunk = os.read(terminal.master, 65536)
+                        terminal.output.extend(chunk)
+                        if b'\x1b[6n' in chunk:
+                            os.write(terminal.master, b'\x1b[1;1R')
                 header = terminal.screen().split('\n')[0]
                 self.assertNotIn('dispatch on', header, terminal.screen())
                 terminal.write(b'\x11')
