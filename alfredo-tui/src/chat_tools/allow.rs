@@ -263,7 +263,16 @@ pub fn describe(rule: &Rule) -> String {
                 " · sandboxed"
             }
         ),
-        None => format!("#{} {} (every call)", rule.id, clean(&rule.tool)),
+        None => format!(
+            "#{} {} (every call){}",
+            rule.id,
+            clean(&rule.tool),
+            if rule.escalated {
+                " · on HOST (escalated): inactive, HOST runs always ask"
+            } else {
+                ""
+            }
+        ),
     }
 }
 

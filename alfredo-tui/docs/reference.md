@@ -2130,10 +2130,15 @@ rule `a` would add.
   A command containing any of `; & | ` `` ` `` `$ > < ( ) \` or a newline matches only a
   rule that is exactly that command (`cargo test; rm -rf ~` never matches `cargo test`).
 - **Never push.** `git_push` cards (Push tier, `Tier::allowlistable` false) offer no `a`,
-  and no rule matches them, including rules added by hand to the file. The same holds for
-  a `run_command` that invokes `git … push` (`git -C x push`, `git -c k=v push`, any
-  path to git): its card reads `push: asked every time`. Read tools and
-  `propose_plan` are never gated, so no rule applies to them.
+  and no rule matches them, including rules added by hand to the file. A `run_command`
+  whose plain words invoke `git … push` (`git -C x push`, `git -c k=v push`, any path to
+  git) is detected: its card reads `push: asked every time` and offers no `a`. Detection
+  works on words, so a spelling that hides `push` (`g''it push`, `git pu''sh`,
+  `G=git; $G push`, `git -c alias.p=push p`) is not detected by that check. A HOST run
+  of such a command never gets `a` (issue #311), and a sandboxed run has no network, so
+  it cannot push to a remote outside the workspace. A sandboxed prefix rule can still
+  cover such a spelling; that is a known gap. Read tools and `propose_plan` are never
+  gated, so no rule applies to them.
 - **HOST runs always ask (issue #311).** A red HOST card (`escalate: true`) is never
   offered `a`: its key line reads `… · a not offered: HOST runs always ask`, and no rule
   is added for it, whatever its command, cwd or spelling (`./build.sh` from `sub`, or

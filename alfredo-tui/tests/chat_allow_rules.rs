@@ -250,8 +250,8 @@ fn push_is_never_allowlistable_even_from_a_hand_edited_file() {
     let _ = fs::remove_dir_all(state);
 }
 
-/// Issue #311 (was: escalated runs need an explicitly escalated rule). A HOST run can no
-/// longer get a rule, and a rule with `escalated` from before the fix never matches.
+/// Issue #311: a HOST run gets no rule, and a sandboxed rule never covers it. A rule with
+/// `escalated` (written before the fix) never matches, host or sandboxed.
 #[test]
 fn escalated_runs_never_match_a_rule() {
     let state = dir("escalated");
@@ -709,8 +709,8 @@ fn a_write_file_rule_does_not_cover_directory_creating_writes() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// Issue #311 (was: escalated rules match only the exact command). A HOST rule from before
-/// the fix matches neither its exact command nor a longer one.
+/// Issue #311: a HOST rule written before the fix matches neither its exact command nor a
+/// longer one.
 #[test]
 fn escalated_rules_from_before_issue_311_never_match_their_exact_command() {
     let state = dir("exact-host");
@@ -818,7 +818,6 @@ fn every_legacy_escalated_rule_is_listed_inactive() {
     for rule in &listed {
         let text = allow::describe(rule);
         assert!(text.contains("inactive, HOST runs always ask"), "{text}");
-        assert!(!text.contains("(every call)"), "{text}");
     }
     let _ = fs::remove_dir_all(state);
 }
