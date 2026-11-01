@@ -61,6 +61,19 @@ pub async fn model_server_check(provider: &Ollama, model: &str) -> Result<(), Mo
     }
 }
 
+/// The `--doctor` note naming what `/go` checks can reach beyond `/usr/bin:/bin`
+/// (issue #365): the owner's cargo toolchain entries, mounted read-only.
+fn toolchain_note(toolchain: &crate::worker::Toolchain) -> String {
+    if toolchain.binds.is_empty() {
+        return "NOTE check toolchain: none under $HOME (~/.cargo, ~/.rustup): /go checks see only programs on /usr/bin:/bin".into();
+    }
+    let roots: Vec<String> = toolchain.binds.iter().map(|bind| clean(bind)).collect();
+    format!(
+        "NOTE check toolchain: /go checks mount read-only {} (credentials and config stay hidden; cargo runs offline)",
+        roots.join(", ")
+    )
+}
+
 /// One-line setup error for a failed [`model_server_check`] (headless).
 pub fn model_check_message(model: &str, failure: &ModelCheck) -> String {
     match failure {
@@ -200,6 +213,7 @@ pub async fn inspect(
         Some(window) => format!("NOTE context: --num-ctx {window} tokens is sent on every request; prompts estimated above it are refused before sending"),
         None => "NOTE context: not set: Ollama default applies; set --num-ctx for prompts above ~4k tokens".into(),
     });
+    lines.push(toolchain_note(&crate::worker::Toolchain::owned()));
     lines.push("Checks do not run inference or a sandboxed task, measure model speed, or prove available GPU memory. Actual sandbox permissions are checked when a worker runs.".into());
     lines.push("Storage checks may initialize private directories/lock files; they do not save conversations or change task receipts.".into());
     lines.push(
@@ -213,5 +227,28 @@ pub async fn inspect(
     Report {
         passed,
         text: lines.join("\n"),
+    }
+}
+
+#[cfg(test)]
+mod toolchain_note_tests {
+    use super::toolchain_note;
+    use crate::worker::Toolchain;
+
+    #[test]
+    fn the_note_lists_every_mounted_root_or_says_there_are_none() {
+        assert_eq!(
+            toolchain_note(&Toolchain::default()),
+            "NOTE check toolchain: none under $HOME (~/.cargo, ~/.rustup): /go checks see only programs on /usr/bin:/bin"
+        );
+        let toolchain = Toolchain {
+            cargo_home: Some("/h/.cargo".into()),
+            rustup_home: None,
+            binds: vec!["/h/.cargo/bin".into(), "/h/.cargo/reg\u{1b}istry".into()],
+        };
+        assert_eq!(
+            toolchain_note(&toolchain),
+            "NOTE check toolchain: /go checks mount read-only /h/.cargo/bin, /h/.cargo/registry (credentials and config stay hidden; cargo runs offline)"
+        );
     }
 }

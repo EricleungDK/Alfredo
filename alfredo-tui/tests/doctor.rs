@@ -521,7 +521,7 @@ fn doctor_notes_the_toolchain_roots_go_checks_mount() {
     }
     // Entries that are absent and the credential files are never listed.
     assert!(!note.contains(".cargo/git"), "{note}");
-    assert!(!note.contains("credentials"), "{note}");
+    assert!(!note.contains("credentials.toml"), "{note}");
     let _ = fs::remove_dir_all(home);
 }
 

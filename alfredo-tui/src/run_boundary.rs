@@ -5,12 +5,11 @@ use crate::{
         ExecutionRequest, ExecutionSandbox, RustExecutionProvider,
     },
     tasks::{regular_file, Task, TaskStatus},
-    worker::Evidence,
+    worker::{Evidence, Toolchain},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::Path,
@@ -232,12 +231,28 @@ fn managed_worktree(path: &Path, task: &Task) -> Result<String> {
 
 // This is the immutable version-1 native check contract, intentionally independent
 // of worker defaults and of which system roots exist on a later recovery host.
+#[cfg(test)]
 fn contract_request(
     root: String,
     task: &Task,
     mission: &str,
     system_roots: &[String],
 ) -> Result<ExecutionRequest> {
+    contract_request_with(root, task, mission, system_roots, &Toolchain::default())
+}
+
+// The owner's cargo toolchain (issue #365) is part of the contract when mounted: only the
+// listed entries of the recorded homes, read-only, with the matching environment.
+fn contract_request_with(
+    root: String,
+    task: &Task,
+    mission: &str,
+    system_roots: &[String],
+    toolchain: &Toolchain,
+) -> Result<ExecutionRequest> {
+    if !toolchain.well_formed() {
+        return Err("Check toolchain mounts do not match contract version 1".into());
+    }
     if mission.trim().is_empty() || mission.len() > 120 || mission.chars().any(char::is_control) {
         return Err("Invalid check Mission identity".into());
     }
@@ -272,6 +287,7 @@ fn contract_request(
     for system in system_roots {
         argv.extend(["--ro-bind".into(), system.clone(), system.clone()]);
     }
+    let mounts = toolchain.mounts(&root);
     argv.extend([
         "--bind".into(),
         root.clone(),
@@ -279,6 +295,11 @@ fn contract_request(
         "--ro-bind".into(),
         gitfile.clone(),
         gitfile.clone(),
+    ]);
+    for mount in &mounts {
+        argv.extend(["--ro-bind".into(), mount.clone(), mount.clone()]);
+    }
+    argv.extend([
         "--chdir".into(),
         root.clone(),
         "--".into(),
@@ -309,13 +330,11 @@ fn contract_request(
             mode: "bubblewrap".into(),
             readable_roots: vec![root.clone()],
             writable_roots: vec![root],
-            readonly_bindings: vec![(gitfile.clone(), gitfile)],
+            readonly_bindings: std::iter::once((gitfile.clone(), gitfile))
+                .chain(mounts.iter().map(|mount| (mount.clone(), mount.clone())))
+                .collect(),
         },
-        environment: BTreeMap::from([
-            ("PATH".into(), "/usr/bin:/bin".into()),
-            ("HOME".into(), "/tmp".into()),
-            ("CI".into(), "1".into()),
-        ]),
+        environment: toolchain.check_environment(),
         input_text: None,
         input_sha256: None,
         shell: false,
@@ -333,11 +352,12 @@ fn verify_intent(path: &Path, task: &Task, mission: &str, intent: &CheckIntent) 
     {
         return Err("Check intent does not match the versioned task/run/Mission/baseline".into());
     }
-    let expected = contract_request(
+    let expected = contract_request_with(
         managed_worktree(path, task)?,
         task,
         mission,
         &intent.system_roots,
+        &Toolchain::from_request(&intent.request),
     )?;
     if intent.request != expected
         || intent.request_digest != expected.request_digest().map_err(|e| e.message)?
@@ -566,7 +586,16 @@ pub fn execute_check_classified(
         .filter(|root| Path::new(root).exists())
         .map(str::to_owned)
         .collect();
-    if *request != contract_request(managed_worktree(path, task)?, task, mission, &system_roots)? {
+    let toolchain = Toolchain::owned();
+    if *request
+        != contract_request_with(
+            managed_worktree(path, task)?,
+            task,
+            mission,
+            &system_roots,
+            &toolchain,
+        )?
+    {
         return Err("Check request differs from its exact authorized contract".into());
     }
     let run = task.run.as_ref().ok_or("Missing run claim")?;
@@ -1391,5 +1420,181 @@ mod publication_crash_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    use super::*;
+    use crate::tasks::{TaskRun, WorkPolicy};
+    use crate::worker::{check_request_with, toolchain_binds};
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    struct Scratch {
+        root: PathBuf,
+        home: PathBuf,
+        path: PathBuf,
+        task: Task,
+    }
+    impl Scratch {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "alfredo-toolchain-boundary-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let path = root.join("runs/task-1-run");
+            fs::create_dir_all(path.join("worktree")).unwrap();
+            for dir in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+                fs::create_dir_all(root.join("home").join(dir)).unwrap();
+            }
+            fs::write(root.join("home/.cargo/credentials.toml"), "t").unwrap();
+            let root = root.canonicalize().unwrap();
+            let task = Task {
+                id: 1,
+                title: "Check".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+                status: TaskStatus::Running,
+                policy: Some(WorkPolicy {
+                    files: vec!["a.rs".into()],
+                    check: vec!["cargo".into(), "test".into()],
+                }),
+                run: Some(TaskRun {
+                    id: "task-1-run".into(),
+                    baseline: "a".repeat(40),
+                    inputs: vec![],
+                    evidence_sha256: None,
+                    detail: String::new(),
+                }),
+                repair_of: None,
+            };
+            Self {
+                home: root.join("home"),
+                path: path.canonicalize().unwrap(),
+                root,
+                task,
+            }
+        }
+        fn intent(&self, request: ExecutionRequest) -> CheckIntent {
+            CheckIntent {
+                schema_version: 2,
+                contract_version: 1,
+                task: 1,
+                run: "task-1-run".into(),
+                baseline: "a".repeat(40),
+                mission: "mission".into(),
+                system_roots: vec!["/usr".into(), "/etc".into()],
+                request_digest: request.request_digest().unwrap(),
+                request,
+            }
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn the_worker_request_and_the_contract_agree_on_the_toolchain() {
+        let scratch = Scratch::new();
+        let toolchain = toolchain_binds(Some(&scratch.home));
+        assert!(!toolchain.binds.is_empty());
+        let worktree = scratch.path.join("worktree");
+        fs::write(worktree.join(".git"), "x\n").unwrap();
+        let roots: Vec<String> = SYSTEM_ROOTS
+            .iter()
+            .filter(|root| Path::new(root).exists())
+            .map(|root| (*root).to_owned())
+            .collect();
+        let worker = check_request_with(&worktree, &scratch.task, "mission", &toolchain).unwrap();
+        let contract = contract_request_with(
+            managed_worktree(&scratch.path, &scratch.task).unwrap(),
+            &scratch.task,
+            "mission",
+            &roots,
+            &toolchain,
+        )
+        .unwrap();
+        assert_eq!(worker, contract);
+    }
+
+    #[test]
+    fn an_intent_with_a_toolchain_verifies_and_a_widened_one_does_not() {
+        let scratch = Scratch::new();
+        record_start(&scratch.path, &scratch.task).unwrap();
+        let toolchain = toolchain_binds(Some(&scratch.home));
+        let request = contract_request_with(
+            managed_worktree(&scratch.path, &scratch.task).unwrap(),
+            &scratch.task,
+            "mission",
+            &["/usr".into(), "/etc".into()],
+            &toolchain,
+        )
+        .unwrap();
+        verify_intent(
+            &scratch.path,
+            &scratch.task,
+            "mission",
+            &scratch.intent(request.clone()),
+        )
+        .unwrap();
+        // The credentials file of the same home, bound read-only as well.
+        let secret = scratch.home.join(".cargo/credentials.toml");
+        let secret = secret.to_str().unwrap().to_string();
+        let mut widened = request.clone();
+        let at = widened.argv.iter().position(|a| a == "--chdir").unwrap();
+        widened.argv.splice(
+            at..at,
+            ["--ro-bind".to_string(), secret.clone(), secret.clone()],
+        );
+        widened
+            .sandbox
+            .readonly_bindings
+            .push((secret.clone(), secret));
+        let error = verify_intent(
+            &scratch.path,
+            &scratch.task,
+            "mission",
+            &scratch.intent(widened),
+        )
+        .unwrap_err();
+        assert!(error.contains("toolchain"), "{error}");
+        // A different CARGO_HOME than the binds were taken from.
+        let mut moved = request;
+        moved
+            .environment
+            .insert("CARGO_HOME".into(), "/elsewhere".into());
+        assert!(verify_intent(
+            &scratch.path,
+            &scratch.task,
+            "mission",
+            &scratch.intent(moved)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_malformed_toolchain_is_not_a_contract_request() {
+        let scratch = Scratch::new();
+        let mut toolchain = toolchain_binds(Some(&scratch.home));
+        toolchain.binds.push("/etc/shadow".into());
+        let error = contract_request_with(
+            managed_worktree(&scratch.path, &scratch.task).unwrap(),
+            &scratch.task,
+            "mission",
+            &["/usr".into()],
+            &toolchain,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "Check toolchain mounts do not match contract version 1"
+        );
     }
 }

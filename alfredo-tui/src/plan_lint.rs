@@ -2,7 +2,7 @@
 //! fail because they need files nothing provides, missing check programs, and
 //! unordered tasks writing the same file. Conservative: an argument that cannot
 //! be confidently classified as a repository path is never reported.
-use crate::{chat_tools::git_read, planner::Plan};
+use crate::{chat_tools::git_read, planner::Plan, worker::Toolchain};
 use std::{cell::OnceCell, collections::BTreeSet, path::Path};
 
 /// Most bytes of git output one lint query reads: a listing of one path or a size.
@@ -24,15 +24,24 @@ fn executable(path: &Path) -> bool {
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
-/// Whether the check sandbox can resolve `program`. Bare names resolve only on
-/// the sandbox PATH; absolute paths only under the bound system roots. A path
+/// Whether the check sandbox can resolve `program`. Bare names resolve only on the
+/// sandbox PATH: the system directories, then the owner's mounted cargo `bin`. Absolute
+/// paths only under the bound system roots or the mounted toolchain entries. A path
 /// relative to the worktree cannot be resolved here and is assumed available.
 pub fn sandbox_program(program: &str) -> bool {
+    sandbox_program_with(program, &Toolchain::owned())
+}
+
+/// [`sandbox_program`] against an explicit toolchain: the same mounts the check
+/// sandbox gets from [`Toolchain::mounts`], so the lint cannot accept a program the
+/// sandbox cannot run (issue #365).
+fn sandbox_program_with(program: &str, toolchain: &Toolchain) -> bool {
     if program.starts_with('/') {
-        return SANDBOX_ROOTS
+        let path = Path::new(program);
+        let system = SANDBOX_ROOTS
             .iter()
-            .any(|root| program.starts_with(&format!("{root}/")))
-            && executable(Path::new(program));
+            .any(|root| program.starts_with(&format!("{root}/")));
+        return (system && executable(path)) || mounted_executable(path, toolchain);
     }
     if program.contains('/') {
         return true;
@@ -40,6 +49,21 @@ pub fn sandbox_program(program: &str) -> bool {
     SANDBOX_PATH
         .iter()
         .any(|dir| executable(&Path::new(dir).join(program)))
+        || toolchain
+            .bin_dir()
+            .is_some_and(|dir| mounted_executable(&Path::new(&dir).join(program), toolchain))
+}
+
+/// An executable inside a mounted toolchain entry, by its name and by where it
+/// resolves: a `..` or a symlink cannot lead out of the mounts.
+fn mounted_executable(path: &Path, toolchain: &Toolchain) -> bool {
+    let inside = |candidate: &Path| {
+        toolchain
+            .binds
+            .iter()
+            .any(|bind| candidate.starts_with(bind))
+    };
+    inside(path) && path.canonicalize().is_ok_and(|real| inside(&real)) && executable(path)
 }
 
 fn plain(path: &str) -> bool {
@@ -372,5 +396,87 @@ fn committed_size<'a>(
         .trim()
         .parse()
         .ok()
+    }
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    use super::{sandbox_program_with, Toolchain};
+    use crate::worker::toolchain_binds;
+    use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+
+    fn script(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn home(tag: &str) -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!(
+            "alfredo-lint-toolchain-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&home);
+        script(&home.join(".cargo/bin/cargo"));
+        script(&home.join(".cargo/hook"));
+        script(&home.join(".rustup/toolchains/stable/bin/rustc"));
+        fs::create_dir_all(home.join(".cargo/registry")).unwrap();
+        home.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn programs_resolve_exactly_where_the_toolchain_is_mounted() {
+        let home = home("mounted");
+        let mounted = toolchain_binds(Some(&home));
+        let none = Toolchain::default();
+        let cargo = home.join(".cargo/bin/cargo");
+        let cargo = cargo.to_str().unwrap();
+        let rustc = home.join(".rustup/toolchains/stable/bin/rustc");
+        let rustc = rustc.to_str().unwrap();
+        // Accepted iff mounted: the bare name and the absolute path.
+        assert!(sandbox_program_with("cargo", &mounted));
+        assert!(!sandbox_program_with("cargo", &none));
+        assert!(sandbox_program_with(cargo, &mounted));
+        assert!(!sandbox_program_with(cargo, &none));
+        assert!(sandbox_program_with(rustc, &mounted));
+        assert!(!sandbox_program_with(rustc, &none));
+        // Bare names resolve on the cargo bin only, not in the rustup toolchain's.
+        assert!(!sandbox_program_with("rustc", &mounted));
+        // The system PATH is unaffected by the toolchain.
+        for toolchain in [&mounted, &none] {
+            assert!(sandbox_program_with("sh", toolchain));
+            assert!(sandbox_program_with("/bin/sh", toolchain));
+            assert!(!sandbox_program_with(
+                "alfredo-no-such-program-x9",
+                toolchain
+            ));
+            assert!(!sandbox_program_with("/opt/alfredo/bin/tool", toolchain));
+            assert!(sandbox_program_with("scripts/check.sh", toolchain));
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_path_cannot_leave_the_mounted_entries() {
+        let home = home("escape");
+        let mounted = toolchain_binds(Some(&home));
+        let hook = home.join(".cargo/hook");
+        assert!(!sandbox_program_with(hook.to_str().unwrap(), &mounted));
+        let climbing = format!("{}/.cargo/bin/../hook", home.display());
+        assert!(!sandbox_program_with(&climbing, &mounted));
+        // A symlink inside a mounted entry that points outside the mounts.
+        std::os::unix::fs::symlink(&hook, home.join(".cargo/bin/linked")).unwrap();
+        let linked = home.join(".cargo/bin/linked");
+        assert!(!sandbox_program_with(linked.to_str().unwrap(), &mounted));
+        assert!(!sandbox_program_with("linked", &mounted));
+        // The registry is mounted, so an executable inside it resolves.
+        let tool = home.join(".cargo/registry/tool");
+        script(&tool);
+        assert!(sandbox_program_with(tool.to_str().unwrap(), &mounted));
+        // Not executable, or absent: refused.
+        fs::write(home.join(".cargo/bin/data"), "x").unwrap();
+        assert!(!sandbox_program_with("data", &mounted));
+        assert!(!sandbox_program_with("missing", &mounted));
+        let _ = fs::remove_dir_all(home);
     }
 }

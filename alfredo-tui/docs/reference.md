@@ -90,6 +90,20 @@ setup refusal as the first line of stderr (never `execvp` or bind-mount errors);
 class is the typed `failure_code` in the run's evidence. `ALFREDO_TEST_BWRAP_PATH` is a
 test-only seam that redirects only the preflight probe, never the executable a run uses.
 
+Check programs resolve on `/usr/bin:/bin` and, when you have one, your cargo toolchain
+(issue #365). The check sandbox mounts the same read-only entries as chat `run_command`
+(`~/.cargo/bin`, `registry` and `git`, `~/.rustup/toolchains` and `settings.toml`, from the
+`$HOME` of the Alfredo process; never the whole homes, a symlinked entry, or anything a
+repository names), so `cargo test --offline` works as a check with already-fetched
+dependencies. `~/.cargo/bin` follows the system directories on `PATH`; `CARGO_HOME`,
+`RUSTUP_HOME` and `CARGO_NET_OFFLINE=true` are set. `~/.cargo/credentials.toml`,
+`credentials`, `config.toml` and every token variable (such as `CARGO_REGISTRY_TOKEN`) stay
+invisible, the mounts are read-only, and the network stays off. Plan lint accepts a bare
+`cargo` or an absolute path under a mounted entry only when that entry is mounted, and
+otherwise keeps `program … is not available in the check sandbox (PATH /usr/bin:/bin)`.
+`--doctor` prints a `NOTE check toolchain:` line naming the mounted roots, or that there
+are none. Node and Python toolchains in your home are not mounted yet.
+
 A worker reads and rewrites each approved file whole, so an approved file over 64 KiB (or
 approved files totalling over 96 KiB) fails the run before any model call with a typed
 `file-too-large` `failure_code`: `calc.py is 154 KiB; workers can edit files up to 64 KiB.

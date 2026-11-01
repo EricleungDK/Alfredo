@@ -49,7 +49,9 @@ pub(crate) const SANDBOX_ISOLATION_FLAGS: [&str; 10] = [
 const IMPLICIT_READONLY_ROOTS: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
 const PROTECTED_READONLY_ROOTS: [&str; 7] =
     ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/dev"];
-const ALLOWED_ENVIRONMENT_KEYS: [&str; 19] = [
+const ALLOWED_ENVIRONMENT_KEYS: [&str; 22] = [
+    "CARGO_HOME",
+    "CARGO_NET_OFFLINE",
     "CI",
     "COLORTERM",
     "HOME",
@@ -66,6 +68,7 @@ const ALLOWED_ENVIRONMENT_KEYS: [&str; 19] = [
     "USER",
     "PIP_CACHE_DIR",
     "PYTHONDONTWRITEBYTECODE",
+    "RUSTUP_HOME",
     "npm_config_cache",
     "ALBERT_SESSION_ID",
     "ALBERT_TASK_PACKET",

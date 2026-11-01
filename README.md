@@ -306,8 +306,9 @@ to save; their diff is kept in the run's evidence. See
 - Auto-accept trusts the approved check. If the check passes, the task is accepted;
   a weak check means weak acceptance. Risk-flagged and human-hold reviews still wait
   for you.
-- Checks run in a sandbox with read-only system tools only; toolchains installed in
-  your home directory (e.g. `~/.cargo`, `~/.nvm`) are not visible to checks.
+- Checks run in a sandbox with read-only system tools and your cargo toolchain
+  (`~/.cargo/bin`, registry, `~/.rustup/toolchains`; offline, credentials hidden);
+  other toolchains in your home directory (e.g. `~/.nvm`) are not visible to checks.
 - Work is based on committed HEAD; uncommitted changes are not seen by workers.
 - Autopilot never pushes, never opens PRs and never moves your branch.
 

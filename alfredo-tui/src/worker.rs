@@ -1408,6 +1408,138 @@ pub(crate) fn sandbox_argv(
     argv
 }
 
+/// The owner's offline cargo toolchain as a sandbox sees it: chat `run_command` (issue
+/// #310) and `/go` checks (issue #365) mount exactly these entries read-only. The only
+/// source is the owner's `$HOME` of this process, never a repository file or setting.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Toolchain {
+    /// Canonical `~/.cargo`, exported as `CARGO_HOME`; None when there is none.
+    pub(crate) cargo_home: Option<String>,
+    /// Canonical `~/.rustup`, exported as `RUSTUP_HOME`; None when there is none.
+    pub(crate) rustup_home: Option<String>,
+    /// Read-only binds: the entries listed in [`CARGO_ENTRIES`] and [`RUSTUP_ENTRIES`]
+    /// only. Never the whole homes: `~/.cargo` holds `credentials.toml` and
+    /// `config.toml` (registry tokens), which a model must not read.
+    pub(crate) binds: Vec<String>,
+}
+
+/// Entries of `~/.cargo` an offline build needs: the rustup proxies in `bin`, the
+/// registry index and cache, and git dependency checkouts.
+const CARGO_ENTRIES: [&str; 3] = ["bin", "registry", "git"];
+/// Entries of `~/.rustup` an offline toolchain needs: the installed toolchains and the
+/// settings that name the default one.
+const RUSTUP_ENTRIES: [&str; 2] = ["toolchains", "settings.toml"];
+
+/// Build the [`Toolchain`] for `home`. Only the listed entries are bound, and only when
+/// each is a real directory or file: a symlink is skipped, so it cannot point a bind at
+/// a secret elsewhere, and a missing entry is skipped, so bwrap does not fail on it.
+/// Everything else in those homes (credentials, config, any other file) stays outside.
+pub(crate) fn toolchain_binds(home: Option<&Path>) -> Toolchain {
+    let Some(home) = home else {
+        return Toolchain::default();
+    };
+    let canonical_dir = |name: &str| home.join(name).canonicalize().ok().filter(|p| p.is_dir());
+    let real_entry = |dir: &Path, name: &str| {
+        // symlink_metadata does not follow links, so a symlink is neither dir nor file.
+        let meta = std::fs::symlink_metadata(dir.join(name)).ok()?;
+        (meta.is_dir() || meta.is_file())
+            .then(|| dir.join(name).to_str().map(str::to_string))
+            .flatten()
+    };
+    let mut toolchain = Toolchain::default();
+    if let Some(cargo) = canonical_dir(".cargo") {
+        toolchain
+            .binds
+            .extend(CARGO_ENTRIES.iter().filter_map(|e| real_entry(&cargo, e)));
+        toolchain.cargo_home = cargo.to_str().map(str::to_string);
+    }
+    if let Some(rustup) = canonical_dir(".rustup") {
+        toolchain
+            .binds
+            .extend(RUSTUP_ENTRIES.iter().filter_map(|e| real_entry(&rustup, e)));
+        toolchain.rustup_home = rustup.to_str().map(str::to_string);
+    }
+    toolchain
+}
+
+impl Toolchain {
+    /// The toolchain under this process's `$HOME`: what every sandbox mounts.
+    pub(crate) fn owned() -> Self {
+        toolchain_binds(std::env::var_os("HOME").map(PathBuf::from).as_deref())
+    }
+
+    /// The binds a sandbox rooted at `root` adds: an entry inside the workspace is
+    /// already mounted with it, so it is skipped.
+    pub(crate) fn mounts(&self, root: &str) -> Vec<String> {
+        self.binds
+            .iter()
+            .filter(|bind| !Path::new(bind).starts_with(root))
+            .cloned()
+            .collect()
+    }
+
+    /// `~/.cargo/bin` when it is mounted: the one directory a check's PATH gains.
+    pub(crate) fn bin_dir(&self) -> Option<String> {
+        let bin = format!("{}/bin", self.cargo_home.as_ref()?);
+        self.binds.contains(&bin).then_some(bin)
+    }
+
+    /// The environment of a `/go` check: the system PATH first, then the mounted cargo
+    /// `bin`; the cargo and rustup homes and `CARGO_NET_OFFLINE` when they exist. Nothing
+    /// else of the owner's environment (no token variables) reaches a check.
+    pub(crate) fn check_environment(&self) -> BTreeMap<String, String> {
+        let mut path = String::from("/usr/bin:/bin");
+        if let Some(bin) = self.bin_dir() {
+            path.push(':');
+            path.push_str(&bin);
+        }
+        let mut environment = BTreeMap::from([
+            ("PATH".to_string(), path),
+            ("HOME".to_string(), "/tmp".to_string()),
+            ("CI".to_string(), "1".to_string()),
+        ]);
+        if let Some(cargo) = &self.cargo_home {
+            environment.insert("CARGO_HOME".into(), cargo.clone());
+            environment.insert("CARGO_NET_OFFLINE".into(), "true".into());
+        }
+        if let Some(rustup) = &self.rustup_home {
+            environment.insert("RUSTUP_HOME".into(), rustup.clone());
+        }
+        environment
+    }
+
+    /// The toolchain a recorded check request carries: the binds after the Git file
+    /// and the two home variables.
+    pub(crate) fn from_request(request: &ExecutionRequest) -> Self {
+        Self {
+            cargo_home: request.environment.get("CARGO_HOME").cloned(),
+            rustup_home: request.environment.get("RUSTUP_HOME").cloned(),
+            binds: request
+                .sandbox
+                .readonly_bindings
+                .iter()
+                .skip(1)
+                .map(|(source, _)| source.clone())
+                .collect(),
+        }
+    }
+
+    /// Whether every bind is one of the listed entries of the recorded homes, once.
+    pub(crate) fn well_formed(&self) -> bool {
+        let entry = |home: &Option<String>, names: &[&str]| -> Vec<String> {
+            home.iter()
+                .flat_map(|home| names.iter().map(move |name| format!("{home}/{name}")))
+                .collect()
+        };
+        let allowed: Vec<String> = entry(&self.cargo_home, &CARGO_ENTRIES)
+            .into_iter()
+            .chain(entry(&self.rustup_home, &RUSTUP_ENTRIES))
+            .collect();
+        let unique: BTreeSet<&String> = self.binds.iter().collect();
+        unique.len() == self.binds.len() && self.binds.iter().all(|bind| allowed.contains(bind))
+    }
+}
+
 /// Approved-file size from which the prompt offers EDIT blocks: about the 4096-token
 /// output cap at four bytes per token, so a smaller file is cheaper to return whole.
 const EDIT_MIN_BYTES: usize = 16 * 1024;
@@ -1444,6 +1576,17 @@ fn answer_tail(edit: bool) -> String {
 }
 
 pub fn check_request(worktree: &Path, task: &Task, mission: &str) -> Result<ExecutionRequest> {
+    check_request_with(worktree, task, mission, &Toolchain::owned())
+}
+
+/// [`check_request`] for an explicit toolchain: its entries are mounted read-only beside
+/// the system roots (issue #365).
+pub(crate) fn check_request_with(
+    worktree: &Path,
+    task: &Task,
+    mission: &str,
+    toolchain: &Toolchain,
+) -> Result<ExecutionRequest> {
     let worktree = worktree.canonicalize().map_err(|e| e.to_string())?;
     let policy = task.policy.as_ref().ok_or("Missing work policy")?;
     policy.validate()?;
@@ -1460,6 +1603,17 @@ pub fn check_request(worktree: &Path, task: &Task, mission: &str) -> Result<Exec
         descendant_grace_seconds: 1.0,
     };
     let mut argv = sandbox_argv(&root, Some(&gitfile), &limits);
+    let mounts = toolchain.mounts(&root);
+    let at = argv
+        .iter()
+        .position(|a| a == "--chdir")
+        .unwrap_or(argv.len());
+    argv.splice(
+        at..at,
+        mounts
+            .iter()
+            .flat_map(|p| ["--ro-bind".to_string(), p.clone(), p.clone()]),
+    );
     argv.extend(policy.check.clone());
     Ok(ExecutionRequest {
         schema_version: 1,
@@ -1480,13 +1634,11 @@ pub fn check_request(worktree: &Path, task: &Task, mission: &str) -> Result<Exec
             mode: "bubblewrap".into(),
             readable_roots: vec![root.clone()],
             writable_roots: vec![root],
-            readonly_bindings: vec![(gitfile.clone(), gitfile)],
+            readonly_bindings: std::iter::once((gitfile.clone(), gitfile))
+                .chain(mounts.iter().map(|p| (p.clone(), p.clone())))
+                .collect(),
         },
-        environment: BTreeMap::from([
-            ("PATH".into(), "/usr/bin:/bin".into()),
-            ("HOME".into(), "/tmp".into()),
-            ("CI".into(), "1".into()),
-        ]),
+        environment: toolchain.check_environment(),
         input_text: None,
         input_sha256: None,
         shell: false,
@@ -3885,5 +4037,311 @@ mod host_git_tests {
             crate::chat_tools::git_read::DEADLINE,
         );
         assert!(!marker.exists(), "blocking git ran the uploadpack program");
+    }
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    use super::{check_request_with, toolchain_binds, Toolchain};
+    use crate::tasks::{Task, TaskRun, TaskStatus, WorkPolicy};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    /// A scratch directory with the cargo and rustup entries a toolchain mounts, plus
+    /// the files that must stay outside it.
+    fn home() -> PathBuf {
+        let home = std::env::temp_dir().join(format!(
+            "alfredo-toolchain-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&home);
+        for dir in [
+            ".cargo/bin",
+            ".cargo/registry",
+            ".cargo/git",
+            ".rustup/toolchains",
+        ] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        fs::write(home.join(".rustup/settings.toml"), "x = 1\n").unwrap();
+        for secret in ["credentials.toml", "credentials", "config.toml"] {
+            fs::write(home.join(".cargo").join(secret), "token = \"t\"\n").unwrap();
+        }
+        home.canonicalize().unwrap()
+    }
+
+    fn names(toolchain: &Toolchain, home: &Path) -> Vec<String> {
+        toolchain
+            .binds
+            .iter()
+            .map(|bind| {
+                Path::new(bind)
+                    .strip_prefix(home)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_the_listed_entries_are_bound_and_never_credentials() {
+        let home = home();
+        let toolchain = toolchain_binds(Some(&home));
+        assert_eq!(
+            names(&toolchain, &home),
+            [
+                ".cargo/bin",
+                ".cargo/registry",
+                ".cargo/git",
+                ".rustup/toolchains",
+                ".rustup/settings.toml"
+            ]
+        );
+        assert_eq!(
+            toolchain.cargo_home.as_deref(),
+            home.join(".cargo").to_str()
+        );
+        assert_eq!(
+            toolchain.rustup_home.as_deref(),
+            home.join(".rustup").to_str()
+        );
+        assert!(toolchain.well_formed());
+        assert_eq!(toolchain_binds(None), Toolchain::default());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_symlinked_or_missing_entry_is_skipped() {
+        let home = home();
+        fs::remove_dir_all(home.join(".cargo/git")).unwrap();
+        fs::remove_dir_all(home.join(".cargo/registry")).unwrap();
+        std::os::unix::fs::symlink(home.join(".rustup"), home.join(".cargo/registry")).unwrap();
+        let toolchain = toolchain_binds(Some(&home));
+        assert_eq!(
+            names(&toolchain, &home),
+            [".cargo/bin", ".rustup/toolchains", ".rustup/settings.toml"]
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn mounts_skip_entries_inside_the_workspace_root() {
+        let home = home();
+        let toolchain = toolchain_binds(Some(&home));
+        let all = toolchain.mounts("/nonexistent-root");
+        assert_eq!(all, toolchain.binds);
+        // A workspace that is the cargo home already holds those entries.
+        let cargo = home.join(".cargo");
+        let rest = toolchain.mounts(cargo.to_str().unwrap());
+        assert_eq!(
+            names(
+                &Toolchain {
+                    binds: rest,
+                    ..Toolchain::default()
+                },
+                &home
+            ),
+            [".rustup/toolchains", ".rustup/settings.toml"]
+        );
+        // A sibling prefix is not inside the root.
+        let sibling = format!("{}-x", cargo.display());
+        assert_eq!(toolchain.mounts(&sibling), toolchain.binds);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn the_check_path_gains_the_cargo_bin_only_when_it_is_mounted() {
+        let home = home();
+        let toolchain = toolchain_binds(Some(&home));
+        let bin = format!("{}/bin", toolchain.cargo_home.as_ref().unwrap());
+        assert_eq!(toolchain.bin_dir().as_deref(), Some(bin.as_str()));
+        assert_eq!(
+            toolchain.check_environment()["PATH"],
+            format!("/usr/bin:/bin:{bin}")
+        );
+        let mut without = toolchain.clone();
+        without.binds.retain(|bind| bind != &bin);
+        assert_eq!(without.bin_dir(), None);
+        assert_eq!(without.check_environment()["PATH"], "/usr/bin:/bin");
+        assert_eq!(Toolchain::default().bin_dir(), None);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn the_check_environment_is_exactly_the_old_one_without_a_toolchain() {
+        let expected: std::collections::BTreeMap<String, String> =
+            [("PATH", "/usr/bin:/bin"), ("HOME", "/tmp"), ("CI", "1")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        assert_eq!(Toolchain::default().check_environment(), expected);
+    }
+
+    #[test]
+    fn the_check_environment_names_the_homes_and_goes_offline() {
+        let home = home();
+        let toolchain = toolchain_binds(Some(&home));
+        let environment = toolchain.check_environment();
+        assert_eq!(
+            environment["CARGO_HOME"],
+            home.join(".cargo").to_str().unwrap()
+        );
+        assert_eq!(
+            environment["RUSTUP_HOME"],
+            home.join(".rustup").to_str().unwrap()
+        );
+        assert_eq!(environment["CARGO_NET_OFFLINE"], "true");
+        assert_eq!(environment["HOME"], "/tmp");
+        assert_eq!(environment["CI"], "1");
+        // Only these keys: no token variable of the owner's environment is copied.
+        assert_eq!(environment.len(), 6);
+        // A rustup home alone does not turn cargo offline mode on.
+        let rustup_only = Toolchain {
+            cargo_home: None,
+            rustup_home: toolchain.rustup_home.clone(),
+            binds: vec![],
+        };
+        let environment = rustup_only.check_environment();
+        assert!(!environment.contains_key("CARGO_HOME"));
+        assert!(!environment.contains_key("CARGO_NET_OFFLINE"));
+        assert!(environment.contains_key("RUSTUP_HOME"));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn well_formed_accepts_only_listed_entries_of_the_recorded_homes() {
+        let home = home();
+        let good = toolchain_binds(Some(&home));
+        assert!(good.well_formed());
+        assert!(Toolchain::default().well_formed());
+        let cargo = good.cargo_home.clone().unwrap();
+        for extra in [
+            format!("{cargo}/credentials.toml"),
+            format!("{cargo}/bin/cargo"),
+            cargo.clone(),
+            "/etc".to_string(),
+        ] {
+            let mut bad = good.clone();
+            bad.binds.push(extra.clone());
+            assert!(!bad.well_formed(), "{extra}");
+        }
+        let mut duplicated = good.clone();
+        duplicated.binds.push(good.binds[0].clone());
+        assert!(!duplicated.well_formed());
+        // Binds without a recorded home are not entries of anything.
+        let orphan = Toolchain {
+            cargo_home: None,
+            rustup_home: good.rustup_home.clone(),
+            binds: good.binds.clone(),
+        };
+        assert!(!orphan.well_formed());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    fn task() -> Task {
+        Task {
+            id: 1,
+            title: "Check".into(),
+            model: "fixture".into(),
+            dependencies: vec![],
+            status: TaskStatus::Running,
+            policy: Some(WorkPolicy {
+                files: vec!["a.rs".into()],
+                check: vec!["cargo".into(), "test".into()],
+            }),
+            run: Some(TaskRun {
+                id: "task-1-run".into(),
+                baseline: "a".repeat(40),
+                inputs: vec![],
+                evidence_sha256: None,
+                detail: String::new(),
+            }),
+            repair_of: None,
+        }
+    }
+
+    fn worktree() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "alfredo-toolchain-tree-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn the_check_request_mounts_each_entry_read_only_between_git_and_the_command() {
+        let home = home();
+        let tree = worktree();
+        let toolchain = toolchain_binds(Some(&home));
+        let request = check_request_with(&tree, &task(), "mission", &toolchain).unwrap();
+        let root = tree.to_str().unwrap();
+        let gitfile = format!("{root}/.git");
+        let mut expected = vec![gitfile.clone()];
+        expected.extend(toolchain.binds.clone());
+        let sources: Vec<&String> = request
+            .sandbox
+            .readonly_bindings
+            .iter()
+            .map(|(source, destination)| {
+                assert_eq!(source, destination);
+                source
+            })
+            .collect();
+        assert_eq!(sources, expected.iter().collect::<Vec<_>>());
+        // Every entry is a --ro-bind (never --bind) after the Git file and before --chdir.
+        let chdir = request.argv.iter().position(|a| a == "--chdir").unwrap();
+        let git = request
+            .argv
+            .windows(3)
+            .position(|w| w == ["--ro-bind", &gitfile, &gitfile])
+            .unwrap();
+        for (offset, bind) in toolchain.binds.iter().enumerate() {
+            let at = git + 3 + offset * 3;
+            assert_eq!(
+                &request.argv[at..at + 3],
+                ["--ro-bind", bind, bind],
+                "{bind}"
+            );
+            assert!(at + 3 <= chdir);
+        }
+        assert_eq!(chdir, git + 3 + toolchain.binds.len() * 3);
+        assert_eq!(
+            request
+                .argv
+                .iter()
+                .filter(|a| a.as_str() == "--bind")
+                .count(),
+            1,
+            "only the worktree is writable"
+        );
+        assert!(!request.argv.iter().any(|a| a.contains("credentials")));
+        assert_eq!(request.environment, toolchain.check_environment());
+        assert_eq!(Toolchain::from_request(&request), toolchain);
+        request.validate().unwrap();
+        let _ = fs::remove_dir_all(home);
+        let _ = fs::remove_dir_all(tree);
+    }
+
+    #[test]
+    fn the_check_request_without_a_toolchain_is_the_old_one() {
+        let tree = worktree();
+        let request = check_request_with(&tree, &task(), "mission", &Toolchain::default()).unwrap();
+        let gitfile = format!("{}/.git", tree.to_str().unwrap());
+        assert_eq!(
+            request.sandbox.readonly_bindings,
+            vec![(gitfile.clone(), gitfile)]
+        );
+        assert_eq!(request.environment["PATH"], "/usr/bin:/bin");
+        assert_eq!(Toolchain::from_request(&request), Toolchain::default());
+        let _ = fs::remove_dir_all(tree);
     }
 }

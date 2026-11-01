@@ -471,7 +471,7 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
         extras.extend(git_common_dir(&root));
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let toolchain = toolchain_binds(home.as_deref());
+    let toolchain = crate::worker::toolchain_binds(home.as_deref());
     extras.extend(toolchain.binds.iter().cloned());
     let cargo_home = toolchain.cargo_home;
     let rustup_home = toolchain.rustup_home;
@@ -558,58 +558,6 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
             stderr: receipt.stderr,
         },
     )
-}
-
-/// The owner's offline toolchain as the sandbox sees it (issue #310).
-#[derive(Debug, Default)]
-struct Toolchain {
-    /// Canonical `~/.cargo`, exported as `CARGO_HOME`; None when there is none.
-    cargo_home: Option<String>,
-    /// Canonical `~/.rustup`, exported as `RUSTUP_HOME`; None when there is none.
-    rustup_home: Option<String>,
-    /// Read-only binds: the entries listed in [`CARGO_ENTRIES`] and [`RUSTUP_ENTRIES`]
-    /// only. Never the whole homes: `~/.cargo` holds `credentials.toml` and
-    /// `config.toml` (registry tokens), which a model must not read.
-    binds: Vec<String>,
-}
-
-/// Entries of `~/.cargo` an offline build needs: the rustup proxies in `bin`, the
-/// registry index and cache, and git dependency checkouts.
-const CARGO_ENTRIES: [&str; 3] = ["bin", "registry", "git"];
-/// Entries of `~/.rustup` an offline toolchain needs: the installed toolchains and the
-/// settings that name the default one.
-const RUSTUP_ENTRIES: [&str; 2] = ["toolchains", "settings.toml"];
-
-/// Build the [`Toolchain`] for `home`. Only the listed entries are bound, and only when
-/// each is a real directory or file: a symlink is skipped, so it cannot point a bind at
-/// a secret elsewhere, and a missing entry is skipped, so bwrap does not fail on it.
-/// Everything else in those homes (credentials, config, any other file) stays outside.
-fn toolchain_binds(home: Option<&Path>) -> Toolchain {
-    let Some(home) = home else {
-        return Toolchain::default();
-    };
-    let canonical_dir = |name: &str| home.join(name).canonicalize().ok().filter(|p| p.is_dir());
-    let real_entry = |dir: &Path, name: &str| {
-        // symlink_metadata does not follow links, so a symlink is neither dir nor file.
-        let meta = std::fs::symlink_metadata(dir.join(name)).ok()?;
-        (meta.is_dir() || meta.is_file())
-            .then(|| dir.join(name).to_str().map(str::to_string))
-            .flatten()
-    };
-    let mut toolchain = Toolchain::default();
-    if let Some(cargo) = canonical_dir(".cargo") {
-        toolchain
-            .binds
-            .extend(CARGO_ENTRIES.iter().filter_map(|e| real_entry(&cargo, e)));
-        toolchain.cargo_home = cargo.to_str().map(str::to_string);
-    }
-    if let Some(rustup) = canonical_dir(".rustup") {
-        toolchain
-            .binds
-            .extend(RUSTUP_ENTRIES.iter().filter_map(|e| real_entry(&rustup, e)));
-        toolchain.rustup_home = rustup.to_str().map(str::to_string);
-    }
-    toolchain
 }
 
 /// The shared Git directory of a linked worktree (holds its per-worktree gitdir too), only
