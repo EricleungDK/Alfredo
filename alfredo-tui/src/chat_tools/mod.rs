@@ -226,10 +226,26 @@ pub(crate) fn excluded(relative: &str) -> bool {
     crate::planning_context::excluded(&relative.to_lowercase())
 }
 
+/// [`excluded`] for the read consumers: the env templates (`.env.example`, `.env.sample`,
+/// `.env.template`) are not excluded. Writes, undo and commits use [`excluded`].
+pub(crate) fn read_excluded(relative: &str) -> bool {
+    crate::planning_context::read_excluded(&relative.to_lowercase())
+}
+
 /// Resolve `path` (relative to the workspace) to an existing path inside it.
 /// Refuses absolute paths, `..`, excluded paths ([`excluded`]), and symlinks that
 /// lead outside.
 pub fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
+    resolve_by(root, path, excluded)
+}
+
+/// [`resolve`] for reads (`read_file`, `grep`, `list_files`, `@path`): the env templates
+/// are allowed. Every write path uses [`resolve`].
+pub fn resolve_read(root: &Path, path: &str) -> Result<PathBuf, String> {
+    resolve_by(root, path, read_excluded)
+}
+
+fn resolve_by(root: &Path, path: &str, excluded: fn(&str) -> bool) -> Result<PathBuf, String> {
     let relative = Path::new(path.trim());
     for component in relative.components() {
         match component {
@@ -329,7 +345,7 @@ pub(crate) fn confined_name(workspace: &Path, opened: &Path) -> Result<(), Strin
     let inside = opened
         .strip_prefix(&root)
         .map_err(|_| "leaves the Coding Workspace through a symlink; refused".to_string())?;
-    if excluded(&inside.to_string_lossy().replace('\\', "/")) {
+    if read_excluded(&inside.to_string_lossy().replace('\\', "/")) {
         return Err("excluded (Git metadata, secrets or generated files)".into());
     }
     Ok(())

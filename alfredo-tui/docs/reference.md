@@ -1743,7 +1743,13 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   context. Matching ignores case and applies to every path component:
   `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.azure` and `.password-store` directories
   (everything under them); `.config/gh` (everything under it); `.env*` and `*.env`
-  (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+  (`.env`, `prod.env`); only for reads (`read_file`, `grep`, `list_files`, `git_diff`,
+  `@path` and planner context) the three exact file names `.env.example`, `.env.sample` and
+  `.env.template` in any directory are readable, as they hold no secrets (a directory of
+  that name exempts nothing under it, `.env.example.local` and `.envrc` stay refused, and
+  writes, edits, undo and commits still refuse all three; tracked status is not checked, so a
+  named untracked template is readable, while discovery still hides git-ignored files);
+  `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
   `kubeconfig.yaml`, `kubeconfig.yml` and `application_default_credentials.json`;
   `_netrc`, `.my.cnf`, `.terraformrc`, `terraform.rc`, `auth.json` (Composer),

@@ -856,3 +856,259 @@ fn apply_refusal_keeps_an_intent_to_add_entry() {
     let intent = git(&repo.root, &["diff", "--name-only", "--diff-filter=A"]);
     assert_eq!(intent, "notes.txt\n", "intent-to-add entry lost");
 }
+
+/// Issue #505: committed secret-free env templates, by exact basename in any directory.
+const ENV_TEMPLATES: &[&str] = &[
+    ".env.example",
+    "config/.env.example",
+    ".env.sample",
+    "web/app/.env.sample",
+    ".env.template",
+    "services/api/.env.template",
+];
+
+/// Issue #505: names that look like the templates but stay refused (every other `.env*`
+/// name, `*.env`, `.envrc`, extra suffixes, and a template name used as a directory).
+const ENV_TEMPLATE_NEAR_MISSES: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.example.local",
+    ".env.example.bak",
+    ".env.examples",
+    ".env.sample.local",
+    ".env.template.local",
+    ".env.templates",
+    ".env.example~",
+    ".env.exampl",
+    ".env.sampl",
+    ".env.templat",
+    ".env.example.env",
+    "prod.env",
+    "example.env",
+    ".envrc",
+    // The template name must be the whole final component: a longer name that merely
+    // contains it as a suffix is `.env`-prefixed or `.env`-suffixed, so still refused.
+    ".env.x.env.example",
+    "foo.env.sample.env",
+    "config/.env.local",
+    ".env.example/.env",
+    ".env.example/secrets.txt",
+    "config/.env.sample/notes.txt",
+    ".env.template/nested/file.txt",
+];
+
+fn env_template_marker(index: usize) -> String {
+    format!("TEMPLATE-MARKER-{index}-5b1c")
+}
+
+/// Issue #505: each committed template is read by `read_file`, found by `grep`, listed,
+/// attached by `@path` and carried by the planner's named-file reader.
+#[tokio::test]
+async fn issue_505_env_templates_are_readable_by_each_path() {
+    let repo = Repo::plain();
+    for (index, path) in ENV_TEMPLATES.iter().enumerate() {
+        repo.write(path, &format!("{}\n", env_template_marker(index)));
+    }
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-q", "-m", "templates"]);
+    let listing = repo.run("list_files", json!({}));
+    for (index, path) in ENV_TEMPLATES.iter().enumerate() {
+        let secret = env_template_marker(index);
+
+        let read = repo.run("read_file", json!({"path": path}));
+        assert!(read.contains(&secret), "read_file {path}: {read}");
+        assert!(!read.contains("excluded"), "read_file {path}: {read}");
+
+        let grep = repo.run("grep", json!({"pattern": secret}));
+        assert!(grep.contains(path), "grep {path}: {grep}");
+        let grep_file = repo.run("grep", json!({"pattern": secret, "path": path}));
+        assert!(grep_file.contains(&secret), "grep in {path}: {grep_file}");
+
+        assert!(
+            listing.lines().any(|line| line == *path),
+            "list_files misses {path}: {listing}"
+        );
+
+        let mention = alfredo_tui::chat_mentions::attach(&repo.root, &format!("see @{path}"));
+        assert!(mention.block.contains(&secret), "@{path}: {mention:?}");
+        assert!(
+            mention.files.iter().any(|file| file == path),
+            "@{path}: {mention:?}"
+        );
+        assert!(mention.notices.is_empty(), "@{path}: {:?}", mention.notices);
+    }
+
+    let baseline = git(&repo.root, &["rev-parse", "HEAD"]).trim().to_string();
+    let names = ENV_TEMPLATES.join(" ");
+    let texts = planning_context::named_sources(&repo.root, &baseline, &[], &[&names], &[])
+        .await
+        .unwrap();
+    assert_eq!(texts.len(), ENV_TEMPLATES.len());
+    for (index, entry) in texts.iter().enumerate() {
+        let content = entry.content.as_ref().unwrap_or_else(|why| {
+            panic!("named read {} refused: {why}", entry.path);
+        });
+        assert!(
+            content.contains(&env_template_marker(index)),
+            "{}",
+            entry.path
+        );
+    }
+}
+
+/// Issue #505: the case rule is unchanged, so a template name in any case is a template.
+#[test]
+fn issue_505_template_names_ignore_case_like_the_rest_of_the_list() {
+    let repo = Repo::plain();
+    for path in [".ENV.EXAMPLE", "Config/.Env.Sample"] {
+        repo.write(path, "TEMPLATE-CASE\n");
+        let read = repo.run("read_file", json!({"path": path}));
+        assert!(read.contains("TEMPLATE-CASE"), "read_file {path}: {read}");
+    }
+}
+
+/// Issue #505: every near miss stays refused by each chat tool and `@path`, and the
+/// shared predicate agrees, so the exemption is exactly the three basenames.
+#[test]
+fn issue_505_near_miss_env_names_stay_refused() {
+    let repo = Repo::plain();
+    for (index, path) in ENV_TEMPLATE_NEAR_MISSES.iter().enumerate() {
+        repo.write(path, &format!("{}\n", marker(2000 + index)));
+    }
+    for (index, path) in ENV_TEMPLATE_NEAR_MISSES.iter().enumerate() {
+        let secret = marker(2000 + index);
+
+        let read = repo.run("read_file", json!({"path": path}));
+        assert!(!read.contains(&secret), "read_file {path}: {read}");
+        assert!(read.contains("excluded"), "read_file {path}: {read}");
+
+        let grep = repo.run("grep", json!({"pattern": secret}));
+        assert_eq!(grep, "no matches", "grep {path}");
+
+        let mention = alfredo_tui::chat_mentions::attach(&repo.root, &format!("see @{path}"));
+        assert!(!mention.block.contains(&secret), "@{path}: {mention:?}");
+        assert!(
+            !mention.files.iter().any(|file| file == path),
+            "@{path} attached: {mention:?}"
+        );
+    }
+    let listing = repo.run("list_files", json!({}));
+    for path in ENV_TEMPLATE_NEAR_MISSES {
+        assert!(
+            !listing.lines().any(|line| line == *path),
+            "list_files shows {path}: {listing}"
+        );
+    }
+}
+
+/// Issue #505: a git-ignored file stays hidden from discovery even under a template name.
+#[test]
+fn issue_505_ignored_templates_stay_hidden_from_discovery() {
+    let repo = Repo::plain();
+    repo.write(".gitignore", ".env.example\n.env.sample\n");
+    repo.write(".env.example", "IGNORED-TEMPLATE-MARKER\n");
+    repo.write(".env.sample", "IGNORED-TEMPLATE-MARKER\n");
+    repo.write(".env.template", "VISIBLE-TEMPLATE-MARKER\n");
+    let listing = repo.run("list_files", json!({}));
+    assert!(!listing.contains(".env.example"), "{listing}");
+    assert!(!listing.contains(".env.sample"), "{listing}");
+    assert!(
+        listing.lines().any(|line| line == ".env.template"),
+        "{listing}"
+    );
+    let grep = repo.run("grep", json!({"pattern": "IGNORED-TEMPLATE-MARKER"}));
+    assert_eq!(grep, "no matches");
+    let visible = repo.run("grep", json!({"pattern": "VISIBLE-TEMPLATE-MARKER"}));
+    assert!(visible.contains(".env.template"), "{visible}");
+}
+
+/// Issue #505: only reads are loosened. The write tools and the commit gate refuse the
+/// template names exactly as before, as they refuse `.env.local`, whether the file is
+/// new, exists, or is already staged.
+#[test]
+fn issue_505_templates_stay_refused_for_writes_and_commits() {
+    let repo = Repo::plain();
+    for path in [
+        ".env.example",
+        "config/.env.sample",
+        ".env.template",
+        ".env.local",
+    ] {
+        let write = repo
+            .card("write_file", json!({"path": path, "content": "x\n"}))
+            .unwrap_err();
+        assert!(write.contains("excluded"), "write_file new {path}: {write}");
+
+        repo.write(path, "KEY=1\n");
+        let write = repo
+            .card("write_file", json!({"path": path, "content": "x\n"}))
+            .unwrap_err();
+        assert!(write.contains("excluded"), "write_file {path}: {write}");
+        let edit = repo
+            .card(
+                "edit_file",
+                json!({"path": path, "old_text": "KEY", "new_text": "OTHER"}),
+            )
+            .unwrap_err();
+        assert!(edit.contains("excluded"), "edit_file {path}: {edit}");
+
+        let commit = repo
+            .card("git_commit", json!({"message": "add it", "files": [path]}))
+            .unwrap_err();
+        assert!(
+            commit.contains("by hand") || commit.contains("excluded"),
+            "git_commit {path}: {commit}"
+        );
+        // Staged by hand, then committed without naming it.
+        git(&repo.root, &["add", "-f", "--", path]);
+        let staged = repo
+            .card("git_commit", json!({"message": "add it"}))
+            .unwrap_err();
+        assert!(staged.contains(path), "staged git_commit {path}: {staged}");
+        assert!(
+            staged.contains("by hand"),
+            "staged git_commit {path}: {staged}"
+        );
+        git(&repo.root, &["reset", "-q", "--", path]);
+    }
+}
+
+/// Issue #505: `git_diff` is a read, so it shows a changed template like `read_file`
+/// does, and still hides a changed `.env.local` beside it.
+#[test]
+fn issue_505_git_diff_shows_a_changed_template_but_not_other_env_files() {
+    let repo = Repo::plain();
+    for path in [".env.example", ".env.local"] {
+        repo.write(path, "DIFF-505 v1\n");
+    }
+    git(&repo.root, &["add", "-f", "-A"]);
+    git(&repo.root, &["commit", "-q", "-m", "env files"]);
+    for path in [".env.example", ".env.local"] {
+        repo.write(path, "DIFF-505 v2\n");
+    }
+    for arguments in [json!({}), json!({"path": ".env.example"})] {
+        let diff = repo.run("git_diff", arguments.clone());
+        assert!(diff.contains("DIFF-505 v2"), "git_diff {arguments}: {diff}");
+        assert!(!diff.contains(".env.local"), "git_diff {arguments}: {diff}");
+    }
+    let local = repo.run("git_diff", json!({"path": ".env.local"}));
+    assert!(local.contains("excluded"), "{local}");
+}
+
+/// Issue #505: the planner's repository capture includes a committed env template and
+/// still leaves out `.env.local` beside it.
+#[tokio::test]
+async fn issue_505_planner_capture_includes_templates_but_not_other_env_files() {
+    let repo = Repo::plain();
+    repo.write(".env.example", "CAPTURE-TEMPLATE-505\n");
+    repo.write(".env.local", "CAPTURE-LOCAL-505\n");
+    git(&repo.root, &["add", "-f", "--", "."]);
+    git(&repo.root, &["commit", "-q", "-m", "env files"]);
+    let context = planning_context::capture(&repo.root, "document the env example and local")
+        .await
+        .unwrap();
+    let serialized = serde_json::to_string(&context).unwrap();
+    assert!(serialized.contains("CAPTURE-TEMPLATE-505"), "{serialized}");
+    assert!(!serialized.contains("CAPTURE-LOCAL-505"), "{serialized}");
+}
