@@ -197,6 +197,39 @@ fn stream_json_chat_prints_tool_events_then_the_result_object() {
     let _ = fs::remove_dir_all(&root);
 }
 
+#[test]
+fn text_output_format_is_the_default_single_json_object() {
+    let root = repository("textfmt");
+    let fixture = scripted_chat(vec![done("Plain answer.")]);
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "Hi", "--headless", "--output-format", "text"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let value = result(&output);
+    assert_eq!(value["state"], "done");
+    assert_eq!(value["reply"], "Plain answer.");
+    assert!(value.get("type").is_none() && value.get("v").is_none());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_unknown_output_format_exits_two_naming_the_choices() {
+    let root = repository("badfmt");
+    let fixture = scripted_chat(vec![done("unused")]);
+    for extra in [&["--output-format", "xml"][..], &["--output-format"]] {
+        let mut args = vec!["--chat", "Hi", "--headless"];
+        args.extend_from_slice(extra);
+        let output = run(&root, &fixture, &args);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("Error: --output-format needs text or stream-json"));
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// A final frame carrying the server's counts, as Ollama sends them (issue #283).
 fn counted(reply: Reply, prompt: u64, eval: u64, total_ns: u64) -> Reply {
     let Reply::Stream(mut frames, delay) = reply else {
