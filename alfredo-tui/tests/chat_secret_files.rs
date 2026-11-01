@@ -887,6 +887,10 @@ const ENV_TEMPLATE_NEAR_MISSES: &[&str] = &[
     "prod.env",
     "example.env",
     ".envrc",
+    // The template name must be the whole final component: a longer name that merely
+    // contains it as a suffix is `.env`-prefixed or `.env`-suffixed, so still refused.
+    ".env.x.env.example",
+    "foo.env.sample.env",
     "config/.env.local",
     ".env.example/.env",
     ".env.example/secrets.txt",
@@ -998,8 +1002,7 @@ fn issue_505_near_miss_env_names_stay_refused() {
     }
 }
 
-/// Issue #505: a git-ignored file stays hidden from discovery even under a template name,
-/// and the edit tools still refuse a template (the rule loosens reads, not writes).
+/// Issue #505: a git-ignored file stays hidden from discovery even under a template name.
 #[test]
 fn issue_505_ignored_templates_stay_hidden_from_discovery() {
     let repo = Repo::plain();
@@ -1018,4 +1021,55 @@ fn issue_505_ignored_templates_stay_hidden_from_discovery() {
     assert_eq!(grep, "no matches");
     let visible = repo.run("grep", json!({"pattern": "VISIBLE-TEMPLATE-MARKER"}));
     assert!(visible.contains(".env.template"), "{visible}");
+}
+
+/// Issue #505: only reads are loosened. The write tools and the commit gate refuse the
+/// template names exactly as before, as they refuse `.env.local`, whether the file is
+/// new, exists, or is already staged.
+#[test]
+fn issue_505_templates_stay_refused_for_writes_and_commits() {
+    let repo = Repo::plain();
+    for path in [
+        ".env.example",
+        "config/.env.sample",
+        ".env.template",
+        ".env.local",
+    ] {
+        let write = repo
+            .card("write_file", json!({"path": path, "content": "x\n"}))
+            .unwrap_err();
+        assert!(write.contains("excluded"), "write_file new {path}: {write}");
+
+        repo.write(path, "KEY=1\n");
+        let write = repo
+            .card("write_file", json!({"path": path, "content": "x\n"}))
+            .unwrap_err();
+        assert!(write.contains("excluded"), "write_file {path}: {write}");
+        let edit = repo
+            .card(
+                "edit_file",
+                json!({"path": path, "old_text": "KEY", "new_text": "OTHER"}),
+            )
+            .unwrap_err();
+        assert!(edit.contains("excluded"), "edit_file {path}: {edit}");
+
+        let commit = repo
+            .card("git_commit", json!({"message": "add it", "files": [path]}))
+            .unwrap_err();
+        assert!(
+            commit.contains("by hand") || commit.contains("excluded"),
+            "git_commit {path}: {commit}"
+        );
+        // Staged by hand, then committed without naming it.
+        git(&repo.root, &["add", "-f", "--", path]);
+        let staged = repo
+            .card("git_commit", json!({"message": "add it"}))
+            .unwrap_err();
+        assert!(staged.contains(path), "staged git_commit {path}: {staged}");
+        assert!(
+            staged.contains("by hand"),
+            "staged git_commit {path}: {staged}"
+        );
+        git(&repo.root, &["reset", "-q", "--", path]);
+    }
 }
