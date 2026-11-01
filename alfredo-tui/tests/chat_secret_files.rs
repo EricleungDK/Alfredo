@@ -856,3 +856,166 @@ fn apply_refusal_keeps_an_intent_to_add_entry() {
     let intent = git(&repo.root, &["diff", "--name-only", "--diff-filter=A"]);
     assert_eq!(intent, "notes.txt\n", "intent-to-add entry lost");
 }
+
+/// Issue #505: committed secret-free env templates, by exact basename in any directory.
+const ENV_TEMPLATES: &[&str] = &[
+    ".env.example",
+    "config/.env.example",
+    ".env.sample",
+    "web/app/.env.sample",
+    ".env.template",
+    "services/api/.env.template",
+];
+
+/// Issue #505: names that look like the templates but stay refused (every other `.env*`
+/// name, `*.env`, `.envrc`, extra suffixes, and a template name used as a directory).
+const ENV_TEMPLATE_NEAR_MISSES: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.example.local",
+    ".env.example.bak",
+    ".env.examples",
+    ".env.sample.local",
+    ".env.template.local",
+    ".env.templates",
+    ".env.example~",
+    ".env.exampl",
+    ".env.sampl",
+    ".env.templat",
+    ".env.example.env",
+    "prod.env",
+    "example.env",
+    ".envrc",
+    "config/.env.local",
+    ".env.example/.env",
+    ".env.example/secrets.txt",
+    "config/.env.sample/notes.txt",
+    ".env.template/nested/file.txt",
+];
+
+fn env_template_marker(index: usize) -> String {
+    format!("TEMPLATE-MARKER-{index}-5b1c")
+}
+
+/// Issue #505: each committed template is read by `read_file`, found by `grep`, listed,
+/// attached by `@path` and carried by the planner's named-file reader.
+#[tokio::test]
+async fn issue_505_env_templates_are_readable_by_each_path() {
+    let repo = Repo::plain();
+    for (index, path) in ENV_TEMPLATES.iter().enumerate() {
+        repo.write(path, &format!("{}\n", env_template_marker(index)));
+    }
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-q", "-m", "templates"]);
+    let listing = repo.run("list_files", json!({}));
+    for (index, path) in ENV_TEMPLATES.iter().enumerate() {
+        let secret = env_template_marker(index);
+
+        let read = repo.run("read_file", json!({"path": path}));
+        assert!(read.contains(&secret), "read_file {path}: {read}");
+        assert!(!read.contains("excluded"), "read_file {path}: {read}");
+
+        let grep = repo.run("grep", json!({"pattern": secret}));
+        assert!(grep.contains(path), "grep {path}: {grep}");
+        let grep_file = repo.run("grep", json!({"pattern": secret, "path": path}));
+        assert!(grep_file.contains(&secret), "grep in {path}: {grep_file}");
+
+        assert!(
+            listing.lines().any(|line| line == *path),
+            "list_files misses {path}: {listing}"
+        );
+
+        let mention = alfredo_tui::chat_mentions::attach(&repo.root, &format!("see @{path}"));
+        assert!(mention.block.contains(&secret), "@{path}: {mention:?}");
+        assert!(
+            mention.files.iter().any(|file| file == path),
+            "@{path}: {mention:?}"
+        );
+        assert!(mention.notices.is_empty(), "@{path}: {:?}", mention.notices);
+    }
+
+    let baseline = git(&repo.root, &["rev-parse", "HEAD"]).trim().to_string();
+    let names = ENV_TEMPLATES.join(" ");
+    let texts = planning_context::named_sources(&repo.root, &baseline, &[], &[&names], &[])
+        .await
+        .unwrap();
+    assert_eq!(texts.len(), ENV_TEMPLATES.len());
+    for (index, entry) in texts.iter().enumerate() {
+        let content = entry.content.as_ref().unwrap_or_else(|why| {
+            panic!("named read {} refused: {why}", entry.path);
+        });
+        assert!(
+            content.contains(&env_template_marker(index)),
+            "{}",
+            entry.path
+        );
+    }
+}
+
+/// Issue #505: the case rule is unchanged, so a template name in any case is a template.
+#[test]
+fn issue_505_template_names_ignore_case_like_the_rest_of_the_list() {
+    let repo = Repo::plain();
+    for path in [".ENV.EXAMPLE", "Config/.Env.Sample"] {
+        repo.write(path, "TEMPLATE-CASE\n");
+        let read = repo.run("read_file", json!({"path": path}));
+        assert!(read.contains("TEMPLATE-CASE"), "read_file {path}: {read}");
+    }
+}
+
+/// Issue #505: every near miss stays refused by each chat tool and `@path`, and the
+/// shared predicate agrees, so the exemption is exactly the three basenames.
+#[test]
+fn issue_505_near_miss_env_names_stay_refused() {
+    let repo = Repo::plain();
+    for (index, path) in ENV_TEMPLATE_NEAR_MISSES.iter().enumerate() {
+        repo.write(path, &format!("{}\n", marker(2000 + index)));
+    }
+    for (index, path) in ENV_TEMPLATE_NEAR_MISSES.iter().enumerate() {
+        let secret = marker(2000 + index);
+
+        let read = repo.run("read_file", json!({"path": path}));
+        assert!(!read.contains(&secret), "read_file {path}: {read}");
+        assert!(read.contains("excluded"), "read_file {path}: {read}");
+
+        let grep = repo.run("grep", json!({"pattern": secret}));
+        assert_eq!(grep, "no matches", "grep {path}");
+
+        let mention = alfredo_tui::chat_mentions::attach(&repo.root, &format!("see @{path}"));
+        assert!(!mention.block.contains(&secret), "@{path}: {mention:?}");
+        assert!(
+            !mention.files.iter().any(|file| file == path),
+            "@{path} attached: {mention:?}"
+        );
+    }
+    let listing = repo.run("list_files", json!({}));
+    for path in ENV_TEMPLATE_NEAR_MISSES {
+        assert!(
+            !listing.lines().any(|line| line == *path),
+            "list_files shows {path}: {listing}"
+        );
+    }
+}
+
+/// Issue #505: a git-ignored file stays hidden from discovery even under a template name,
+/// and the edit tools still refuse a template (the rule loosens reads, not writes).
+#[test]
+fn issue_505_ignored_templates_stay_hidden_from_discovery() {
+    let repo = Repo::plain();
+    repo.write(".gitignore", ".env.example\n.env.sample\n");
+    repo.write(".env.example", "IGNORED-TEMPLATE-MARKER\n");
+    repo.write(".env.sample", "IGNORED-TEMPLATE-MARKER\n");
+    repo.write(".env.template", "VISIBLE-TEMPLATE-MARKER\n");
+    let listing = repo.run("list_files", json!({}));
+    assert!(!listing.contains(".env.example"), "{listing}");
+    assert!(!listing.contains(".env.sample"), "{listing}");
+    assert!(
+        listing.lines().any(|line| line == ".env.template"),
+        "{listing}"
+    );
+    let grep = repo.run("grep", json!({"pattern": "IGNORED-TEMPLATE-MARKER"}));
+    assert_eq!(grep, "no matches");
+    let visible = repo.run("grep", json!({"pattern": "VISIBLE-TEMPLATE-MARKER"}));
+    assert!(visible.contains(".env.template"), "{visible}");
+}

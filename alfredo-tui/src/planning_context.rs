@@ -1007,4 +1007,45 @@ mod tests {
         assert!(!secret("pkg/vendor/lib.go"));
         assert!(!secret("src/main.rs"));
     }
+
+    /// Issue #505: exactly the three template basenames are exempt, only as the final
+    /// component; every other `.env*` name and any directory of that name stays refused.
+    #[test]
+    fn secret_exempts_only_the_exact_env_template_basenames() {
+        for name in [".env.example", ".env.sample", ".env.template"] {
+            assert!(!secret(name), "{name}");
+            assert!(!secret(&format!("config/{name}")), "config/{name}");
+            assert!(!secret(&format!("./{name}")), "./{name}");
+            assert!(!secret(&format!("a//b/{name}")), "a//b/{name}");
+            assert!(!secret(&name.to_uppercase()), "{name} upper");
+            assert!(!excluded(name), "excluded {name}");
+            // A directory with that name does not exempt its contents or `..` escapes.
+            assert!(secret(&format!("{name}/x.txt")), "{name}/x.txt");
+            assert!(secret(&format!("{name}/.env")), "{name}/.env");
+            assert!(secret(&format!("{name}/..")), "{name}/..");
+            assert!(secret(&format!("{name}/../.env")), "{name}/../.env");
+            // Near misses: an added or missing character, or a second suffix.
+            assert!(secret(&format!("{name}x")), "{name}x");
+            assert!(secret(&format!("{name}.local")), "{name}.local");
+            assert!(secret(&format!("{name}.env")), "{name}.env");
+            assert!(!secret(&format!("x{name}")), "x{name}");
+            assert!(
+                secret(&name[..name.len() - 1]),
+                "{}",
+                &name[..name.len() - 1]
+            );
+        }
+        for name in [
+            ".env",
+            ".env.local",
+            ".env.production",
+            ".env.example.local",
+            ".ENV.EXAMPLE.LOCAL",
+            "prod.env",
+            ".envrc",
+            "config/.env.local",
+        ] {
+            assert!(secret(name), "{name}");
+        }
+    }
 }
