@@ -254,6 +254,25 @@ with its command), so a long run of evictions never hits the cap. Command number
 therefore can change at that point: a `/retry-command` or "command #N" notice from before
 it may name a different command afterwards. A refused command never renumbers anything.
 
+### Event stream: `--output-format stream-json`
+
+With `--headless` (`--go`, `--resume` or `--chat`), `--output-format stream-json` makes stdout one JSON
+object per line, each `{"v":1,"type":…}` (`v` is the schema version). Without the flag, or with
+`--output-format text`, output is unchanged: one JSON object and the stderr progress lines. Any other value,
+or the flag without `--headless`, exits 2 with nothing on stdout.
+
+| `type` | Run | Fields |
+| --- | --- | --- |
+| `task_started` | `--go`, `--resume` | `id` of a task that began running |
+| `repair` | `--go`, `--resume` | `id`, `cause` (`check failed`, ...), `head` (the repair task's id) |
+| `check` | `--go`, `--resume` | `id`, `passed`; `reason` when `passed` is false |
+| `tool` | `--chat` | `tool`, `path` (or `null`), `result` (`ok`, `denied`, `malformed`, `error`), `detail` when not `ok` |
+| `result` | all | the final object described in this section, plus `v` and `type`; always the last line |
+
+Stdout carries only these lines. Stderr keeps the same progress lines as without the flag, exit codes are
+unchanged, and a setup error (exit 2) prints nothing on stdout. New event types or fields may be added
+within version 1; consumers should ignore unknown ones.
+
 ### Paused runs: `--resume --headless`
 
 A run left paused (SIGINT/SIGTERM, `/stop`, an autopilot self-pause, or a restart of

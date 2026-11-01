@@ -154,6 +154,82 @@ fn scripted_policy_approves_workspace_edits_and_logs_them() {
     let _ = fs::remove_dir_all(&root);
 }
 
+#[test]
+fn stream_json_chat_prints_tool_events_then_the_result_object() {
+    let root = repository("stream");
+    let fixture = scripted_chat(edit_script());
+    let output = run(
+        &root,
+        &fixture,
+        &[
+            "--chat",
+            "Make greet say Hi",
+            "--headless",
+            "--approve",
+            "workspace-edits",
+            "--output-format",
+            "stream-json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let events: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(events.iter().all(|e| e["v"] == 1 && e["type"].is_string()));
+    let tools: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "tool")
+        .map(|e| e["tool"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(tools, ["grep", "read_file", "edit_file"]);
+    assert_eq!(events[0]["result"], "ok");
+    let last = events.last().unwrap();
+    assert_eq!(last["type"], "result");
+    assert_eq!(events.iter().filter(|e| e["type"] == "result").count(), 1);
+    assert_eq!(last["state"], "done");
+    assert_eq!(last["reply"], "Changed the greeting to Hi.");
+    assert_eq!(last["calls"].as_array().unwrap().len(), 3);
+    // Progress text stays on stderr as without the flag.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("chat · model fixture · approvals: workspace-edits"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn text_output_format_is_the_default_single_json_object() {
+    let root = repository("textfmt");
+    let fixture = scripted_chat(vec![done("Plain answer.")]);
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "Hi", "--headless", "--output-format", "text"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let value = result(&output);
+    assert_eq!(value["state"], "done");
+    assert_eq!(value["reply"], "Plain answer.");
+    assert!(value.get("type").is_none() && value.get("v").is_none());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_unknown_output_format_exits_two_naming_the_choices() {
+    let root = repository("badfmt");
+    let fixture = scripted_chat(vec![done("unused")]);
+    for extra in [&["--output-format", "xml"][..], &["--output-format"]] {
+        let mut args = vec!["--chat", "Hi", "--headless"];
+        args.extend_from_slice(extra);
+        let output = run(&root, &fixture, &args);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("Error: --output-format needs text or stream-json"));
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// A final frame carrying the server's counts, as Ollama sends them (issue #283).
 fn counted(reply: Reply, prompt: u64, eval: u64, total_ns: u64) -> Reply {
     let Reply::Stream(mut frames, delay) = reply else {
