@@ -376,3 +376,31 @@ fn steered_attempt_shows_partial_output_then_a_dim_cut_marker() {
     let turns = agent_view::project(&[steered], &[], false);
     assert!(!labels(&turns).contains(&"Worker"));
 }
+
+#[test]
+fn check_command_quotes_arguments_with_spaces_in_instruction_and_check_turns() {
+    let mut first = attempt(2, TaskStatus::Running);
+    first.check = vec![
+        "python3".into(),
+        "-c".into(),
+        "import sys; sys.exit(1)".into(),
+    ];
+    first.live = Some(Live {
+        stage: "check".into(),
+        prompt: None,
+        output: answer(),
+        check_output: String::new(),
+        checking: true,
+        cancelling: false,
+    });
+    let turns = agent_view::project(&[first], &[], false);
+    let quoted = "python3 -c 'import sys; sys.exit(1)'";
+    assert!(
+        text(&turns[0])
+            .iter()
+            .any(|line| line.ends_with(&format!("check {quoted}"))),
+        "{:?}",
+        text(&turns[0])
+    );
+    assert_eq!(text(&turns[2])[0], quoted);
+}

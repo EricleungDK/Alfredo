@@ -584,3 +584,41 @@ fn pane_without_task_state_lists_chats() {
     assert!(screen.contains("◈ ○ chat 2"), "{screen}");
     assert!(!screen.contains("Sessions"), "{screen}");
 }
+
+fn check_row(argv: &[&str]) -> String {
+    let mut task = task(1, "Create textutil", TaskStatus::Accepted, None);
+    task.policy.as_mut().unwrap().check = argv.iter().map(|arg| arg.to_string()).collect();
+    let mut fixture = fixture(vec![task]);
+    fixture.select(1);
+    let buffer = fixture.render(140, 40);
+    let detail = region(&buffer, 35, 2, 105, 30);
+    detail
+        .lines()
+        .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+        .find_map(|line| {
+            line.strip_prefix("Check")
+                .map(|rest| rest.trim().to_string())
+        })
+        .unwrap_or_else(|| panic!("no Check row in:\n{detail}"))
+}
+
+#[test]
+fn task_panel_check_row_single_quotes_an_argument_with_a_space() {
+    assert_eq!(
+        check_row(&["/usr/bin/python3", "-c", "import sys; sys.exit(1)"]),
+        "/usr/bin/python3 -c 'import sys; sys.exit(1)'"
+    );
+}
+
+#[test]
+fn task_panel_check_rows_differ_when_only_the_argv_split_differs() {
+    let one = check_row(&["python3", "-c", "import sys; sys.exit(1)"]);
+    let split = check_row(&["python3", "-c", "import", "sys;", "sys.exit(1)"]);
+    assert_eq!(split, "python3 -c import sys; sys.exit(1)");
+    assert_ne!(one, split);
+}
+
+#[test]
+fn task_panel_check_row_renders_empty_and_quoted_arguments_unambiguously() {
+    assert_eq!(check_row(&["echo", "", "it's"]), "echo '' 'it'\\''s'");
+}

@@ -2661,6 +2661,31 @@ mod commit_message_tests {
         }
     }
 
+    fn check_line(argv: &[&str]) -> String {
+        let mut task = task("Add flag", None);
+        task.policy.as_mut().unwrap().check = argv.iter().map(|arg| arg.to_string()).collect();
+        let message = candidate_message(&task, &[], "r");
+        let body = message.split_once("\n\n").unwrap().1.to_string();
+        body.split_once(" · check: ").unwrap().1.to_string()
+    }
+
+    #[test]
+    fn commit_check_line_single_quotes_arguments_with_spaces() {
+        assert_eq!(
+            check_line(&["python3", "-c", "import sys; sys.exit(1)"]),
+            "python3 -c 'import sys; sys.exit(1)'"
+        );
+        assert_eq!(check_line(&["echo", "", "it's"]), "echo '' 'it'\\''s'");
+    }
+
+    #[test]
+    fn commit_check_line_keeps_the_four_hundred_char_cap() {
+        let long = "x ".repeat(500);
+        let line = check_line(&["python3", "-c", &long]);
+        assert_eq!(line.chars().count(), 400);
+        assert!(line.starts_with("python3 -c 'x x "));
+    }
+
     #[test]
     fn subject_is_title_and_body_has_provenance() {
         let message = candidate_message(&task("Add verbose flag", None), &[], "task-3-run-8");
