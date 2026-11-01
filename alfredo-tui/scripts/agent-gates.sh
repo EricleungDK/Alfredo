@@ -47,7 +47,7 @@ gate "cargo audit" bash -c 'cd alfredo-tui && cargo audit --file Cargo.lock --de
 echo; echo "| Gate | Result | Note |"; echo "|---|---|---|"
 fail=0
 for i in "${!names[@]}"; do echo "| ${names[$i]} | ${results[$i]} | ${notes[$i]} |"; [ "${results[$i]}" = FAIL ] && fail=1; done
-if grep -qsE 'bubblewrap|Bubblewrap executable' "$LOG"/cargo_test.log 2>/dev/null; then
+if [ "${results[2]}" = FAIL ] && grep -qsE 'bubblewrap|Bubblewrap executable' "$LOG"/cargo_test.log 2>/dev/null; then
   echo; echo "Note: some failures mention bubblewrap — environmental unless bwrap is installed (source agent-env.sh)."; fi
 if [ -n "$JSON" ]; then
   python3 - "$JSON" "${#names[@]}" "${names[@]}" "${results[@]}" <<'PY'
