@@ -196,6 +196,105 @@ class ZeroCeremonyStart(unittest.TestCase):
                     second.close()
 
 
+class DispatchSurvivesBusyStore(unittest.TestCase):
+    def test_dispatch_stays_on_when_the_task_store_is_briefly_busy(self):
+        # Issue #565: dispatch refreshes the task store every 250 ms, and the store lock
+        # gives up quickly. Another holder (a worker finishing, a slow disk) makes a
+        # read-only refresh fail with "busy"; up to TRANSIENT_LIMIT (5) such ticks in a row
+        # must not switch dispatch off, or an approved task such as #5 never starts
+        # although nothing refused it.
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-busy-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-busy-repo-') as repo:
+            root = os.path.realpath(repo)
+            subprocess.run(['git', '-C', root, 'init', '-q', '--template='], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], root, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'/dispatch on\r')
+                terminal.wait_for('   dispatch on')
+                lock = next(Path(state).rglob('tasks.lock'))
+                with open(lock, 'rb') as held:
+                    fcntl.flock(held, fcntl.LOCK_EX)
+                    try:
+                        # Ticks come at most every ~250 ms (never faster), so 0.8 s holds at most 4 busy
+                        # ticks, below TRANSIENT_LIMIT (5), however fast the box; slower only means fewer.
+                        deadline = time.monotonic() + 0.8
+                        while time.monotonic() < deadline:
+                            if select.select([terminal.master], [], [], 0.05)[0]:
+                                chunk = os.read(terminal.master, 65536)
+                                terminal.output.extend(chunk)
+                                if b'\x1b[6n' in chunk:
+                                    os.write(terminal.master, b'\x1b[1;1R')
+                    finally:
+                        fcntl.flock(held, fcntl.LOCK_UN)
+                # Let a redraw after the last busy tick land before looking at the header.
+                deadline = time.monotonic() + 0.75
+                while time.monotonic() < deadline:
+                    if select.select([terminal.master], [], [], 0.05)[0]:
+                        chunk = os.read(terminal.master, 65536)
+                        terminal.output.extend(chunk)
+                        if b'\x1b[6n' in chunk:
+                            os.write(terminal.master, b'\x1b[1;1R')
+                header = terminal.screen().split('\n')[0]
+                self.assertIn('dispatch on', header, terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+
+
+class DispatchStopsWhenBusyStoreStaysBusy(unittest.TestCase):
+    def test_dispatch_turns_off_when_the_task_store_stays_busy(self):
+        # Issue #565: the busy-store allowance is bounded. More than TRANSIENT_LIMIT (5)
+        # consecutive busy refreshes still switch dispatch off, so a wedged store cannot keep
+        # an unattended dispatcher running blind. The lock is held until that happens (30 s
+        # cap), so the test waits on the condition, not on tick arithmetic.
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-stuck-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-stuck-repo-') as repo:
+            root = os.path.realpath(repo)
+            subprocess.run(['git', '-C', root, 'init', '-q', '--template='], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], root, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'/dispatch on\r')
+                terminal.wait_for('   dispatch on')
+                lock = next(Path(state).rglob('tasks.lock'))
+                with open(lock, 'rb') as held:
+                    fcntl.flock(held, fcntl.LOCK_EX)
+                    try:
+                        # Keep the store busy until dispatch goes off (the sixth busy tick),
+                        # however slowly the ticks arrive on a loaded runner.
+                        deadline = time.monotonic() + 30
+                        while time.monotonic() < deadline:
+                            if 'dispatch on' not in terminal.screen().split('\n')[0]:
+                                break
+                            if select.select([terminal.master], [], [], 0.05)[0]:
+                                chunk = os.read(terminal.master, 65536)
+                                terminal.output.extend(chunk)
+                                if b'\x1b[6n' in chunk:
+                                    os.write(terminal.master, b'\x1b[1;1R')
+                    finally:
+                        fcntl.flock(held, fcntl.LOCK_UN)
+                # The notice redraw may lag the last refresh tick; wait for it.
+                deadline = time.monotonic() + 5
+                while 'dispatch on' in terminal.screen().split('\n')[0] and time.monotonic() < deadline:
+                    if select.select([terminal.master], [], [], 0.05)[0]:
+                        chunk = os.read(terminal.master, 65536)
+                        terminal.output.extend(chunk)
+                        if b'\x1b[6n' in chunk:
+                            os.write(terminal.master, b'\x1b[1;1R')
+                header = terminal.screen().split('\n')[0]
+                self.assertNotIn('dispatch on', header, terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+
+
 class MissionFlagsInsideRepository(unittest.TestCase):
     def test_mission_flags_without_workspace_use_the_repository_of_the_current_directory(self):
         binary = Path(os.environ.get('ALFREDO_TUI_BINARY',

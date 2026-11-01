@@ -74,8 +74,10 @@ pub struct TaskControl {
     store: TaskStore,
     sender: mpsc::Sender<Checked>,
     receiver: mpsc::Receiver<Checked>,
-    background_sender: mpsc::Sender<Outcome>,
-    background_receiver: mpsc::Receiver<Outcome>,
+    background_sender: mpsc::Sender<Checked>,
+    background_receiver: mpsc::Receiver<Checked>,
+    /// Consecutive transient (busy) background refreshes while dispatch is on.
+    refresh_transient: u32,
     refreshing: bool,
     pub snapshot: Option<Snapshot>,
     observed_revision: Option<u64>,
@@ -205,6 +207,7 @@ impl TaskControl {
             receiver,
             background_sender,
             background_receiver,
+            refresh_transient: 0,
             refreshing: false,
             snapshot: None,
             observed_revision: None,
@@ -488,13 +491,11 @@ impl TaskControl {
             let before = self.refresh_fingerprint();
             match result {
                 Ok(mut projection) => {
+                    self.refresh_transient = 0;
                     projection.notice = self.notice.clone();
                     self.apply_outcome(Ok(projection));
                 }
-                Err(error) => {
-                    self.disable_dispatch();
-                    self.notice = format!("Task refresh failed; dispatch off: {error}");
-                }
+                Err(refusal) => self.background_refresh_failed(&refusal),
             }
             changed |= before != self.refresh_fingerprint();
         }
@@ -619,6 +620,30 @@ impl TaskControl {
             self.notice =
                 format!("Automatic launch #{task} deferred: {reason}; retrying on current state");
         }
+    }
+
+    /// A background read failed. A busy store is a skipped tick (dispatch stays
+    /// on, the last snapshot is kept) for up to `TRANSIENT_LIMIT` consecutive
+    /// failures; any other error, or one more busy tick, turns dispatch off.
+    fn background_refresh_failed(&mut self, refusal: &Refusal) {
+        use crate::dispatch::TRANSIENT_LIMIT;
+        if refusal.transient() {
+            if !self.dispatch.enabled {
+                return;
+            }
+            self.refresh_transient = self.refresh_transient.saturating_add(1);
+            if self.refresh_transient <= TRANSIENT_LIMIT {
+                return;
+            }
+            self.disable_dispatch();
+            self.notice = format!(
+                "Task refresh failed {} times in a row; dispatch off: {refusal}",
+                TRANSIENT_LIMIT + 1
+            );
+            return;
+        }
+        self.disable_dispatch();
+        self.notice = format!("Task refresh failed; dispatch off: {refusal}");
     }
 
     /// The intent was refused before any write, so it can only be refused again.
@@ -1408,6 +1433,7 @@ impl TaskControl {
     /// Invalidates every previously prepared toggle and pending enable.
     pub fn disable_dispatch(&mut self) {
         self.dispatch.enabled = false;
+        self.refresh_transient = 0;
         self.dispatch_origin = None;
         self.controller_epoch = self.controller_epoch.saturating_add(1);
         if let Some(request) = self.control_pending.take() {
@@ -1557,7 +1583,7 @@ impl TaskControl {
         let sender = self.background_sender.clone();
         runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                store.snapshot().map(|snapshot| {
+                store.snapshot_checked().map(|snapshot| {
                     let run_observations = Some(store.run_observations(&snapshot));
                     let scope_state = store.understanding().snapshot();
                     Projection {
@@ -1572,7 +1598,7 @@ impl TaskControl {
                 })
             })
             .await
-            .unwrap_or_else(|_| Err("Background task reader stopped".into()));
+            .unwrap_or_else(|_| Err(Refusal::from("Background task reader stopped")));
             let _ = sender.send(result).await;
         });
     }
@@ -2590,6 +2616,178 @@ mod refusal_notice_tests {
         )));
         assert!(control.notice.contains("/retry-task"), "{}", control.notice);
         assert!(control.retry.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn dispatching() -> (TaskControl, std::path::PathBuf) {
+        let (mut control, root) = control();
+        control.dispatch.enabled = true;
+        (control, root)
+    }
+
+    fn fail(control: &mut TaskControl, refusal: Refusal) {
+        assert!(control.background_sender.try_send(Err(refusal)).is_ok());
+        control.poll();
+    }
+
+    #[test]
+    fn a_held_store_lock_reads_as_busy_and_a_free_one_as_a_snapshot() {
+        let (control, root) = control();
+        assert!(control.store.snapshot_checked().is_ok());
+        let lock = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(
+                control
+                    .store
+                    .conversation_directory()
+                    .unwrap()
+                    .join("tasks.lock"),
+            )
+            .unwrap();
+        assert!(lock.try_lock().is_ok());
+        assert!(matches!(
+            control.store.snapshot_checked(),
+            Err(Refusal::Busy)
+        ));
+        drop(lock);
+        assert!(control.store.snapshot_checked().is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn poll_until(control: &mut TaskControl, done: impl Fn(&TaskControl) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done(control) && std::time::Instant::now() < deadline {
+            control.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(done(control), "background refresh result never arrived");
+    }
+
+    #[test]
+    fn background_refresh_of_a_free_store_delivers_a_snapshot_and_resets_the_count() {
+        let (mut control, root) = dispatching();
+        control.refresh_transient = 3;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(control.snapshot.is_none());
+        control.refresh_background(&runtime);
+        poll_until(&mut control, |c| c.snapshot.is_some());
+        assert_eq!(control.refresh_transient, 0);
+        assert!(control.dispatch.enabled);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn background_refresh_of_a_held_store_arrives_as_busy_and_is_counted() {
+        let (mut control, root) = dispatching();
+        let lock = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(
+                control
+                    .store
+                    .conversation_directory()
+                    .unwrap()
+                    .join("tasks.lock"),
+            )
+            .unwrap();
+        assert!(lock.try_lock().is_ok());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        control.refresh_background(&runtime);
+        poll_until(&mut control, |c| c.refresh_transient == 1);
+        assert!(control.dispatch.enabled);
+        assert!(control.snapshot.is_none());
+        drop(lock);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn busy_refreshes_up_to_the_limit_keep_dispatch_on_and_the_snapshot() {
+        let (mut control, root) = dispatching();
+        control.notice = "kept".into();
+        for _ in 0..crate::dispatch::TRANSIENT_LIMIT {
+            fail(&mut control, Refusal::Busy);
+            assert!(control.dispatch.enabled);
+        }
+        assert_eq!(control.notice, "kept");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn one_busy_refresh_past_the_limit_turns_dispatch_off_visibly() {
+        let (mut control, root) = dispatching();
+        for _ in 0..=crate::dispatch::TRANSIENT_LIMIT {
+            fail(&mut control, Refusal::Busy);
+        }
+        assert!(!control.dispatch.enabled);
+        assert_eq!(
+            control.notice,
+            "Task refresh failed 6 times in a row; dispatch off: Task store is busy; refresh and retry"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_real_refresh_error_turns_dispatch_off_at_once() {
+        let (mut control, root) = dispatching();
+        fail(&mut control, Refusal::Denied("disk unreadable".into()));
+        assert!(!control.dispatch.enabled);
+        assert_eq!(
+            control.notice,
+            "Task refresh failed; dispatch off: disk unreadable"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_successful_refresh_resets_the_busy_count() {
+        let (mut control, root) = dispatching();
+        for _ in 0..crate::dispatch::TRANSIENT_LIMIT {
+            fail(&mut control, Refusal::Busy);
+        }
+        let snapshot = control.store.snapshot().unwrap();
+        assert!(control
+            .background_sender
+            .try_send(Ok((snapshot, String::new()).into()))
+            .is_ok());
+        control.poll();
+        for _ in 0..crate::dispatch::TRANSIENT_LIMIT {
+            fail(&mut control, Refusal::Busy);
+        }
+        assert!(control.dispatch.enabled);
+        fail(&mut control, Refusal::Busy);
+        assert!(!control.dispatch.enabled);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn user_dispatch_off_clears_the_busy_count() {
+        let (mut control, root) = dispatching();
+        for _ in 0..crate::dispatch::TRANSIENT_LIMIT {
+            fail(&mut control, Refusal::Busy);
+        }
+        control.disable_dispatch();
+        control.dispatch.enabled = true;
+        for _ in 0..crate::dispatch::TRANSIENT_LIMIT {
+            fail(&mut control, Refusal::Busy);
+        }
+        assert!(control.dispatch.enabled);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn busy_refreshes_while_dispatch_is_off_do_not_count_or_change_anything() {
+        let (mut control, root) = control();
+        control.notice = "kept".into();
+        for _ in 0..=crate::dispatch::TRANSIENT_LIMIT {
+            fail(&mut control, Refusal::Busy);
+        }
+        assert_eq!(control.notice, "kept");
+        control.dispatch.enabled = true;
+        for _ in 0..crate::dispatch::TRANSIENT_LIMIT {
+            fail(&mut control, Refusal::Busy);
+        }
+        assert!(control.dispatch.enabled);
         let _ = std::fs::remove_dir_all(root);
     }
 
