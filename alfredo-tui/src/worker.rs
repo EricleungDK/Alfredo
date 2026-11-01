@@ -2374,7 +2374,7 @@ fn candidate_message(task: &Task, tasks: &[Task], run: &str) -> String {
             body,
             " · files: {} · check: {}",
             commit_line(&policy.files.join(", "), 400),
-            commit_line(&policy.check.join(" "), 400)
+            commit_line(&crate::argv_display::check_line(&policy.check), 400)
         );
     }
     if let Some(parent) = task.repair_of {
@@ -2659,6 +2659,36 @@ mod commit_message_tests {
             run: None,
             repair_of,
         }
+    }
+
+    fn check_line(argv: &[&str]) -> String {
+        let mut task = task("Add flag", None);
+        task.policy.as_mut().unwrap().check = argv.iter().map(|arg| arg.to_string()).collect();
+        let message = candidate_message(&task, &[], "r");
+        let body = message.split_once("\n\n").unwrap().1.to_string();
+        body.split_once(" · check: ").unwrap().1.to_string()
+    }
+
+    #[test]
+    fn commit_check_line_single_quotes_arguments_with_spaces() {
+        assert_eq!(
+            check_line(&["python3", "-c", "import sys; sys.exit(1)"]),
+            "python3 -c 'import sys; sys.exit(1)'"
+        );
+        assert_eq!(check_line(&["echo", "", "it's"]), "echo '' 'it'\\''s'");
+    }
+
+    #[test]
+    fn commit_check_line_keeps_the_four_hundred_char_cap() {
+        let long = "x ".repeat(500);
+        let line = check_line(&["python3", "-c", &long]);
+        // The cut may drop a trailing space, so the cap is 400 or one short of it.
+        assert!(
+            (399..=400).contains(&line.chars().count()),
+            "{}",
+            line.chars().count()
+        );
+        assert!(line.starts_with("python3 -c 'x x "));
     }
 
     #[test]

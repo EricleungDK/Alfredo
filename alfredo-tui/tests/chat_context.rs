@@ -175,3 +175,18 @@ fn context_stays_bounded_for_huge_patches_and_many_tasks() {
     assert!(message.content.contains("#40"));
     assert!(message.content.contains("truncated"));
 }
+
+#[test]
+fn chat_check_line_quotes_arguments_with_spaces() {
+    let mut snapshot = snapshot();
+    snapshot.tasks[0].policy.as_mut().unwrap().check = vec![
+        "python3".into(),
+        "-c".into(),
+        "import sys; sys.exit(1)".into(),
+    ];
+    let text = chat_context::system_message(Some(&snapshot), |_| None).content;
+    assert!(
+        text.contains("Check: python3 -c 'import sys; sys.exit(1)'"),
+        "{text}"
+    );
+}

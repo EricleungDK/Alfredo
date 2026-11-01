@@ -380,7 +380,7 @@ fn work_detail(
         lines.extend(labeled("Files", &policy.files.join(", "), width, normal));
         lines.extend(labeled(
             "Check",
-            &safe_visible(&policy.check.join(" ")),
+            &safe_visible(&crate::argv_display::check_line(&policy.check)),
             width,
             normal,
         ));

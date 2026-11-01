@@ -2111,3 +2111,25 @@ fn plan_cancel_of_an_inflight_generation_stops_it_and_clears_the_binding() {
         .is_none());
     let _ = server.join();
 }
+
+#[test]
+fn plan_draft_check_line_single_quotes_an_argument_with_a_space() {
+    let mut draft = plan();
+    draft.tasks[0].policy.check = vec![
+        "python3".into(),
+        "-c".into(),
+        "import sys; sys.exit(1)".into(),
+        String::new(),
+    ];
+    let fixture = Fixture::new();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.planner.draft = Some(draft);
+    assert!(
+        control
+            .planner
+            .view()
+            .contains("check: python3 -c 'import sys; sys.exit(1)' ''"),
+        "{}",
+        control.planner.view()
+    );
+}
