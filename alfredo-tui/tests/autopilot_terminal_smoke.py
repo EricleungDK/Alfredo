@@ -418,6 +418,46 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertNotIn('is proposed; /approve', terminal.screen())
         self.quit(terminal)
 
+    def test_interrupted_run_refusals_name_the_status_and_recover_not_internal_rules(self):
+        # Issue #559: after a crash the task stays running with no worker in this process.
+        self.fixture.single_task = True
+        self.fixture.hold_calc = threading.Event()
+        self.fixture.release_app.set()
+        terminal = self.terminal(resume=False)
+        terminal.send('/plan add answer function\r')
+        self.screen_has(terminal, 'Not saved or approved', 60)
+        self.wait_until('draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
+        terminal.send('/plan-save\r')
+        self.screen_has(terminal, 'Plan saved', 30)
+        terminal.send('/approve 1\r')
+        self.wait_until('task 1 approved', lambda: self.statuses() == [(1, 'approved', None)])
+        terminal.send('/run 1\r')
+        self.wait_until('worker asked', lambda: 'CALC' in self.fixture.markers(), 60)
+        self.wait_until('task 1 running', lambda: self.statuses() == [(1, 'running', None)])
+        terminal.kill()  # kill -9: no worker survives, the store still says running
+        self.fixture.hold_calc.set()
+        terminal = self.terminal(resume=True)
+        for command in ('/run 1', '/accept 1', '/cancel-task 1', '/repair 1 try again'):
+            terminal.send(command + '\r')
+            self.screen_has(terminal, 'Task #1 is running; ')
+            self.screen_has(terminal, '/recover 1 if its worker died')
+            screen = terminal.screen()
+            for internal in ('acquire a new worker owner', 'start paused', 'no evidence receipt',
+                             'needs a proposed or approved'):
+                self.assertNotIn(internal, screen, command)
+            # Clear the footer so the next command's message is its own.
+            terminal.send(b'/chat\r')
+            self.wait_until('footer cleared', lambda: 'Task #1 is running; ' not in terminal.screen())
+        terminal.send('/tasks #1\r')
+        self.screen_has(terminal, 'Stage')
+        self.screen_has(terminal, '/recover 1')
+        screen = terminal.screen()
+        self.assertNotIn('/recover ID', screen)
+        self.assertNotIn('start paused', screen)
+        self.assertEqual(self.statuses(), [(1, 'running', None)])
+        self.assertEqual(self.fixture.markers().count('CALC'), 1)
+        self.quit(terminal)
+
     def test_esc_on_a_generating_plan_revise_says_the_earlier_draft_was_kept(self):
         # Issue #538: Esc left the footer on a stale message and the pane on "No tasks".
         terminal = self.terminal(resume=False)

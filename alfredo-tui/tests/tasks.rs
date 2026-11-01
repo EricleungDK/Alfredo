@@ -959,6 +959,100 @@ fn run_on_a_running_task_keeps_its_own_refusal_not_the_status_hint() {
 }
 
 #[test]
+fn cancelled_never_ran_task_run_hint_is_a_command_the_store_accepts() {
+    let fixture = Fixture::new();
+    let (store, revision) = task_in_status(&fixture, TaskStatus::Cancelled, true);
+    assert!(store.snapshot().unwrap().tasks[0].run.is_none());
+    // The store refuses what the old hint recommended.
+    let error = refusal(&fixture, &store, revision, Action::Requeue { task: 1 });
+    assert!(error.contains("Requeue requires"), "{error}");
+    let (control, messages) = run_then_render(&store, &["/run 1", "/task Replacement work"]);
+    let joined = messages.join(" | ");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Task #1 was cancelled before it ran")),
+        "{joined}"
+    );
+    assert!(joined.contains("/task"), "{joined}");
+    assert!(!joined.contains("/requeue"), "{joined}");
+    assert!(!joined.contains("/run 1 first"), "{joined}");
+    assert!(!control.dispatch.failures.contains_key(&1));
+    // The command it names is accepted: it adds new work and leaves #1 cancelled.
+    let snapshot = store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks.len(), 2, "{joined}");
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Cancelled);
+}
+
+#[test]
+fn not_run_view_for_cancelled_task_names_task_command() {
+    let fixture = Fixture::new();
+    let (store, _) = task_in_status(&fixture, TaskStatus::Cancelled, true);
+    let before = fs::read(fixture.file()).unwrap();
+    for command in ["/evidence 1", "/accept 1", "/recover 1", "/branch 1"] {
+        let (_, messages) = run_then_render(&store, &[command]);
+        let joined = messages.join(" | ");
+        assert!(!joined.contains("/run 1"), "{command}: {joined}");
+        assert!(!joined.contains("/requeue"), "{command}: {joined}");
+        if command != "/accept 1" {
+            assert!(
+                joined.contains("Task #1 was cancelled before it ran; /task"),
+                "{command}: {joined}"
+            );
+        }
+    }
+    assert_eq!(fs::read(fixture.file()).unwrap(), before);
+}
+
+#[test]
+fn run_on_running_task_without_worker_names_status_not_internal_rule() {
+    let fixture = Fixture::new();
+    let (store, _) = task_in_status(&fixture, TaskStatus::Running, true);
+    let before = fs::read(fixture.file()).unwrap();
+    let (mut control, messages) = run_then_render(&store, &["/run 1"]);
+    let joined = messages.join(" | ");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.starts_with("Task #1 is running")),
+        "{joined}"
+    );
+    assert!(joined.contains("/recover 1"), "{joined}");
+    assert!(!joined.contains("acquire a new worker owner"), "{joined}");
+    assert!(control.workers.is_empty());
+    assert!(!control.dispatch.failures.contains_key(&1), "{joined}");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    control.command(&runtime, "/tasks #1", "fixture").unwrap();
+    let text = inspector_text(&control);
+    assert!(text.contains("Task #1"), "{text}");
+    assert!(!text.contains("start paused"), "{text}");
+    assert_eq!(fs::read(fixture.file()).unwrap(), before);
+    assert_eq!(
+        store.snapshot().unwrap().tasks[0].status,
+        TaskStatus::Running
+    );
+}
+
+#[test]
+fn accept_cancel_task_and_repair_on_running_task_without_worker_name_recover() {
+    let fixture = Fixture::new();
+    let (store, _) = task_in_status(&fixture, TaskStatus::Running, true);
+    let before = fs::read(fixture.file()).unwrap();
+    for command in ["/accept 1", "/cancel-task 1", "/repair 1 try again"] {
+        let (_, messages) = run_then_render(&store, &[command]);
+        let joined = messages.join(" | ");
+        assert!(joined.contains("Task #1 is running"), "{command}: {joined}");
+        assert!(joined.contains("/recover 1"), "{command}: {joined}");
+        assert!(!joined.contains("no evidence receipt"), "{command}: {joined}");
+        assert!(
+            !joined.contains("needs a proposed or approved"),
+            "{command}: {joined}"
+        );
+    }
+    assert_eq!(fs::read(fixture.file()).unwrap(), before);
+}
+
+#[test]
 fn refused_run_leaves_no_start_paused_row_once_the_task_is_approved() {
     let fixture = Fixture::new();
     let store = fixture.store("run-then-approve");
