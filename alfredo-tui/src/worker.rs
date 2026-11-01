@@ -2374,7 +2374,7 @@ fn candidate_message(task: &Task, tasks: &[Task], run: &str) -> String {
             body,
             " · files: {} · check: {}",
             commit_line(&policy.files.join(", "), 400),
-            commit_line(&policy.check.join(" "), 400)
+            commit_line(&crate::argv_display::check_line(&policy.check), 400)
         );
     }
     if let Some(parent) = task.repair_of {
@@ -2682,7 +2682,12 @@ mod commit_message_tests {
     fn commit_check_line_keeps_the_four_hundred_char_cap() {
         let long = "x ".repeat(500);
         let line = check_line(&["python3", "-c", &long]);
-        assert_eq!(line.chars().count(), 400);
+        // The cut may drop a trailing space, so the cap is 400 or one short of it.
+        assert!(
+            (399..=400).contains(&line.chars().count()),
+            "{}",
+            line.chars().count()
+        );
         assert!(line.starts_with("python3 -c 'x x "));
     }
 

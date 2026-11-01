@@ -356,7 +356,7 @@ fn task_detail_is_labeled_sections_without_instructions() {
         "{detail}"
     );
     assert!(
-        lines[files + 1].starts_with("│ Check    python3 -c import textutil"),
+        lines[files + 1].starts_with("│ Check    python3 -c 'import textutil'"),
         "{detail}"
     );
     for noise in [
@@ -621,4 +621,15 @@ fn task_panel_check_rows_differ_when_only_the_argv_split_differs() {
 #[test]
 fn task_panel_check_row_renders_empty_and_quoted_arguments_unambiguously() {
     assert_eq!(check_row(&["echo", "", "it's"]), "echo '' 'it'\\''s'");
+}
+
+#[test]
+fn task_panel_check_row_still_escapes_control_and_bidi_characters() {
+    let row = check_row(&["echo", "a\u{202e}b", "c d\u{1b}[31m"]);
+    assert!(
+        !row.contains('\u{202e}') && !row.contains('\u{1b}'),
+        "{row:?}"
+    );
+    assert!(row.starts_with("echo "), "{row:?}");
+    assert!(row.contains("'c d"), "{row:?}");
 }
