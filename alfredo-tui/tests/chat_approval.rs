@@ -989,6 +989,41 @@ fn tab_indented_card_lines_keep_their_indent_and_args_stay_escaped() {
     assert!(!text.contains('\u{202e}'), "{text}");
 }
 
+/// Issue #510: a rewrite with two distant changes shows both hunks, only the changed
+/// lines, hidden characters escaped as before, and applies exactly the previewed bytes.
+#[test]
+fn a_scattered_rewrite_card_shows_minimal_hunks_and_applies_the_previewed_bytes() {
+    let root = workspace("minimal-hunks");
+    let old: String = (1..=100).map(|n| format!("x{n}\n")).collect();
+    let new = old
+        .replacen("x1\n", "first\u{202e}\n", 1)
+        .replacen("x100\n", "last\n", 1);
+    fs::write(root.join("mod.py"), &old).unwrap();
+    let write = call("write_file", json!({"path": "mod.py", "content": &new}));
+    let card = approval::card(&root, &write).unwrap();
+    assert_eq!(
+        card.preview,
+        "@@ line 1 @@\n-x1\n+first\u{202e}\n@@ line 100 @@\n-x100\n+last"
+    );
+    let text = card_screen(root.clone(), &write);
+    assert!(text.contains("+first<U+202E>"), "{text}");
+    assert!(!text.contains("x50"), "{text}");
+    let root = workspace("minimal-hunks-apply");
+    fs::write(root.join("mod.py"), &old).unwrap();
+    let card = approval::card(&root, &write).unwrap();
+    // The file changing after the preview still refuses the apply.
+    fs::write(root.join("mod.py"), old.replacen("x50\n", "other\n", 1)).unwrap();
+    assert!(approval::apply(&root, &card).is_err());
+    assert_eq!(
+        fs::read_to_string(root.join("mod.py")).unwrap(),
+        old.replacen("x50\n", "other\n", 1)
+    );
+    fs::write(root.join("mod.py"), &old).unwrap();
+    approval::apply(&root, &card).unwrap();
+    assert_eq!(fs::read_to_string(root.join("mod.py")).unwrap(), new);
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #273: a chat parked on a card says it needs the owner, not "thinking".
 #[test]
 fn a_pending_card_shows_approve_in_the_side_pane_row_and_the_header() {

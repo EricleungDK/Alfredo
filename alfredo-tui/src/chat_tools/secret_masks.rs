@@ -52,7 +52,8 @@ pub(crate) struct Mounts {
 }
 
 impl Masks {
-    fn len(&self) -> usize {
+    /// How many files and directories are masked, for the count in a run's result note.
+    pub(crate) fn len(&self) -> usize {
         self.files.len() + self.dirs.len()
     }
 
@@ -160,7 +161,7 @@ impl Scan {
                 }
                 if self.masks.len() > LIMIT {
                     return Err(format!(
-                        "the workspace has more than {LIMIT} secret files and directories to hide"
+                        "the workspace has more than {LIMIT} secret files and directories to hide; remove or rename them, or move them out of the Coding Workspace"
                     ));
                 }
                 continue;

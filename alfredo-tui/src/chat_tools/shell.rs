@@ -439,6 +439,18 @@ impl Drop for Hold {
     }
 }
 
+/// The refusal when the secret masks cannot be built; nothing ran.
+fn hide_refusal(reason: String) -> String {
+    format!(
+        "the sandbox cannot hide every secret file in the Coding Workspace ({reason}); nothing ran"
+    )
+}
+
+/// The line that tells the model why masked files fail: a count only, never a name.
+fn hidden_note(hidden: usize) -> String {
+    format!("note: {hidden} secret file(s)/directory(ies) are hidden in this sandbox and fail with Permission denied; they need the owner, do not retry on the host to read them")
+}
+
 /// Run in the bubblewrap Sandbox at `bwrap`: the worker check boundary rooted at the
 /// Coding Workspace, then `cd` to the cwd inside it.
 fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<String, String> {
@@ -457,11 +469,9 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
     // Secret files and directories are masked before anything is reserved or written, so a
     // refused run leaves no placeholder behind. A refusal never offers escalation: a host
     // run has no masks.
-    let mounts = secret_masks::scan(&root)
-        .and_then(|masks| masks.mounts())
-        .map_err(|reason| {
-            format!("the sandbox cannot hide every secret file in the Coding Workspace ({reason}); nothing ran")
-        })?;
+    let masks = secret_masks::scan(&root).map_err(hide_refusal)?;
+    let hidden = masks.len();
+    let mounts = masks.mounts().map_err(hide_refusal)?;
     let git = root.join(".git");
     // Held until this function returns, on every path, so the placeholder is removed after
     // the run (issue #522).
@@ -576,6 +586,7 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
             stdout: receipt.stdout,
             stderr: receipt.stderr,
         },
+        hidden,
     )
 }
 
@@ -675,6 +686,7 @@ fn on_host(plan: &Plan, stop: &Stop) -> Result<String, String> {
             stdout: String::from_utf8_lossy(&outcome.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&outcome.stderr).into_owned(),
         },
+        0,
     )
 }
 
@@ -699,8 +711,9 @@ fn tail(text: &str, budget: usize) -> String {
     )
 }
 
-/// Exit code first, then output; a timeout is an error (the tree was killed).
-fn report(plan: &Plan, ran: Ran) -> Result<String, String> {
+/// Exit code first, then output; a timeout is an error (the tree was killed). `hidden` is
+/// how many secret paths the sandboxed run masked (0 on the host).
+fn report(plan: &Plan, ran: Ran, hidden: usize) -> Result<String, String> {
     let place = if plan.escalate { "host" } else { "sandboxed" };
     let output = format!(
         "stdout:\n{}\nstderr:\n{}",
@@ -728,6 +741,10 @@ fn report(plan: &Plan, ran: Ran) -> Result<String, String> {
             if !plan.escalate && ran.exit_code != Some(0) {
                 text.push('\n');
                 text.push_str(ESCALATE_HINT);
+            }
+            if hidden > 0 {
+                text.push('\n');
+                text.push_str(&hidden_note(hidden));
             }
             if plan.escalate && ran.exit_code != Some(0) && needed_terminal(&ran.stderr) {
                 text.push('\n');
