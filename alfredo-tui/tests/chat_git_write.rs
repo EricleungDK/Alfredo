@@ -1325,6 +1325,423 @@ fn an_ordinary_submodule_repository_still_commits_its_superproject_changes() {
     assert!(git(&repo.root, &["log", "-1", "--format=%s"]).contains("update readme"));
 }
 
+/// Issue #539: what `git submodule add` / `update --init` leave in `.git/config`: the
+/// submodule's `url` and `active=true`. The fixtures above unset these to reach the other
+/// paths; this puts them back.
+fn keep_submodule_keys(repo: &Repo) {
+    let url = repo.base.join("sub-source").display().to_string();
+    git(&repo.root, &["config", "submodule.sub.url", &url]);
+    git(&repo.root, &["config", "submodule.sub.active", "true"]);
+}
+
+/// Issue #539: an ordinary repository with an initialised submodule (both keys set) and an
+/// edited README.
+fn initialised_submodule_repo(repo: &Repo) {
+    ordinary_submodule_repo(repo);
+    keep_submodule_keys(repo);
+    fs::write(repo.root.join("README.md"), "# Demo\nedited\n").unwrap();
+}
+
+/// The refusal text a repository-config key produces, or `None` when the commit card of
+/// README.md is offered.
+fn readme_commit_refusal(repo: &Repo) -> Option<String> {
+    repo.card(
+        "git_commit",
+        json!({"message": "edit readme", "files": ["README.md"]}),
+    )
+    .err()
+}
+
+/// Issue #539 (criterion 1): `git submodule add` leaves `submodule.sub.url` and
+/// `submodule.sub.active=true` in `.git/config`; a commit of an unrelated file still shows
+/// its card and, once approved, commits.
+#[test]
+fn an_initialised_submodule_does_not_block_a_commit() {
+    let repo = Repo::new();
+    initialised_submodule_repo(&repo);
+    assert_eq!(
+        git(&repo.root, &["config", "--get", "submodule.sub.active"]).trim(),
+        "true"
+    );
+    let before = repo.head();
+    let card = repo
+        .card(
+            "git_commit",
+            json!({"message": "edit readme", "files": ["README.md"]}),
+        )
+        .unwrap();
+    assert_eq!(card.kind, CardKind::Git);
+    assert!(card.preview.contains("README.md"), "{}", card.preview);
+    assert!(!card.preview.contains("sub/"), "{}", card.preview);
+    approval::apply(&repo.root, &card).unwrap();
+    assert_ne!(repo.head(), before);
+    assert!(git(&repo.root, &["log", "-1", "--format=%s"]).contains("edit readme"));
+    assert_eq!(
+        git(&repo.root, &["show", "--name-only", "--format=", "HEAD"]).trim(),
+        "README.md"
+    );
+}
+
+/// Issue #539: the staged-files form and a branch switch and merge work too.
+#[test]
+fn an_initialised_submodule_does_not_block_a_staged_commit_switch_or_merge() {
+    let repo = Repo::new();
+    repo.go_branch();
+    initialised_submodule_repo(&repo);
+    git(&repo.root, &["add", "README.md"]);
+    repo.approve("git_commit", json!({"message": "staged edit"}))
+        .unwrap();
+    repo.approve("git_switch", json!({"branch": "feature/x", "create": true}))
+        .unwrap();
+    git(&repo.root, &["checkout", "-q", "main"]);
+    repo.approve("git_merge", json!({"source": "alfredo/go-7"}))
+        .unwrap();
+    assert!(repo.root.join("feature.txt").exists());
+}
+
+/// Issue #539 (criterion 2): `ignore`, `update` and every other submodule key besides `url`
+/// and a boolean `active` keep chat git writes refused when set in `.git/config`.
+#[test]
+fn other_submodule_keys_in_git_config_keep_writes_refused() {
+    let control = Repo::new();
+    initialised_submodule_repo(&control);
+    assert_eq!(readme_commit_refusal(&control), None);
+    let marker = control.base.join("update-ran");
+    let command = format!("!touch {}", marker.display());
+    for (variable, value) in [
+        ("ignore", "none"),
+        ("ignore", "dirty"),
+        ("ignore", "untracked"),
+        ("ignore", "all"),
+        ("update", command.as_str()),
+        ("update", "checkout"),
+        ("update", "none"),
+        ("branch", "main"),
+        ("shallow", "true"),
+        ("fetchRecurseSubmodules", "true"),
+        ("path", "sub"),
+    ] {
+        let repo = Repo::new();
+        initialised_submodule_repo(&repo);
+        git(
+            &repo.root,
+            &["config", &format!("submodule.sub.{variable}"), value],
+        );
+        let error = readme_commit_refusal(&repo).unwrap_or_default();
+        assert!(
+            error.contains(&format!("submodule.sub.{}", variable.to_lowercase()))
+                && error.contains("do not allow"),
+            "{variable}={value}: {error}"
+        );
+        for (tool, arguments) in [
+            ("git_switch", json!({"branch": "feature/x", "create": true})),
+            ("git_merge", json!({"source": "main"})),
+        ] {
+            let error = repo.card(tool, arguments).err().unwrap_or_default();
+            assert!(error.contains("do not allow"), "{tool} {variable}: {error}");
+        }
+        assert!(!marker.exists(), "{variable}={value} ran a program");
+    }
+}
+
+/// Issue #539: the settings that make a write recurse into or fetch submodules stay refused
+/// (a two-part key is not a per-submodule key).
+#[test]
+fn submodule_recursion_and_pathspec_settings_stay_refused() {
+    for (key, value) in [
+        ("submodule.recurse", "true"),
+        ("submodule.active", "."),
+        ("submodule.fetchJobs", "4"),
+        ("fetch.recurseSubmodules", "true"),
+        ("fetch.recurseSubmodules", "on-demand"),
+        ("push.recurseSubmodules", "on-demand"),
+        ("diff.submodule", "diff"),
+        ("status.submoduleSummary", "true"),
+    ] {
+        let repo = Repo::new();
+        initialised_submodule_repo(&repo);
+        git(&repo.root, &["config", key, value]);
+        let error = readme_commit_refusal(&repo).unwrap_or_default();
+        assert!(
+            error.contains(&key.to_lowercase()) && error.contains("do not allow"),
+            "{key}: {error}"
+        );
+    }
+}
+
+/// Issue #539: `active` takes git booleans only; anything else (a command, a number git
+/// would read as true, an empty value) stays refused.
+#[test]
+fn submodule_active_accepts_only_git_booleans() {
+    let marker = Repo::new().base.join("active-ran");
+    let command = format!("!touch {}", marker.display());
+    for value in [
+        "true", "false", "yes", "no", "on", "off", "1", "0", "TRUE", "Yes", "Off",
+    ] {
+        let repo = Repo::new();
+        initialised_submodule_repo(&repo);
+        git(&repo.root, &["config", "submodule.sub.active", value]);
+        assert_eq!(readme_commit_refusal(&repo), None, "active={value}");
+    }
+    for value in [
+        command.as_str(),
+        "!echo",
+        "",
+        "2",
+        "-1",
+        "maybe",
+        "ture",
+        "y",
+        "true;x",
+    ] {
+        let repo = Repo::new();
+        initialised_submodule_repo(&repo);
+        git(&repo.root, &["config", "submodule.sub.active", value]);
+        let error = readme_commit_refusal(&repo).unwrap_or_default();
+        assert!(
+            error.contains("submodule.sub.active") && error.contains("do not allow"),
+            "active={value:?}: {error}"
+        );
+    }
+    assert!(!marker.exists());
+}
+
+/// Issue #539: a bare `active` key (no `=`) reads as true and is allowed.
+#[test]
+fn a_bare_submodule_active_key_is_allowed() {
+    let repo = Repo::new();
+    initialised_submodule_repo(&repo);
+    git(&repo.root, &["config", "--unset", "submodule.sub.active"]);
+    append(
+        &repo.root.join(".git/config"),
+        "[submodule \"sub\"]\n\tactive\n",
+    );
+    assert_eq!(readme_commit_refusal(&repo), None);
+}
+
+/// Issue #539: submodule names with dots, spaces and `=` are handled like `remote` and
+/// `branch` names: the last dot splits the variable, so a name can never turn a refused
+/// variable into an allowed one.
+#[test]
+fn submodule_names_with_dots_and_odd_characters_follow_the_per_name_rule() {
+    for key in [
+        "submodule.a.b.url",
+        "submodule.x y/z.url",
+        "submodule.we=ird.url",
+        "submodule.update.url",
+        "submodule.sub.url.url",
+        "submodule.a.b.active",
+    ] {
+        let repo = Repo::new();
+        initialised_submodule_repo(&repo);
+        git(&repo.root, &["config", key, "true"]);
+        assert_eq!(readme_commit_refusal(&repo), None, "{key}");
+    }
+    for key in [
+        "submodule.a.b.update",
+        "submodule.a.b.ignore",
+        "submodule.sub.url.update",
+        "submodule.x y/z.ignore",
+        "submodule.url.update",
+    ] {
+        let repo = Repo::new();
+        initialised_submodule_repo(&repo);
+        git(&repo.root, &["config", key, "none"]);
+        let error = readme_commit_refusal(&repo).unwrap_or_default();
+        assert!(error.contains("do not allow"), "{key}: {error}");
+    }
+}
+
+/// Issue #539: a `url` value is only ever used by `git submodule update/sync/add`, which no
+/// chat git write runs. Whatever the value, no write tool fetches it or runs a program.
+#[test]
+fn a_submodule_url_never_runs_a_program_from_any_write() {
+    let urls: [fn(&Path) -> String; 4] = [
+        |base| format!("ext::sh -c 'touch {}/url-ran'", base.display()),
+        |base| format!("ssh://-oProxyCommand=touch%20{}/url-ran/x", base.display()),
+        |base| format!("--upload-pack=touch {}/url-ran", base.display()),
+        |base| format!("file://{}/missing", base.display()),
+    ];
+    for url in urls {
+        let repo = Repo::new();
+        repo.go_branch();
+        initialised_submodule_repo(&repo);
+        let url = url(&repo.base);
+        git(&repo.root, &["config", "submodule.sub.url", &url]);
+        let marker = repo.base.join("url-ran");
+        repo.approve(
+            "git_commit",
+            json!({"message": "edit readme", "files": ["README.md"]}),
+        )
+        .unwrap();
+        repo.approve("git_switch", json!({"branch": "feature/x", "create": true}))
+            .unwrap();
+        git(&repo.root, &["checkout", "-q", "main"]);
+        repo.approve("git_merge", json!({"source": "alfredo/go-7"}))
+            .unwrap();
+        assert!(!marker.exists(), "{url} ran a program");
+    }
+}
+
+/// Issue #539: no repository-configured program runs from a write with the keys set: a
+/// clean filter, a hook and a merge driver stay refused or inert as before.
+#[test]
+fn a_filter_or_hook_still_never_runs_with_the_submodule_keys_set() {
+    let repo = Repo::new();
+    initialised_submodule_repo(&repo);
+    let marker = repo.base.join("program-ran");
+    append(&repo.root.join(".git/config"), &filter_config(&marker));
+    let error = readme_commit_refusal(&repo).unwrap_or_default();
+    assert!(error.contains("filter"), "{error}");
+    assert!(!marker.exists());
+
+    let repo = Repo::new();
+    initialised_submodule_repo(&repo);
+    let hooks = repo.root.join(".git/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    let hook_marker = repo.base.join("hook-ran");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\ntouch {}\n", hook_marker.display()),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    repo.approve(
+        "git_commit",
+        json!({"message": "edit readme", "files": ["README.md"]}),
+    )
+    .unwrap();
+    assert!(!hook_marker.exists(), "a hook ran");
+}
+
+/// Issue #539 / #516: with the keys set, an approved merge, switch or commit naming the
+/// submodule never enters it or runs its filter.
+#[test]
+fn a_submodule_filter_never_runs_from_an_approved_apply_with_the_keys_set() {
+    let mut failures = Vec::new();
+    for (tool, arguments) in apply_exposed_calls() {
+        let repo = Repo::new();
+        let config = apply_fixture(&repo);
+        keep_submodule_keys(&repo);
+        clean_unless_commit(&repo, tool);
+        let marker = repo.base.join("submodule-filter-ran");
+        append(&config, &filter_config(&marker));
+        let outcome = repo.approve(tool, arguments.clone());
+        if marker.exists() {
+            failures.push(format!("{tool} {arguments} ran a filter: {outcome:?}"));
+        } else if let Err(error) = outcome {
+            if !(error.contains(".gitmodules") && error.contains("ignore")) {
+                failures.push(format!(
+                    "{tool} refused without naming the override: {error}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Issue #539 / #516: with the keys set, no write-tier card enters the submodule, and the
+/// README commit card is offered.
+#[test]
+fn a_submodule_filter_never_runs_from_a_write_tier_card_with_the_keys_set() {
+    let repo = Repo::new();
+    repo.go_branch();
+    let config = repo_with_ignore_none_submodule(&repo);
+    keep_submodule_keys(&repo);
+    fs::write(repo.root.join("README.md"), "# Demo\nedited\n").unwrap();
+    let marker = repo.base.join("submodule-filter-ran");
+    append(&config, &filter_config(&marker));
+    for (tool, arguments) in submodule_exposed_calls() {
+        let _ = fs::remove_file(&marker);
+        let outcome = repo.card(tool, arguments.clone());
+        assert!(!marker.exists(), "{tool} {arguments} ran the filter");
+        if arguments == json!({"message": "m", "files": ["README.md"]}) {
+            assert!(outcome.is_ok(), "{outcome:?}");
+        }
+    }
+}
+
+/// Issue #539 / #516: with the keys set, a FIFO `include.path` in the submodule config
+/// never stalls an apply step.
+#[test]
+fn a_submodule_config_fifo_never_stalls_an_approved_apply_with_the_keys_set() {
+    for (tool, arguments) in apply_exposed_calls() {
+        let repo = Repo::new();
+        let config = apply_fixture(&repo);
+        keep_submodule_keys(&repo);
+        clean_unless_commit(&repo, tool);
+        let fifo = repo.base.join("sub-include-fifo");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        append(
+            &config,
+            &format!("[include]\n\tpath = {}\n", fifo.display()),
+        );
+        let card = match repo.card(tool, arguments.clone()) {
+            Ok(card) => card,
+            Err(error) => {
+                assert!(error.contains(".gitmodules"), "{tool}: {error}");
+                continue;
+            }
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let root = repo.root.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(approval::apply(&root, &card));
+        });
+        let outcome = receiver.recv_timeout(Duration::from_secs(3));
+        if outcome.is_err() {
+            drop(fs::OpenOptions::new().write(true).open(&fifo));
+        }
+        assert!(outcome.is_ok(), "{tool} {arguments} stalled on the FIFO");
+    }
+}
+
+/// Issue #539 / #516: with the keys set and no override, merge, switch and commit of a named
+/// submodule pointer work as before.
+#[test]
+fn an_ordinary_initialised_submodule_still_merges_switches_and_commits() {
+    for (tool, arguments) in apply_exposed_calls() {
+        let repo = Repo::new();
+        repo.go_branch();
+        ordinary_submodule_repo(&repo);
+        keep_submodule_keys(&repo);
+        other_branch(&repo);
+        if tool == "git_commit" {
+            fs::write(repo.root.join("README.md"), "# Demo\nedited\n").unwrap();
+            stage_submodule_bump(&repo);
+        }
+        let done = repo.approve(tool, arguments.clone());
+        assert!(done.is_ok(), "{tool} {arguments}: {done:?}");
+    }
+}
+
+/// Issue #539 / #516: under the `ignore` override a branch created from the current commit
+/// and a commit of other files work with the keys set, and no filter runs.
+#[test]
+fn creating_a_branch_and_committing_other_files_work_under_the_override_with_keys_set() {
+    let repo = Repo::new();
+    let config = apply_fixture(&repo);
+    keep_submodule_keys(&repo);
+    let marker = repo.base.join("submodule-filter-ran");
+    append(&config, &filter_config(&marker));
+    let made = repo.approve("git_switch", json!({"branch": "feature/x", "create": true}));
+    assert!(made.is_ok(), "{made:?}");
+    let done = repo.approve(
+        "git_commit",
+        json!({"message": "edit", "files": ["README.md"]}),
+    );
+    assert!(done.is_ok(), "{done:?}");
+    assert!(!marker.exists(), "a submodule filter ran");
+}
+
 #[test]
 fn merge_into_another_target_is_refused_until_switched() {
     let repo = Repo::new();

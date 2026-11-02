@@ -325,8 +325,12 @@ const ALLOWED_LOCAL_KEYS: [&str; 18] = [
     "user.name",
 ];
 
-/// Whether a repository-local `key` (lowercase) with `value` is on the allowlist. Remote
-/// and branch keys are per name (`remote.<name>.url`); `commit.gpgsign` only when false.
+/// Whether a repository-local `key` (lowercase) with `value` is on the allowlist. Remote,
+/// branch and submodule keys are per name (`remote.<name>.url`); `commit.gpgsign` only when
+/// false. For a submodule only `url` and a boolean `active` (what `git submodule add` and
+/// `update --init` write, #539) are inert: `url` is read only by `submodule update`, `sync`
+/// and `add`, which no chat git write runs; `update` can be `!command` and `ignore` makes
+/// git open the submodule, so they stay refused with every other submodule key.
 fn allowed_local_key(key: &str, value: &str) -> bool {
     if key == "commit.gpgsign" {
         return matches!(
@@ -345,6 +349,14 @@ fn allowed_local_key(key: &str, value: &str) -> bool {
                 variable,
                 "remote" | "merge" | "rebase" | "pushremote" | "description"
             ),
+            "submodule" => match variable {
+                "url" => true,
+                "active" => matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "true" | "false" | "yes" | "no" | "on" | "off" | "1" | "0"
+                ),
+                _ => false,
+            },
             _ => false,
         },
         _ => false,
@@ -1757,6 +1769,61 @@ mod tests {
         );
         assert!(check_ignore_listing("submodule.s.path\nsub\0submodule.s.ignore\nall\0").is_ok());
         assert!(check_ignore_listing("").is_ok());
+    }
+
+    /// #539: an initialised submodule's `url` and boolean `active` are inert; every other
+    /// submodule key can make git run or fetch something, so it stays refused.
+    #[test]
+    fn only_submodule_url_and_boolean_active_are_allowed_local_keys() {
+        for key in [
+            "submodule.sub.url",
+            "submodule.a.b.url",
+            "submodule.we ird=n\"ame.url",
+            "submodule.update.url",
+            "submodule.sub.url.url",
+        ] {
+            assert!(allowed_local_key(key, "https://example.com/x.git"), "{key}");
+        }
+        for value in [
+            "true", "false", "yes", "no", "on", "off", "1", "0", "TRUE", "No",
+        ] {
+            assert!(allowed_local_key("submodule.sub.active", value), "{value}");
+            assert!(allowed_local_key("submodule.a.b.active", value), "{value}");
+        }
+        for value in [
+            "", " ", "!touch x", "2", "-1", "maybe", "ture", "true;x", "y", "t",
+        ] {
+            assert!(
+                !allowed_local_key("submodule.sub.active", value),
+                "{value:?}"
+            );
+        }
+        for key in [
+            "submodule.sub.ignore",
+            "submodule.sub.update",
+            "submodule.sub.branch",
+            "submodule.sub.path",
+            "submodule.sub.shallow",
+            "submodule.sub.fetchrecursesubmodules",
+            "submodule.a.b.update",
+            "submodule.a.b.ignore",
+            "submodule.sub.url.update",
+            "submodule.sub.active.update",
+            "submodule.url",
+            "submodule.active",
+            "submodule.recurse",
+            "submodule.fetchjobs",
+            "submodule.",
+            "fetch.recursesubmodules",
+            "submodulex.sub.url",
+        ] {
+            let value = if key.ends_with("active") {
+                "true"
+            } else {
+                "all"
+            };
+            assert!(!allowed_local_key(key, value), "{key}");
+        }
     }
 
     #[test]
