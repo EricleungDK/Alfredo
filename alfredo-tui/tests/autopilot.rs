@@ -1605,6 +1605,262 @@ fn dropped_ollama_connection_stops_cleanly_with_no_repair_budget() {
     model_unreachable(0);
 }
 
+/// The two-task plan while the model server drops every worker request (`down`); once
+/// it is back, the repair (`Repair #3:`, task ids 1 and 2 are the plan) and the
+/// dependent get good content. With `bad_repair`, the repair still writes wrong code.
+fn flaky_server(down: Arc<AtomicBool>, bad_repair: bool) -> Server {
+    Server::new(move |request, _| {
+        if planner(request) {
+            return two_task_plan();
+        }
+        if down.load(Ordering::SeqCst) {
+            return DROP_CONNECTION.into();
+        }
+        let prompt = worker_prompt(request);
+        if prompt.starts_with("Implement this task: Add app") {
+            app()
+        } else if bad_repair {
+            bad_calc()
+        } else {
+            good_calc()
+        }
+    })
+}
+
+fn unreachable_two_task_run(
+    fixture: &Fixture,
+    server: &Server,
+    runtime: &Runtime,
+    max_repairs: u32,
+) -> (Autopilot, TaskControl) {
+    let mut control = control(fixture, server, runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start(
+            "Make answer return 42 and add app",
+            "fixture",
+            max_repairs,
+            &control,
+        )
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        runtime,
+        "unreachable",
+        finished,
+    );
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    let report = autopilot.report().unwrap().to_string();
+    assert!(
+        report.contains("Next      Start Ollama, then /repair 1 retry"),
+        "{report}"
+    );
+    (autopilot, control)
+}
+
+#[test]
+fn repair_after_an_unreachable_stop_reenters_the_loop_runs_dependents_and_integrates() {
+    let fixture = Fixture::new();
+    let head = fixture.head();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down.clone(), false);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = unreachable_two_task_run(&fixture, &server, &runtime, 2);
+    // Nothing re-enters on its own, even with the server back.
+    down.store(false, Ordering::SeqCst);
+    for _ in 0..60 {
+        control.poll();
+        assert!(autopilot.tick(&runtime, &mut control).is_none());
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 2);
+
+    assert_eq!(owner_repair(&mut control, &runtime, 1, "retry"), 3);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "repaired",
+        |autopilot, control| {
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state == RunState::Done)
+        },
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!((status.done, status.total, status.failed), (2, 2, 0));
+    assert_eq!(status.repairs, 1, "only the owner's repair");
+    let snapshot = fixture.store.snapshot().unwrap();
+    let find = |id| snapshot.tasks.iter().find(|task| task.id == id).unwrap();
+    assert_eq!(find(3).status, TaskStatus::Accepted);
+    assert_eq!(find(2).status, TaskStatus::Accepted, "the dependent ran");
+    assert_eq!(snapshot.tasks.len(), 3, "no further task was created");
+    let branch = status.branch.clone().expect("integration branch");
+    assert!(branch.starts_with("alfredo/go-"), "{branch}");
+    assert_eq!(
+        git(&fixture.workspace, &["show", &format!("{branch}:calc.py")]),
+        "def answer():\n    return 42"
+    );
+    assert!(git(&fixture.workspace, &["show", &format!("{branch}:app.py")]).contains("main"));
+    assert_eq!(fixture.head(), head);
+    assert_eq!(fixture.status(), "");
+}
+
+#[test]
+fn repair_after_an_unreachable_stop_with_no_budget_runs_once_and_ends_failed_if_it_fails() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down.clone(), true);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = unreachable_two_task_run(&fixture, &server, &runtime, 0);
+    down.store(false, Ordering::SeqCst);
+    assert_eq!(owner_repair(&mut control, &runtime, 1, "retry"), 3);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "refailed",
+        |autopilot, control| {
+            let snapshot = control.snapshot.as_ref().unwrap();
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state == RunState::Failed)
+                && snapshot
+                    .tasks
+                    .iter()
+                    .any(|task| task.id == 3 && task.status == TaskStatus::Failed)
+        },
+    );
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(
+        snapshot.tasks.len(),
+        3,
+        "the explicit /repair added the only one"
+    );
+    let report = autopilot.report().unwrap().to_string();
+    assert!(report.contains("repair budget exhausted (1/1)"), "{report}");
+}
+
+#[test]
+fn repair_after_an_unreachable_stop_counts_against_max_repairs_and_stops_at_it() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down.clone(), true);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = unreachable_two_task_run(&fixture, &server, &runtime, 2);
+    down.store(false, Ordering::SeqCst);
+    assert_eq!(owner_repair(&mut control, &runtime, 1, "retry"), 3);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "budget",
+        |autopilot, control| {
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state == RunState::Failed)
+                && autopilot
+                    .report()
+                    .is_some_and(|report| report.contains("repair budget exhausted"))
+        },
+    );
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(
+        snapshot.tasks.len(),
+        4,
+        "the owner's repair plus one automatic repair: --max-repairs 2 in all"
+    );
+    let report = autopilot.report().unwrap().to_string();
+    assert!(report.contains("repair budget exhausted (2/2)"), "{report}");
+}
+
+#[test]
+fn repair_after_an_unreachable_stop_that_is_unreachable_again_stops_again_and_stays_repairable() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down.clone(), false);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = unreachable_two_task_run(&fixture, &server, &runtime, 2);
+    assert_eq!(owner_repair(&mut control, &runtime, 1, "retry"), 3);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "again",
+        |autopilot, control| {
+            let snapshot = control.snapshot.as_ref().unwrap();
+            snapshot
+                .tasks
+                .iter()
+                .any(|task| task.id == 3 && task.status == TaskStatus::Failed)
+                && autopilot.report().is_some_and(|report| {
+                    report.contains("Next      Start Ollama, then /repair 3 retry")
+                })
+        },
+    );
+    assert_eq!(
+        fixture.store.snapshot().unwrap().tasks.len(),
+        3,
+        "no automatic repair"
+    );
+    down.store(false, Ordering::SeqCst);
+    assert_eq!(owner_repair(&mut control, &runtime, 3, "retry"), 4);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "second repair",
+        |autopilot, control| {
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state == RunState::Done)
+        },
+    );
+    assert_eq!(autopilot.status(&control).unwrap().done, 2);
+}
+
+#[test]
+fn repair_after_a_too_large_stop_does_not_resume_the_loop() {
+    let fixture = Fixture::new();
+    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return files_plan(&["a.py", "b.py"]);
+        }
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "too-large",
+        finished,
+    );
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    let repair = owner_repair(&mut control, &runtime, 1, "again");
+    for _ in 0..80 {
+        control.poll();
+        assert!(autopilot.tick(&runtime, &mut control).is_none());
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    let snapshot = fixture.store.snapshot().unwrap();
+    let task = snapshot.tasks.iter().find(|t| t.id == repair).unwrap();
+    assert_eq!(
+        task.status,
+        TaskStatus::Proposed,
+        "nothing was approved or run"
+    );
+}
+
 #[test]
 fn malformed_model_output_is_still_repaired_and_carries_no_failure_code() {
     let fixture = Fixture::new();

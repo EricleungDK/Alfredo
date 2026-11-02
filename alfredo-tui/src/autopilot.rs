@@ -124,6 +124,12 @@ struct Saved {
     /// again instead of spending automatic repairs the owner never asked for.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     limits: BTreeMap<u64, u32>,
+    /// The run stopped because the model server was unreachable (`model-unreachable`):
+    /// the one `Failed` stop whose advertised way forward is the owner's `/repair`, so
+    /// that repair re-enters the loop like one after a budget stop. Every other
+    /// `Failed` cause leaves it unset and stays finished.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    reentrant: bool,
 }
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -879,6 +885,7 @@ impl Autopilot {
             hook_fired: false,
             finished_through: None,
             limits: BTreeMap::new(),
+            reentrant: false,
         });
         self.last = None;
         self.last_key = None;
@@ -1181,6 +1188,7 @@ impl Autopilot {
             return;
         };
         saved.phase = Phase::Running;
+        saved.reentrant = false;
         saved.paused = false;
         saved.finished = None;
         saved.report = None;
@@ -1224,8 +1232,10 @@ impl Autopilot {
         let moved = latest != through;
         saved.finished_through = Some(latest);
         // A run stopped by `fail()` (sandbox refusal, file too large) may still have
-        // other families open; resuming would drive all of them. It stays finished.
-        if repaired.is_empty() || saved.phase != Phase::Done {
+        // other families open; resuming would drive all of them. It stays finished,
+        // except after an unreachable model server, which `/repair` is advertised for.
+        let reentrant = saved.phase == Phase::Failed && saved.reentrant;
+        if repaired.is_empty() || (saved.phase != Phase::Done && !reentrant) {
             if moved {
                 self.persist();
             }
@@ -1240,7 +1250,14 @@ impl Autopilot {
             .collect();
         let saved = self.saved.as_mut().unwrap();
         for (root, repairs) in counted {
-            saved.limits.insert(root, repairs);
+            // After an unreachable stop the family may not have spent its budget:
+            // the owner's repair counts against it, and never lowers it.
+            let limit = if reentrant {
+                repairs.max(saved.max_repairs)
+            } else {
+                repairs
+            };
+            saved.limits.insert(root, limit);
         }
         let elapsed = self.elapsed();
         self.resume_running(elapsed);
@@ -1589,7 +1606,7 @@ impl Autopilot {
     }
 
     fn fail(&mut self, tasks: &mut TaskControl, notice: String) {
-        self.fail_with_next(tasks, notice, None);
+        self.fail_with_next(tasks, notice, None, false);
     }
 
     fn fail_with_next(
@@ -1597,6 +1614,7 @@ impl Autopilot {
         tasks: &mut TaskControl,
         notice: String,
         next: Option<(String, u32)>,
+        reentrant: bool,
     ) {
         let elapsed = self.elapsed();
         let (accepted, repairs) = match (&tasks.snapshot, &self.saved) {
@@ -1618,6 +1636,7 @@ impl Autopilot {
         let through = tasks.snapshot.as_ref().map(highest_task);
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Failed;
+            saved.reentrant = reentrant;
             saved.finished = Some(saved.started + elapsed);
             saved.finished_through = through;
             let mut report = format!(
@@ -1886,6 +1905,7 @@ impl Autopilot {
                     tasks,
                     reason.trim_end().to_string(),
                     Some((next.to_string(), repairs)),
+                    true,
                 );
                 return Ok(None);
             }
@@ -1897,6 +1917,7 @@ impl Autopilot {
                     tasks,
                     format!("{reason}."),
                     Some((next.to_string(), repairs)),
+                    false,
                 );
                 return Ok(None);
             }

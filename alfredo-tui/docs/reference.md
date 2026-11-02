@@ -104,7 +104,9 @@ run gets the typed `model-unreachable` `failure_code`, autopilot stops without s
 repair (Repairs stays 0), and the Reason names the endpoint: `Cannot reach Ollama at
 http://127.0.0.1:11434; the server is down or the endpoint is wrong.` The `Next` row says to
 start Ollama, then `/repair ID retry` (a failed task re-enters through `/repair`;
-`/requeue` is only for cancelled runs). A manual `/run` shows the same text, and headless
+`/requeue` is only for cancelled runs). That `/repair` resumes the stopped run: the repair is
+approved and run, held dependents follow, and the run ends on one `alfredo/go-*` branch; the
+repair counts against `--max-repairs`, and sandbox and file-too-large stops stay finished. A manual `/run` shows the same text, and headless
 `--go` prints the Reason on stderr and exits 1. Bad `FILE` blocks and failing checks stay
 repairable. Auto-pause and resume on reconnect are not part of this.
 
