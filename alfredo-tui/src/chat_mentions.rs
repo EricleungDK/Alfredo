@@ -1,7 +1,7 @@
 //! `@path` mentions in a chat prompt: working-tree file contents appended to the
 //! model-visible message, read through the same resolve-and-read path as the chat
 //! `read_file` tool. The transcript keeps what the user typed.
-use crate::chat_tools::{git_read, read, resolve};
+use crate::chat_tools::{git_read, read, resolve_read};
 use std::{path::Path, process::Command, time::Duration};
 
 /// Most distinct mentions read per prompt.
@@ -203,7 +203,7 @@ pub fn assemble(
 /// UTF-8, no NUL), plus a symlink check on every path component, a 256 KiB cap,
 /// and a refusal of gitignored untracked files. Anything uncertain is refused.
 fn read_mention(root: &Path, path: &str, check_failed: &mut bool) -> Result<String, String> {
-    let full = resolve(root, path).map_err(|error| {
+    let full = resolve_read(root, path).map_err(|error| {
         if error.contains("must be relative") || error.contains("leaves the Coding Workspace") {
             format!("rejected: {error}")
         } else if error.contains("is excluded") {

@@ -1,6 +1,7 @@
 //! Read tier: `read_file`, `list_files`, grep on the Coding Workspace working tree.
 use super::{
-    budget, display, excluded, git_read, open_confined, resolve, text_arg, Tier, Tool, MAX_OUTPUT,
+    budget, display, git_read, open_confined, read_excluded, resolve_read, text_arg, Tier, Tool,
+    MAX_OUTPUT,
 };
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -125,7 +126,7 @@ pub(crate) fn read_file_within(
             .filter(|line| *line >= 1)
             .ok_or("start_line must be a positive integer")? as usize,
     };
-    let full = resolve(root, path)?;
+    let full = resolve_read(root, path)?;
     let content = text(root, &full).map_err(|error| format!("{path}: {error}"))?;
     let total = content.lines().count();
     if total == 0 {
@@ -211,7 +212,7 @@ fn walk(root: &Path, start: &Path, limit: usize, skip_noise: bool) -> (Vec<PathB
             else {
                 continue;
             };
-            if excluded(&relative) || (skip_noise && noise(&name.to_lowercase())) {
+            if read_excluded(&relative) || (skip_noise && noise(&name.to_lowercase())) {
                 continue;
             }
             if kind.is_dir() {
@@ -325,8 +326,8 @@ pub(crate) fn discover(
         // Each component is tested as well as the whole path, as the walk tested every
         // directory name, so a `certs.key/` directory stays hidden.
         if !crate::planning_context::path_valid(&relative)
-            || parts.iter().any(|part| excluded(part))
-            || excluded(&relative)
+            || parts.iter().any(|part| read_excluded(part))
+            || read_excluded(&relative)
             || noise(&lower)
         {
             continue;
@@ -506,7 +507,7 @@ fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
             "path {path:?} is a literal path, not a pattern; pass the directory as path and the pattern as the glob argument (for example glob={path:?})"
         ));
     }
-    resolve(root, path)
+    resolve_read(root, path)
 }
 
 fn list_files(root: &Path, arguments: &Value) -> Result<String, String> {
@@ -893,7 +894,7 @@ mod tests {
         let (dir, _cleanup) = sample();
         for path in ["../*.txt", "/etc/*", "src/../../*"] {
             let error = list_files(&dir, &json!({"path": path})).unwrap_err();
-            assert_eq!(error, resolve(&dir, path).unwrap_err(), "{path}");
+            assert_eq!(error, resolve_read(&dir, path).unwrap_err(), "{path}");
             assert!(error.contains("stay inside"), "{path}: {error}");
             assert_eq!(
                 grep(&dir, &json!({"pattern": "x", "path": path})).unwrap_err(),

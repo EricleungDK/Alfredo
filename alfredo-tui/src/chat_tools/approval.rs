@@ -41,8 +41,7 @@ pub enum CardKind {
     /// Publishes commits to a remote; shown distinctly, never always-allowed.
     Push,
     /// Runs a shell command (#236): in the Sandbox, or on the host when `escalated`.
-    /// An always-allow rule (#238) must never cover an escalated card unless the rule
-    /// itself is for escalated runs.
+    /// An escalated card is never offered `a` and always asks (issue #311).
     Shell { escalated: bool },
 }
 
