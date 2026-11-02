@@ -300,6 +300,20 @@ fn result_json(
     })
 }
 
+/// The run-level `autopilot` entry of a model-unreachable stop carries the id of the
+/// task that stopped, the one `/repair ID retry` and `--resume --headless` retry.
+fn name_stopped_task(result: &mut serde_json::Value, id: u64) {
+    let Some(entries) = result["failed"].as_array_mut() else {
+        return;
+    };
+    if let Some(entry) = entries
+        .iter_mut()
+        .find(|entry| entry["id"].is_null() && entry["title"] == "autopilot")
+    {
+        entry["id"] = id.into();
+    }
+}
+
 /// The model this run uses: an explicit `--model` as given (the conversation's saved
 /// model is left alone, never written), otherwise the restored conversation's model.
 fn run_model(work: &Workstation, flag: String, explicit: bool) -> String {
@@ -327,6 +341,29 @@ fn paused_refusal(run: &Status) -> String {
         run.done,
         run.total
     )
+}
+
+/// Queue the owner's `/repair ID retry` for the task an unreachable model server
+/// stopped, exactly as typing it would: recorded in the conversation, then released
+/// through the saved-intent barrier. Autopilot re-enters its loop once the repair exists.
+fn queue_retry(work: &mut Workstation, id: u64, model: &str) -> Result<(usize, String), String> {
+    // The refresh launched at startup must land first: a command waits for it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while work.tasks.pending && Instant::now() < deadline {
+        work.tasks.poll();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let text = format!("/repair {id} retry");
+    let intent = work
+        .tasks
+        .prepare_command(&text, model)
+        .map_err(|error| format!("--resume: the retry was refused: {error}"))?
+        .ok_or("--resume: the retry is not a task command")?;
+    let origin = work.app.selected;
+    let command = work.app.sessions[origin]
+        .submit_command(text, intent)
+        .map_err(|error| format!("--resume: the retry was not recorded: {error}"))?;
+    Ok((origin, command))
 }
 
 /// Run the goal to its end. `Err` is a setup error; otherwise the exit code.
@@ -364,16 +401,24 @@ pub fn run(options: Options) -> Result<i32, String> {
     work.tasks.refresh(runtime);
     // A paused run is never silently forked (issue #280): `--go` refuses, `--resume` continues.
     let paused = work.autopilot.paused_run(&work.tasks);
+    // With no paused run, `--resume` also continues a run an unreachable model server
+    // stopped (issue #584), the retry `/repair ID retry` queues. Other failures stay done.
+    let stopped = match (&paused, resume) {
+        (None, true) => work.autopilot.reentrant_run(&work.tasks),
+        _ => None,
+    };
     match (&paused, resume) {
         (Some(run), false) => return Err(paused_refusal(run)),
         (Some(run), true) if alfredo_tui::wayfinder::entry_mode(&run.goal).is_some() => {
             return Err("Wayfinder goals need the interactive terminal; /resume the paused run there".into())
         }
-        (None, true) => {
+        (None, true) if stopped.is_none() => {
             return Err("--resume: nothing to resume; this mission has no paused run (--go GOAL --headless starts one)".into())
         }
         _ => {}
     }
+    let mut pending: Option<(usize, String)> = None;
+    let mut retry: Option<(usize, String, Instant)> = None;
     let model = run_model(&work, model, model_explicit);
     if !model_explicit {
         preflight(runtime, &checker, &model)?;
@@ -386,6 +431,17 @@ pub fn run(options: Options) -> Result<i32, String> {
             .map_err(|error| format!("--resume refused: {error}"))?;
         say(format!(
             "resuming “{}” ({}/{} accepted)",
+            stderr_line(&goal),
+            run.done,
+            run.total
+        ));
+    } else if let Some((run, id)) = stopped {
+        goal = run.goal;
+        let queued = queue_retry(&mut work, id, &model)?;
+        pending = Some(queued.clone());
+        retry = Some((queued.0, queued.1, Instant::now()));
+        say(format!(
+            "retrying #{id} of “{}” ({}/{} accepted)",
             stderr_line(&goal),
             run.done,
             run.total
@@ -403,7 +459,6 @@ pub fn run(options: Options) -> Result<i32, String> {
     catch_signals();
 
     let mut progress = Progress::default();
-    let mut pending: Option<(usize, String)> = None;
     let (mut last_refresh, mut last_save) = (Instant::now(), Instant::now());
     let mut stopping: Option<Instant> = None;
     let mut reason = String::new();
@@ -455,6 +510,28 @@ pub fn run(options: Options) -> Result<i32, String> {
                 });
             }
             drained || timed_out || again
+        } else if let Some((origin, command, since)) =
+            retry.take_if(|_| status.state == RunState::Failed)
+        {
+            // The queued retry re-enters the loop on a later tick; until then the old
+            // stop is not the end, unless the retry was refused or never took.
+            let refused = work.app.sessions[origin]
+                .commands()
+                .iter()
+                .find_map(|saved| match (&saved.state, saved.id == command) {
+                    (CommandState::Refused { reason }, true) => Some(reason.clone()),
+                    _ => None,
+                });
+            if let Some(reason) = refused {
+                fatal = Some(format!("--resume: the retry was refused: {reason}"));
+            } else if since.elapsed() > Duration::from_secs(60) {
+                fatal = Some("--resume: the retry did not restart the run within 60 s".into());
+            } else {
+                retry = Some((origin, command, since));
+            }
+            false
+        } else if status.state.finished() {
+            drained
         } else if status.state.finished() {
             drained
         } else if status.state == RunState::Paused {
@@ -483,6 +560,14 @@ pub fn run(options: Options) -> Result<i32, String> {
                 say(finished_line(status.state, &status, &reason));
             }
             let mut result = result_json(&model, &status, &outcomes, &reason, fatal.is_some());
+            // A model-unreachable stop names its task and the way forward (issue #584).
+            let stopped = work.autopilot.reentrant_run(&work.tasks).map(|(_, id)| id);
+            if let Some(id) = stopped.filter(|_| status.state == RunState::Failed) {
+                name_stopped_task(&mut result, id);
+                say(format!(
+                    "next: start the model server, then --resume --headless retries #{id} without planning again"
+                ));
+            }
             result["usage"] = work.autopilot.usage(&work.tasks).json();
             print_result(result);
             // The JSON is out; now let a started hook finish (or be killed) and report.
@@ -1565,6 +1650,25 @@ mod tests {
             Turn::default().json("m", Policy::Deny, &[])["usage"],
             serde_json::json!({"prompt_tokens": null, "completion_tokens": null, "model_seconds": null})
         );
+    }
+
+    #[test]
+    fn stopped_task_id_replaces_only_the_autopilot_entrys_null_id() {
+        let stuck = outcome(2, TaskStatus::Failed, 0, Some(Err("failed".into())));
+        let mut json = result_json(
+            "m",
+            &status(RunState::Failed, 0),
+            &[stuck],
+            "Cannot reach Ollama",
+            true,
+        );
+        name_stopped_task(&mut json, 7);
+        assert_eq!(json["failed"][0]["id"], 2);
+        assert_eq!(json["failed"][1]["id"], 7);
+        assert_eq!(json["failed"][1]["title"], "autopilot");
+        let mut plain = result_json("m", &status(RunState::Done, 2), &[], "", false);
+        name_stopped_task(&mut plain, 7);
+        assert_eq!(plain["failed"], serde_json::json!([]));
     }
 
     #[test]

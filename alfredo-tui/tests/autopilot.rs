@@ -1855,6 +1855,42 @@ fn repair_after_an_unreachable_stop_that_is_unreachable_again_stops_again_and_st
 }
 
 #[test]
+fn reentrant_run_names_the_stopped_task_only_after_an_unreachable_stop() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down.clone(), false);
+    let runtime = Runtime::new().unwrap();
+    let (autopilot, first) = unreachable_two_task_run(&fixture, &server, &runtime, 2);
+    let (status, stopped) = autopilot.reentrant_run(&first).expect("unreachable stop");
+    assert_eq!((status.state, stopped), (RunState::Failed, 1));
+    assert!(autopilot.paused_run(&first).is_none());
+
+    // Any other failed run is finished for good: nothing to retry.
+    let other = Fixture::new();
+    commit_files(&other, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let big = Server::new(|request, _| {
+        if planner(request) {
+            return files_plan(&["a.py", "b.py"]);
+        }
+        good_calc()
+    });
+    let mut control = control(&other, &big, &runtime);
+    let mut autopilot = Autopilot::open(&other.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "too-large",
+        finished,
+    );
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    assert!(autopilot.reentrant_run(&control).is_none());
+}
+
+#[test]
 fn repair_after_a_too_large_stop_does_not_resume_the_loop() {
     let fixture = Fixture::new();
     commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);

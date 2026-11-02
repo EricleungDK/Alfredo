@@ -1304,6 +1304,25 @@ impl Autopilot {
         self.status(tasks)
     }
 
+    /// The run an unreachable model server stopped (`Failed` with `reentrant`), and the
+    /// id of the stopped task: what `/repair ID retry` re-enters and `--resume
+    /// --headless` continues. Every other `Failed` run is none.
+    pub fn reentrant_run(&self, tasks: &TaskControl) -> Option<(Status, u64)> {
+        let saved = self
+            .saved
+            .as_ref()
+            .filter(|saved| saved.phase == Phase::Failed && saved.reentrant)?;
+        let snapshot = tasks.snapshot.as_ref()?;
+        let stopped = families(snapshot, saved, tasks)
+            .iter()
+            .filter(|family| !held_or_done(family, tasks))
+            .find_map(|family| {
+                let head = snapshot.tasks.iter().find(|task| task.id == family.head)?;
+                unreachable_failure(tasks, head).map(|_| head.id)
+            })?;
+        Some((self.status(tasks)?, stopped))
+    }
+
     pub fn status(&self, tasks: &TaskControl) -> Option<Status> {
         let saved = self.saved.as_ref()?;
         let mut state = match saved.phase {

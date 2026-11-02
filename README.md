@@ -156,7 +156,7 @@ You can also start unattended: `alfredo-tui --model qwen2.5-coder:14b --go "GOAL
 For scripts and CI, add `--headless`: it runs without a terminal, prints progress lines
 on stderr and ends with one JSON object on stdout
 (`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage}`);
-SIGINT/SIGTERM cancel workers like `/stop`; `--resume --headless` continues a paused run. Exit 2 means setup failed (Ollama down, model
+SIGINT/SIGTERM cancel workers like `/stop`; `--resume --headless` continues a paused run, or retries a run an unreachable model stopped. Exit 2 means setup failed (Ollama down, model
 not installed) with the reason on stderr; with `--on-finish`, headless waits for the hook
 (10 s limit) after printing the JSON and reports a failed hook on stderr.
 Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
