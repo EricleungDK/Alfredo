@@ -288,6 +288,161 @@ fn no_hidden_note_when_there_are_no_secret_files() {
     let _ = fs::remove_dir_all(root);
 }
 
+const TEMPLATES: [&str; 3] = [".env.example", ".env.sample", ".env.template"];
+
+#[test]
+fn sandboxed_env_templates_are_readable() {
+    let root = workspace("tpl-read");
+    for name in TEMPLATES {
+        write(&root, name, &format!("ROOT_{name}=1\n"));
+        write(
+            &root,
+            &format!("sub/deeper/{name}"),
+            &format!("DEEP_{name}=1\n"),
+        );
+    }
+    write(&root, ".env", &format!("S={SECRET}\n"));
+    let mut command = String::new();
+    for name in TEMPLATES {
+        command.push_str(&format!("cat {name} sub/deeper/{name}; "));
+    }
+    let out = run(&root, &command);
+    assert!(out.contains("exit code 0"), "{out}");
+    for name in TEMPLATES {
+        assert!(out.contains(&format!("ROOT_{name}=1")), "{out}");
+        assert!(out.contains(&format!("DEEP_{name}=1")), "{out}");
+    }
+    assert!(!out.contains(SECRET), "{out}");
+    let copy = run(&root, "cp .env.example copy.txt && cat copy.txt");
+    assert!(copy.contains("exit code 0"), "{copy}");
+    assert!(copy.contains("ROOT_.env.example=1"), "{copy}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn sandboxed_env_templates_are_read_only() {
+    let root = workspace("tpl-ro");
+    for name in TEMPLATES {
+        write(&root, name, "A=1\n");
+        write(&root, &format!("sub/{name}"), "A=1\n");
+    }
+    // Readable but not writable: a template that is merely hidden would also fail the
+    // writes below, so the read comes first.
+    let seen = run(&root, "cat .env.example sub/.env.template");
+    assert!(seen.contains("exit code 0"), "{seen}");
+    for name in TEMPLATES {
+        for path in [name.to_string(), format!("sub/{name}")] {
+            for command in [
+                format!("echo x >> {path}"),
+                format!("echo x > {path}"),
+                format!("rm {path}"),
+                format!("mv {path} moved.txt"),
+            ] {
+                let out = run(&root, &command);
+                assert!(!out.contains("exit code 0"), "{command}: {out}");
+                assert!(out.contains("exit code"), "{command}: {out}");
+                assert_eq!(
+                    fs::read_to_string(root.join(&path)).unwrap(),
+                    "A=1\n",
+                    "{command}"
+                );
+                assert!(!root.join("moved.txt").exists(), "{command}");
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn non_template_env_files_stay_masked() {
+    let root = workspace("tpl-masked");
+    write(&root, ".env.example", "TEMPLATE=1\n");
+    write(&root, ".env", &format!("A={SECRET}\n"));
+    write(&root, ".env.example.local", &format!("B={SECRET}\n"));
+    write(&root, ".envrc", &format!("C={SECRET}\n"));
+    write(&root, "sub/.env.sample/inner.txt", &format!("E={SECRET}\n"));
+    let out = run(
+        &root,
+        "cat .env.example; cat .env; cat .env.example.local; cat .envrc; cat sub/.env.sample/inner.txt; echo END",
+    );
+    assert!(out.contains("END"), "the command did not run: {out}");
+    assert!(!out.contains(SECRET), "a secret leaked: {out}");
+    assert!(out.contains("Permission denied"), "{out}");
+    assert!(
+        out.contains("TEMPLATE=1"),
+        "the template next to them is readable: {out}"
+    );
+    let _ = fs::remove_dir_all(root);
+
+    // A directory named like a template exempts nothing inside it.
+    let root = workspace("tpl-dir");
+    write(&root, ".env.example/inner.txt", &format!("D={SECRET}\n"));
+    let out = run(
+        &root,
+        "cat .env.example/inner.txt; ls .env.example; echo END",
+    );
+    assert!(out.contains("END"), "the command did not run: {out}");
+    assert!(!out.contains(SECRET), "a secret leaked: {out}");
+    assert!(out.contains("No such file or directory"), "{out}");
+    let _ = fs::remove_dir_all(root);
+
+    // A template that is a symbolic link is still refused, never bound or followed.
+    let root = workspace("tpl-link");
+    write(&root, ".env", &format!("A={SECRET}\n"));
+    std::os::unix::fs::symlink(".env", root.join(".env.example")).unwrap();
+    let out = run(&root, "cat .env.example");
+    assert!(out.contains("nothing ran"), "{out}");
+    assert!(!out.contains(SECRET), "{out}");
+    let _ = fs::remove_dir_all(root);
+
+    let root = workspace("tpl-link-out");
+    let outside = workspace("tpl-link-target");
+    write(&outside, "secret.txt", &format!("F={SECRET}\n"));
+    std::os::unix::fs::symlink(outside.join("secret.txt"), root.join(".env.template")).unwrap();
+    let out = run(&root, "cat .env.template");
+    assert!(out.contains("nothing ran"), "{out}");
+    assert!(!out.contains(SECRET), "{out}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(outside);
+}
+
+#[test]
+fn templates_do_not_count_toward_the_mask_limit() {
+    let root = workspace("tpl-cap");
+    for index in 0..128 {
+        write(&root, &format!("many/d{index}/.env.example"), "X=1\n");
+    }
+    write(&root, ".env", &format!("S={SECRET}\n"));
+    let out = run(&root, "cat many/d0/.env.example; cat .env; echo END");
+    assert!(!out.contains("nothing ran"), "{out}");
+    assert!(!out.contains("more than 128"), "{out}");
+    assert!(out.contains("exit code 0"), "{out}");
+    assert!(out.contains("X=1"), "{out}");
+    assert!(!out.contains(SECRET), "{out}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn hidden_note_and_escalate_hint_do_not_contradict() {
+    let root = workspace("tpl-hints");
+    write(&root, ".npmrc", "registry=x\n");
+    write(&root, ".ssh/id_rsa", "k\n");
+    let out = run(&root, "cat .npmrc .ssh/id_rsa");
+    assert!(out.contains("exit code 1"), "{out}");
+    let note = note_line(&out).unwrap();
+    assert!(note.contains("2 secret file(s)/directory(ies)"), "{note}");
+    assert!(note.contains("No such file or directory"), "{note}");
+    assert!(note.contains("looks empty"), "{note}");
+    assert!(
+        !note.contains("npmrc") && !note.contains("id_rsa"),
+        "{note}"
+    );
+    let escalates = out.contains("escalate: true");
+    let forbids = out.contains("do not retry on the host");
+    assert!(!(escalates && forbids), "contradictory hints: {out}");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn an_unmasked_runs_result_text_is_unchanged() {
     let root = workspace("note-bytes");
