@@ -601,6 +601,35 @@ fn planner_instruction_runs_existing_tests_and_keeps_them_out_of_written_files()
 }
 
 #[test]
+fn planner_instruction_names_the_owner_cargo_toolchain_as_a_check_program() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    confirm_scope(&fixture.store);
+    let (provider, server, requests) = server_capture(
+        serde_json::json!({"tasks":plan().tasks}).to_string(),
+        true,
+        Duration::ZERO,
+    );
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider);
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control
+        .command(&runtime, "/plan Make the crate tests pass", "fixture")
+        .unwrap();
+    wait(&mut control, |c| c.planner.draft.is_some());
+    server.join().unwrap();
+    let request = requests.recv().unwrap();
+    let system = request["messages"][0]["content"].as_str().unwrap();
+    for text in [
+        "owner's cargo toolchain",
+        "[\"cargo\", \"test\", \"--offline\"]",
+    ] {
+        assert!(system.contains(text), "{text} missing: {system}");
+    }
+}
+
+#[test]
 fn malformed_or_incomplete_model_output_cannot_be_saved_as_a_plan() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     for (content, done) in [

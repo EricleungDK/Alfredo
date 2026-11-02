@@ -4245,6 +4245,34 @@ mod toolchain_tests {
         let _ = fs::remove_dir_all(home);
     }
 
+    #[test]
+    fn well_formed_requires_absolute_homes_of_normal_components() {
+        for (cargo, rustup) in [
+            ("rel/.cargo", "/abs/.rustup"),
+            ("/abs/../.cargo", "/abs/.rustup"),
+            ("/abs/./.cargo", "/abs/.rustup"),
+            ("/abs/.cargo", "rel/.rustup"),
+            ("/abs/.cargo", "/abs/../.rustup"),
+            ("", "/abs/.rustup"),
+        ] {
+            let toolchain = Toolchain {
+                cargo_home: Some(cargo.into()),
+                rustup_home: Some(rustup.into()),
+                binds: vec![format!("{cargo}/bin"), format!("{rustup}/settings.toml")],
+            };
+            assert!(!toolchain.well_formed(), "{cargo} {rustup}");
+        }
+        let fine = Toolchain {
+            cargo_home: Some("/abs/.cargo".into()),
+            rustup_home: Some("/abs/.rustup".into()),
+            binds: vec![
+                "/abs/.cargo/bin".into(),
+                "/abs/.rustup/settings.toml".into(),
+            ],
+        };
+        assert!(fine.well_formed());
+    }
+
     fn task() -> Task {
         Task {
             id: 1,

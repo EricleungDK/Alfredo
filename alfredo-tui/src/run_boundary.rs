@@ -1580,6 +1580,44 @@ mod toolchain_tests {
     }
 
     #[test]
+    fn an_intent_recording_a_relative_or_dotdot_cargo_home_is_refused() {
+        let scratch = Scratch::new();
+        record_start(&scratch.path, &scratch.task).unwrap();
+        let base = contract_request_with(
+            managed_worktree(&scratch.path, &scratch.task).unwrap(),
+            &scratch.task,
+            "mission",
+            &["/usr".into(), "/etc".into()],
+            &Toolchain::default(),
+        )
+        .unwrap();
+        for home in ["rel/.cargo", "/abs/../.cargo", "/abs/./.cargo"] {
+            // An otherwise self-consistent request: the recorded home, its bind and
+            // the environment all agree, so only the path shape can refuse it.
+            let toolchain = Toolchain {
+                cargo_home: Some(home.into()),
+                rustup_home: None,
+                binds: vec![format!("{home}/bin")],
+            };
+            let mut request = base.clone();
+            let bind = format!("{home}/bin");
+            let at = request.argv.iter().position(|a| a == "--chdir").unwrap();
+            request.argv.splice(
+                at..at,
+                ["--ro-bind".to_string(), bind.clone(), bind.clone()],
+            );
+            request.sandbox.readonly_bindings.push((bind.clone(), bind));
+            request.environment = toolchain.check_environment();
+            // The digest of such a request cannot even be computed, so record a stand-in.
+            let mut intent = scratch.intent(base.clone());
+            intent.request = request;
+            let error =
+                verify_intent(&scratch.path, &scratch.task, "mission", &intent).unwrap_err();
+            assert!(error.contains("toolchain"), "{home}: {error}");
+        }
+    }
+
+    #[test]
     fn a_malformed_toolchain_is_not_a_contract_request() {
         let scratch = Scratch::new();
         let mut toolchain = toolchain_binds(Some(&scratch.home));
