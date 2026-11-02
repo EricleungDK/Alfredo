@@ -3,6 +3,7 @@
 /// The name with an explicit tag. Only the segment after the last `/` carries
 /// a tag, so a `:` earlier in a registry host (`host:5000/user/model`) is not one.
 pub fn canonical_model_name(name: &str) -> String {
+    let name = name.trim();
     let last = name.rsplit('/').next().unwrap_or(name);
     if last.contains(':') {
         name.to_string()
