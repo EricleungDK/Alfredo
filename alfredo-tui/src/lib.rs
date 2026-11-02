@@ -93,6 +93,7 @@ pub mod side_pane;
 pub mod theme;
 
 pub mod agent_view;
+mod argv_display;
 
 pub mod agent_drafts;
 

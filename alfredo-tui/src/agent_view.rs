@@ -195,7 +195,7 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
                 format!(
                     "files {} · check {}",
                     attempt.files.join(", "),
-                    attempt.check.join(" ")
+                    crate::argv_display::check_line(&attempt.check)
                 ),
                 Tone::Summary,
             ));
@@ -219,7 +219,7 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
                 lines: vec![(names.join(", "), Tone::Normal)],
             });
         }
-        let command = || (attempt.check.join(" "), Tone::Dim);
+        let command = || (crate::argv_display::check_line(&attempt.check), Tone::Dim);
         if let Some(live) = &attempt.live {
             let mut lines = code(&live.output);
             if lines.is_empty() && !live.checking {
