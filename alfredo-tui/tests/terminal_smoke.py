@@ -326,10 +326,12 @@ class DispatchOffRowInChat(unittest.TestCase):
                                     os.write(terminal.master, b'\x1b[1;1R')
                     finally:
                         fcntl.flock(held, fcntl.LOCK_UN)
-                terminal.wait_for('dispatch off: Task store is busy; refresh and retry')
-                terminal.wait_for('/dispatch on to resume')
+                # The chat pane is narrow, so the row wraps; wait for each part.
+                terminal.wait_for('dispatch off: Task store is')
+                terminal.wait_for('busy; refresh and retry')
+                terminal.wait_for('Resume with /dispatch on')
                 screen = terminal.screen()
-                self.assertEqual(screen.count('dispatch off: Task store is busy'), 1, screen)
+                self.assertEqual(screen.count('dispatch off: Task store is'), 1, screen)
                 self.assertNotIn('dispatch on', screen.split('\n')[0], screen)
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
