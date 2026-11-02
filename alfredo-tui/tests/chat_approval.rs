@@ -1899,7 +1899,17 @@ fn page_keys_move_between_exactly_two_pages_and_stop_at_the_ends() {
     assert_eq!(session.approval_page_wanted(size), 0);
     assert!(session.page_approval(false), "stays on the first page");
     assert_eq!(session.approval_page_wanted(size), 0);
+    // Pressing past the last page does not bank presses: one PgUp goes back one page.
+    session.approval_page_drawn(0, 2, true);
+    assert!(session.page_approval(true));
+    session.approval_page_drawn(1, 2, true);
+    for _ in 0..3 {
+        assert!(session.page_approval(true));
+    }
+    assert!(session.page_approval(false));
+    assert_eq!(session.approval_page_wanted(size), 0);
     // A new terminal size starts over: page 0 again, and no pages known until a draw.
+    session.approval_page_drawn(0, 2, true);
     assert!(session.page_approval(true));
     assert_eq!(session.approval_page_wanted(size), 1);
     assert_eq!(session.approval_page_wanted((101, 24)), 0);
