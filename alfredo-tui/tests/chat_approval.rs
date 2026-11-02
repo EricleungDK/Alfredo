@@ -1853,7 +1853,16 @@ fn a_card_that_fits_keeps_its_arm_time_across_its_first_draws() {
     let mut paged = Paged::new(session, 100, 24);
     assert!(paged.session().approval_whole());
     assert_eq!(paged.answer('y', Duration::ZERO), Some(Decision::Approve));
+    // Drawing the same page again never restarts the delay either.
+    let root2 = workspace("page-keeps-arm-2");
+    let mut session = write_file_session(&root2, "one\ntwo\n");
+    session.approval_visible(true, Instant::now() - approval::ARM * 3);
+    let mut again = Paged::new(session, 100, 24);
+    again.wait_and_draw(approval::ARM);
+    again.wait_and_draw(approval::ARM);
+    assert_eq!(again.answer('y', Duration::ZERO), Some(Decision::Approve));
     let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(root2);
 }
 
 /// Issue #485: the draw's report arms only the last page, and only after every page
