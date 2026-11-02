@@ -1518,7 +1518,7 @@ impl Paged {
     /// Pages forward, waiting out the arm delay on each page, to the last one.
     fn page_to_the_end(&mut self) -> String {
         let mut text = self.wait_and_draw(approval::ARM * 2);
-        for _ in 0..500 {
+        for _ in 0..120 {
             if self.session().approval_whole() {
                 return text;
             }
@@ -1563,7 +1563,10 @@ fn y_and_a_are_inert_until_the_last_page_was_shown_then_the_arm_delay_applies() 
         assert!(!first.contains("+line 200"), "{first}");
         // Long after the delay, no page but the last answers y or a; n always does.
         let mut text = first;
-        while !paged.session().approval_whole() {
+        for _ in 0..100 {
+            if paged.session().approval_whole() {
+                break;
+            }
             assert_eq!(paged.answer(key, approval::ARM * 3), None, "{text}");
             paged.page(true);
             paged.now += approval::ARM * 2;
@@ -1613,7 +1616,10 @@ fn approval_after_the_last_page_writes_exactly_the_bytes_that_were_shown() {
     let mut paged = Paged::new(session, 100, 24);
     let mut text = paged.wait_and_draw(approval::ARM * 2);
     let mut shown = plus_rows(&text);
-    while !paged.session().approval_whole() {
+    for _ in 0..100 {
+        if paged.session().approval_whole() {
+            break;
+        }
         text = paged.page(true);
         shown.extend(plus_rows(&text));
     }
