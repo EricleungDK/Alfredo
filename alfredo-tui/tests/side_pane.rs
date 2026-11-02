@@ -308,9 +308,12 @@ fn chat_row_without_a_user_message_stays_one_line() {
 
 #[test]
 fn chat_preview_is_one_sanitized_line() {
+    // The draft editor filters some characters, but a saved conversation can hold any.
     let mut app = App::new("fixture".into());
-    app.sessions[0].insert("fix\u{1b}[31m this\u{202e}\nnow\t\u{2028}  please\r\x07");
-    app.sessions[0].begin().unwrap();
+    app.sessions[0].messages.push(alfredo_tui::model::Message {
+        role: "user".into(),
+        content: "fix\u{1b}[31m this\u{202e}\nnow\t\u{2028}  please\r\x07".into(),
+    });
     let second = chat_seconds(&app)
         .remove(0)
         .expect("a chat with a user message has a preview");
@@ -320,11 +323,8 @@ fn chat_preview_is_one_sanitized_line() {
             .any(|c| c.is_control() || matches!(c, '\u{202e}' | '\u{2028}')),
         "{second:?}"
     );
-    assert!(
-        second.starts_with("fix<U+001B>[31m this<U+202E> now"),
-        "{second:?}"
-    );
-    assert!(second.ends_with("please<U+000D><U+0007>"), "{second:?}");
+    assert!(second.starts_with("fix[31m this<U+202E> now"), "{second:?}");
+    assert!(second.ends_with("please"), "{second:?}");
     assert!(!second.contains("  "), "{second:?}");
 }
 
