@@ -219,6 +219,63 @@ class HeadlessSmoke(unittest.TestCase):
         # Only the provider's own connect retries hit the server; no repair attempt ran.
         self.assertEqual(set(self.fixture.markers()), {'PLAN', 'DROP'})
 
+    def unreachable_stop(self, *extra):
+        """A headless run stopped by a model server that dropped the worker (issue #584)."""
+        self.fixture.drop_worker = True
+        code, out, err = self.run_headless('--headless', *extra)
+        self.assertEqual(code, 1, err)
+        return self.result(out), err
+
+    def test_unreachable_stop_names_the_stopped_task_and_resume_headless_as_the_next_step(self):
+        result, err = self.unreachable_stop('--max-repairs', '3')
+        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(result['failed'][0]['id'], 1)
+        self.assertIn(f'Cannot reach Ollama at {self.fixture.endpoint}', result['failed'][0]['reason'])
+        self.assertRegex(err, r'(?m)^next: .*--resume --headless')
+
+    def test_resume_headless_retries_the_unreachable_stop_without_planning_again(self):
+        self.unreachable_stop('--max-repairs', '3')
+        self.fixture.drop_worker = False
+        head = self.git('rev-parse', 'HEAD')
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual(code, 0, err)
+        result = self.result(out)
+        self.assertEqual((result['state'], result['goal'], result['accepted'], result['total'], result['failed']),
+                         ('done', GOAL, 2, 2, []))
+        self.assertRegex(result['branch'], r'^alfredo/go-')
+        self.assertEqual(self.fixture.markers().count('PLAN'), 1, self.fixture.markers())
+        self.assertEqual(self.git('show', f"{result['branch']}:calc.py"), 'def answer():\n    return 42')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(len(self.task_ids()), 3, 'task 1, task 2 and the one owner retry')
+
+    def test_resume_headless_after_an_unreachable_stop_gives_the_family_one_more_than_max_repairs(self):
+        self.unreachable_stop('--max-repairs', '1')
+        # The server is back but its answers are unusable: the retry and one automatic
+        # repair run (--max-repairs 1 + 1), then the family stops for its budget.
+        self.fixture.drop_worker = False
+        self.fixture.prose_worker = True
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual(code, 1, err)
+        result = self.result(out)
+        self.assertEqual((result['state'], result['repairs']), ('failed', 2))
+        self.assertIn('repair budget exhausted (2/2)', result['failed'][0]['reason'])
+        self.assertEqual(len(self.task_ids()), 4, 'tasks 1 and 2, the owner retry and one automatic repair')
+        self.assertEqual(self.fixture.markers().count('PLAN'), 1, self.fixture.markers())
+
+    def test_resume_headless_that_meets_the_unreachable_model_again_stops_again_with_the_next_step(self):
+        self.unreachable_stop('--max-repairs', '1')
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual(code, 1, err)
+        result = self.result(out)
+        self.assertEqual(result['state'], 'failed')
+        self.assertEqual(result['failed'][0]['id'], 3, 'the retry task is the one that stopped')
+        self.assertRegex(err, r'(?m)^next: .*--resume --headless')
+        self.assertEqual(len(self.task_ids()), 3, 'no automatic repair after an unreachable stop')
+        self.fixture.drop_worker = False
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.result(out)['state'], 'done')
+
     def test_worker_that_changes_nothing_is_not_accepted_even_when_the_check_passes_exit_1(self):
         self.fixture.echo_worker = True
         code, out, err = self.run_headless('--headless', '--max-repairs', '1')
@@ -397,6 +454,14 @@ class HeadlessSmoke(unittest.TestCase):
     def task_files(self):
         return sorted((path, path.read_text()) for path in self.state.glob('rust-tasks-v1/*/tasks.json'))
 
+    def task_ids(self):
+        ids = []
+        for _, text in self.task_files():
+            tasks = json.loads(text)
+            tasks = tasks.get('tasks', tasks) if isinstance(tasks, dict) else tasks
+            ids += [task['id'] for task in tasks]
+        return ids
+
     def test_resume_headless_continues_the_paused_run_without_planning_again(self):
         self.pause_run()
         code, out, err = self.run_headless('--resume', '--headless', goal=None)
@@ -427,6 +492,19 @@ class HeadlessSmoke(unittest.TestCase):
         code, out, err = self.run_headless('--resume', '--headless', goal=None)
         self.assertEqual((code, out), (2, ''), err)
         self.assertIn('nothing to resume', err)
+
+    def test_resume_headless_after_any_other_failure_still_exits_2_nothing_to_resume(self):
+        # A repair budget stop (and, by the same `fail()` path, a sandbox refusal or a
+        # file too large) is no unreachable stop: nothing is queued or planned.
+        self.fixture.prose_worker = True
+        code, out, err = self.run_headless('--headless', '--max-repairs', '0')
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.result(out)['state'], 'failed')
+        before, markers = self.task_files(), self.fixture.markers()
+        code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('nothing to resume', err)
+        self.assertEqual((self.task_files(), self.fixture.markers()), (before, markers))
 
     def test_a_fresh_conversation_name_starts_a_new_run_beside_the_paused_one(self):
         self.pause_run()
