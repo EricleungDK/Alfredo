@@ -1568,15 +1568,22 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         }
         let mut card_head = None;
         if let Some(card) = session.pending_approval() {
-            let (card_lines, head, whole) =
-                approval_card_lines(card, usize::from(width), usize::from(content[1].height));
-            card_head = Some((heights.len(), head, card_lines.len(), whole));
+            let (columns, rows) = (usize::from(width), usize::from(content[1].height));
+            let wanted = session.approval_page_wanted((width, rows));
+            let view = approval_card_view(card, columns, rows, wanted);
+            card_head = Some((
+                heights.len(),
+                view.head,
+                view.lines.len(),
+                view.complete,
+                (view.page, view.pages),
+            ));
             heights.extend(
-                card_lines
+                view.lines
                     .iter()
                     .map(|line| crate::transcript_cache::line_height(line, width)),
             );
-            segments.push(Segment::Run(card_lines));
+            segments.push(Segment::Run(view.lines));
         }
         let position = session.reading_position_blocks(&heights, content[1].height, &blocks);
         // Arming waits for the whole card (header, args, every command line and the key
@@ -1585,11 +1592,14 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         let viewport = usize::from(content[1].height);
         let rows_to = |upto: usize| heights[..upto.min(heights.len())].iter().sum::<usize>();
         let top = rows_to(position.line) + position.row;
-        // `n` needs the header and args rows on screen; `y`/`a` the whole card.
-        let (seen, whole) = card_head.map_or((false, false), |(at, head, count, whole)| {
-            let seen = rows_to(at + 1) >= top && rows_to(at + head + 1) <= top + viewport;
-            (seen, whole && seen && rows_to(at + count) <= top + viewport)
-        });
+        // `n` needs the header and args rows on screen; `y`/`a` the whole card, and on a
+        // paged card (issue #485) its last page once every earlier page was shown.
+        let (seen, whole) =
+            card_head.map_or((false, false), |(at, head, count, fits, (page, pages))| {
+                let seen = rows_to(at + 1) >= top && rows_to(at + head + 1) <= top + viewport;
+                let on_screen = fits && seen && rows_to(at + count) <= top + viewport;
+                (seen, session.approval_page_drawn(page, pages, on_screen))
+            });
         session.set_approval_header_drawn(seen);
         session.set_approval_whole(whole);
         // Only rows that can reach the viewport are materialised; wrapping them is
@@ -1783,18 +1793,66 @@ fn cut_cells(text: &str, cells: usize) -> String {
 /// The flag is true only when `y` may arm: the whole card (header, args, every `$`
 /// line of a command, key line) fits in `rows` (issue #303). Otherwise the card is
 /// deny-only: a shortened header and a key line that says why `y` and `a` are off.
+/// The card without paging: a diff taller than `rows` is cut and the card is deny-only
+/// (the #303 behaviour that a card which cannot be paged keeps).
+#[cfg(test)]
 fn approval_card_lines(
     card: &crate::chat_tools::approval::Card,
     width: usize,
     rows: usize,
 ) -> (Vec<Line<'static>>, usize, bool) {
-    let (lines, head, complete) = approval_card_build(card, width, rows, false);
-    if complete {
-        (lines, head, true)
-    } else {
-        let (lines, head, _) = approval_card_build(card, width, rows, true);
-        (lines, head, false)
+    let view = approval_card_build(card, width, rows, false, None, false);
+    if view.complete {
+        return (view.lines, view.head, true);
     }
+    let view = approval_card_build(card, width, rows, true, None, false);
+    (view.lines, view.head, false)
+}
+
+/// The card as drawn: `complete` when the page shown fits `rows` with nothing of it cut,
+/// `page` of `pages` for a diff taller than the viewport (issue #485).
+struct CardView {
+    lines: Vec<Line<'static>>,
+    head: usize,
+    complete: bool,
+    page: usize,
+    pages: usize,
+}
+
+fn approval_card_view(
+    card: &crate::chat_tools::approval::Card,
+    width: usize,
+    rows: usize,
+    page: usize,
+) -> CardView {
+    let view = approval_card_build(card, width, rows, false, Some(page), false);
+    if view.complete {
+        view
+    } else {
+        approval_card_build(card, width, rows, true, None, false)
+    }
+}
+
+/// Fewest diff rows a page must hold; a smaller screen leaves the card deny-only.
+const MIN_PAGE_ROWS: usize = 4;
+
+/// Greedy pages of diff lines of the given row `heights`, each at most `budget` rows;
+/// `None` when a line is taller than a page or the page is under [`MIN_PAGE_ROWS`] (the
+/// card then stays deny-only, issue #303).
+fn page_ranges(heights: &[usize], budget: usize) -> Option<Vec<std::ops::Range<usize>>> {
+    if budget < MIN_PAGE_ROWS || heights.iter().any(|height| *height > budget) {
+        return None;
+    }
+    let (mut ranges, mut start, mut used) = (vec![], 0, 0);
+    for (at, height) in heights.iter().enumerate() {
+        if used + height > budget {
+            ranges.push(start..at);
+            (start, used) = (at, 0);
+        }
+        used += height;
+    }
+    ranges.push(start..heights.len());
+    Some(ranges)
 }
 
 fn approval_card_build(
@@ -1802,7 +1860,9 @@ fn approval_card_build(
     width: usize,
     rows: usize,
     deny_only: bool,
-) -> (Vec<Line<'static>>, usize, bool) {
+    page: Option<usize>,
+    compact: bool,
+) -> CardView {
     use crate::chat_tools::approval::CardKind;
     // A deny-only card cuts its header so the args and key lines stay on screen.
     let summary = dashboard::single_line_visible(&card.summary);
@@ -1860,30 +1920,31 @@ fn approval_card_build(
     }
     let arguments = card.arguments.to_string();
     let shown: String = arguments.chars().take(width.max(20) * 2).collect();
-    lines.push(Line::styled(
-        format!("  args {}", safe_visible(&shown)),
-        dim(),
-    ));
+    // A card that is paged (issue #485) shows one row of arguments, the diff has the rest.
+    let args = if compact {
+        cut_cells(&safe_visible(&shown), width.saturating_sub(9).max(11))
+    } else {
+        safe_visible(&shown)
+    };
+    lines.push(Line::styled(format!("  args {args}"), dim()));
     let head = lines.len() - 1;
     // A preview taller than the rows left shows its first lines and a count of the
     // rest (issue #268). `y` arms only when nothing of a command is cut (issue #303).
-    let key_line = Line::styled(
-        match crate::chat_tools::allow::offer(card) {
-            _ if deny_only => "  n deny · Esc cancels the turn (deny) · y is off: the whole card does not fit here, enlarge the terminal or press n".into(),
-            Some(offer) => format!(
-                "  y approve · {} · n deny · Esc cancels the turn (deny)",
-                safe_visible(&offer)
+    let key_text: String = match crate::chat_tools::allow::offer(card) {
+        _ if deny_only => "  n deny · Esc cancels the turn (deny) · y is off: the whole card does not fit here, enlarge the terminal or press n".into(),
+        Some(offer) => format!(
+            "  y approve · {} · n deny · Esc cancels the turn (deny)",
+            safe_visible(&offer)
+        ),
+        None => match crate::chat_tools::allow::unavailable_reason(card) {
+            Some(why) => format!(
+                "  y approve · n deny · Esc cancels the turn (deny) · a not offered: {}",
+                safe_visible(&why)
             ),
-            None => match crate::chat_tools::allow::unavailable_reason(card) {
-                Some(why) => format!(
-                    "  y approve · n deny · Esc cancels the turn (deny) · a not offered: {}",
-                    safe_visible(&why)
-                ),
-                None => "  y approve · n deny · Esc cancels the turn (deny)".into(),
-            },
+            None => "  y approve · n deny · Esc cancels the turn (deny)".into(),
         },
-        warn,
-    );
+    };
+    let key_line = Line::styled(key_text.clone(), warn);
     let fixed: usize = lines
         .iter()
         .map(|line| crate::transcript_cache::line_height(line, width as u16))
@@ -1918,21 +1979,72 @@ fn approval_card_build(
             crate::transcript_cache::line_height(&row, width.min(usize::from(u16::MAX)) as u16)
         })
         .collect();
-    let mut shown = preview.len();
+    let (mut from, mut shown) = (0, preview.len());
+    let mut key_line = key_line;
+    let mut paging = None;
     if heights.iter().sum::<usize>() > budget {
-        // Keep one row for the count of what is cut.
-        budget = budget.saturating_sub(1);
-        shown = 0;
-        let mut used = 0;
-        for height in &heights {
-            if used + height > budget {
-                break;
+        // A file edit taller than the rows left is paged (issue #485): the key line and
+        // the page note take the room of the longest variant, so pages never move.
+        let tall = |text: &str| {
+            crate::transcript_cache::line_height(
+                &Line::from(text.to_string()),
+                width.min(usize::from(u16::MAX)) as u16,
+            )
+        };
+        let mid_text = "  n deny · Esc cancels the turn (deny) · PgDn/PgUp page · y is off until the last page";
+        let last_text = format!("{key_text} · PgUp back");
+        let count = preview.len();
+        let note = |page: usize, pages: usize, lines: &std::ops::Range<usize>| {
+            format!(
+                "  [{}/{pages} · lines {}-{} of {count} · {} more diff lines · PgUp/PgDn]",
+                page + 1,
+                lines.start + 1,
+                lines.end,
+                count - lines.len()
+            )
+        };
+        let widest = note(count, count, &(count..count));
+        let spare = budget.saturating_sub(
+            tall(&widest)
+                + tall(mid_text)
+                    .max(tall(&last_text))
+                    .saturating_sub(tall(&key_text)),
+        );
+        if page.is_some() && !deny_only && !compact && card.kind == CardKind::Edit {
+            // A paged card keeps its rows for the diff: redo it with one row of arguments.
+            return approval_card_build(card, width, rows, false, page, true);
+        }
+        let plan = page
+            .filter(|_| !deny_only && card.kind == CardKind::Edit)
+            .and_then(|page| Some((page, page_ranges(&heights, spare)?)));
+        if let Some((page, ranges)) = plan {
+            let page = page.min(ranges.len() - 1);
+            let last = page + 1 == ranges.len();
+            paging = Some((page, ranges.len(), note(page, ranges.len(), &ranges[page])));
+            key_line = Line::styled(
+                if last {
+                    last_text
+                } else {
+                    mid_text.to_string()
+                },
+                warn,
+            );
+            (from, shown) = (ranges[page].start, ranges[page].end);
+        } else {
+            // Keep one row for the count of what is cut.
+            budget = budget.saturating_sub(1);
+            shown = 0;
+            let mut used = 0;
+            for height in &heights {
+                if used + height > budget {
+                    break;
+                }
+                used += height;
+                shown += 1;
             }
-            used += height;
-            shown += 1;
         }
     }
-    for (line, text) in &preview[..shown] {
+    for (line, text) in &preview[from..shown] {
         let color = if line.starts_with('+') {
             Color::Green
         } else if line.starts_with('-') {
@@ -1945,7 +2057,9 @@ fn approval_card_build(
             Style::default().fg(color),
         ));
     }
-    if shown < preview.len() {
+    if let Some((_, _, note)) = &paging {
+        lines.push(Line::styled(note.clone(), dim()));
+    } else if shown < preview.len() {
         lines.push(Line::styled(
             format!("  [{} more diff lines]", preview.len() - shown),
             dim(),
@@ -1960,8 +2074,15 @@ fn approval_card_build(
         .sum();
     // Every preview line of every card kind (diff, commit message, file list, `$`
     // lines) must be drawn; a cut preview never arms `y` (issues #303, #269).
-    let preview_whole = shown == preview.len();
-    (lines, head, !deny_only && total <= rows && preview_whole)
+    let preview_whole = shown == preview.len() || paging.is_some();
+    let (page, pages) = paging.map_or((0, 1), |(page, pages, _)| (page, pages));
+    CardView {
+        lines,
+        head,
+        complete: !deny_only && total <= rows && preview_whole,
+        page,
+        pages,
+    }
 }
 
 #[cfg(test)]
@@ -2063,6 +2184,99 @@ mod tests {
                 assert!(last.contains(key), "{name}: key line is last");
             }
         }
+    }
+
+    /// Issue #485: pages are greedy, at least four rows, and a line taller than a page
+    /// makes the card unpageable.
+    #[test]
+    fn pages_hold_whole_lines_and_a_page_under_four_rows_or_a_taller_line_is_unpageable() {
+        assert_eq!(
+            page_ranges(&[1, 1, 1, 1, 1], 4),
+            Some(vec![0..4, 4..5]),
+            "a full page takes exactly its budget"
+        );
+        assert_eq!(page_ranges(&[2, 2, 2], 5), Some(vec![0..2, 2..3]));
+        assert_eq!(page_ranges(&[1; 8], 4).map(|r| r.len()), Some(2));
+        assert_eq!(page_ranges(&[1, 1, 1, 1, 1], 3), None, "under four rows");
+        assert_eq!(
+            page_ranges(&[1, 5, 1], 4),
+            None,
+            "a line taller than a page"
+        );
+        assert_eq!(page_ranges(&[1, 4, 1], 4), Some(vec![0..1, 1..2, 2..3]));
+    }
+
+    fn edit_card_of(lines: usize) -> crate::chat_tools::approval::Card {
+        use crate::chat_tools::approval::{Card, CardKind};
+        Card {
+            tool: "write_file".into(),
+            arguments: serde_json::json!({"path": "big.txt", "content": "x"}),
+            kind: CardKind::Edit,
+            summary: "new file big.txt".into(),
+            preview: std::iter::once("@@ line 1 @@".to_string())
+                .chain((1..=lines).map(|n| format!("+line {n}")))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            fingerprint: "big.txt:absent".into(),
+        }
+    }
+
+    #[test]
+    fn a_tall_edit_card_is_paged_into_pages_that_fit_and_the_last_page_has_the_y_key() {
+        let card = edit_card_of(100);
+        let (width, rows) = (80usize, 20usize);
+        let first = approval_card_view(&card, width, rows, 0);
+        assert!(first.complete && first.pages > 1);
+        assert_eq!(first.page, 0);
+        let mut seen = vec![];
+        for page in 0..first.pages {
+            let view = approval_card_view(&card, width, rows, page);
+            assert_eq!((view.page, view.pages), (page, first.pages));
+            assert!(view.complete);
+            assert!(height_of(&view.lines, width) <= rows, "page {page}");
+            let text: Vec<String> = view.lines.iter().map(|l| l.to_string()).collect();
+            seen.extend(
+                text.iter()
+                    .filter(|l| l.starts_with("  +line"))
+                    .map(|l| l.trim().to_string()),
+            );
+            let key = text.last().unwrap();
+            if page + 1 == view.pages {
+                assert!(
+                    key.contains("y approve") && key.contains("PgUp back"),
+                    "{key}"
+                );
+            } else {
+                assert!(
+                    key.contains("y is off") && !key.contains("y approve"),
+                    "{key}"
+                );
+            }
+            assert!(
+                text.iter()
+                    .any(|l| l.contains(&format!("[{}/{}", page + 1, view.pages))),
+                "{text:?}"
+            );
+        }
+        let expected: Vec<String> = (1..=100).map(|n| format!("+line {n}")).collect();
+        assert_eq!(seen, expected, "every line on exactly one page, in order");
+        // A page past the end is the last page; nothing is cut anywhere.
+        let beyond = approval_card_view(&card, width, rows, 99);
+        assert_eq!(beyond.page, first.pages - 1);
+    }
+
+    #[test]
+    fn a_card_that_fits_is_one_page_and_a_short_screen_or_a_git_card_is_not_paged() {
+        let small = edit_card_of(3);
+        let view = approval_card_view(&small, 80, 24, 0);
+        assert_eq!((view.pages, view.page, view.complete), (1, 0, true));
+        // Too short for a four-row page: deny-only, one "page", nothing paged.
+        let view = approval_card_view(&edit_card_of(100), 80, 8, 0);
+        assert_eq!((view.pages, view.complete), (1, false));
+        let mut git = edit_card_of(100);
+        git.kind = crate::chat_tools::approval::CardKind::Git;
+        let view = approval_card_view(&git, 80, 20, 0);
+        assert_eq!((view.pages, view.complete), (1, false));
     }
 
     fn shell_card(command: &str, escalated: bool) -> crate::chat_tools::approval::Card {

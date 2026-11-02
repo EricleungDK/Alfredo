@@ -1509,6 +1509,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 None if answer != 'n'
+                                    && !work.app.sessions[index].approval_whole()
+                                    && work.app.sessions[index].approval_pages() > 1 =>
+                                {
+                                    work.app.notice = "Page the card to its last page first (PgDn): y and a stay off until every page was shown, or press n".into();
+                                }
+                                None if answer != 'n'
                                     && !work.app.sessions[index].approval_whole() =>
                                 {
                                     work.app.notice = "The whole card is not on screen, so y and a are off: enlarge the terminal or press n".into();
@@ -2381,7 +2387,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 work.tasks.page_details(false);
                                 continue;
                             }
-                            work.app.sessions[index].scroll_rows(-10);
+                            // A card taller than the screen is paged first (issue #485).
+                            if !work.app.sessions[index].page_approval(false) {
+                                work.app.sessions[index].scroll_rows(-10);
+                            }
                         }
                         KeyCode::PageDown => {
                             if work.app.models_visible {
@@ -2392,7 +2401,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 work.tasks.page_details(true);
                                 continue;
                             }
-                            work.app.sessions[index].scroll_rows(10);
+                            if !work.app.sessions[index].page_approval(true) {
+                                work.app.sessions[index].scroll_rows(10);
+                            }
                         }
                         KeyCode::Char(ch)
                             if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>

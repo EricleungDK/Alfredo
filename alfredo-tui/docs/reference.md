@@ -314,7 +314,7 @@ Approval gate, answered by a scripted policy instead of a card:
 
 - no `--approve`: every mutating call is denied;
 - `--approve workspace-edits`: `edit_file` and `write_file` whose path stays inside the
-  repository are approved; anything else (other tools, later card kinds) is denied. A path
+  repository are approved when the card's diff is at most 80 lines (a longer one needs paging by an owner, issue #485, so it is denied); anything else (other tools, later card kinds) is denied. A path
   with a control character is refused before asking, and stderr lines carry no control characters.
   Format characters (such as U+202E) show as `<U+XXXX>` on stderr, and line separators
   (U+2028, U+2029) become spaces.
@@ -1923,7 +1923,7 @@ Approval (ADR 0004); there is no skip-approval mode.
   diff is cut to the rows that fit (`[N more diff lines]`) so the header, arguments and
   key line stay on screen; the 0.5 s delay below starts only once the header rows are
   drawn, and PageUp that scrolls them out of view disarms `y`/`n` until they return.
-  `y` and `a` also need the whole card on screen, for every kind of card (file edits,
+  `y` and `a` also need the whole card on screen (a file edit taller than the screen is paged, see below), for every kind of card (file edits,
   `git_commit`, `git_switch`, `git_merge`, `git_push`, `run_command`): the header, every
   line of the preview (diff lines, commit message, file and commit lists, every `$` line of
   a `run_command`) and the key line, with rows counted in display columns. If any preview
@@ -1936,22 +1936,43 @@ Approval (ADR 0004); there is no skip-approval mode.
   lines. The `args` line is a two-row excerpt of the raw arguments and is not part of this
   test; the preview is what the owner approves. Enlarging the terminal re-evaluates the
   card; on a terminal so short that the header cannot be drawn, only Esc answers.
-- **The card shows minimal hunks (issue #510).** A `write_file` or `edit_file` card draws only the changed lines, one `@@ line N @@` header per run of changes (N is the line in the current file); unchanged lines between hunks are not drawn, so a rewrite that changes lines 1 and 100 of a 100-line file is a 6-line card. A change that needs more than 160 added plus removed lines is drawn as one span from its first to its last change and is then refused by the cap below. One contiguous change reads as before.
-- **Over-cap changes are refused, not cut (issue #269).** A card never hides lines the
-  owner is asked to approve. `write_file` and `edit_file` are refused when the card's
-  diff would pass 80 lines, counted as every line of the diff text: each `@@` hunk header, the
-  `-` and `+` lines, a line-ending note (`final newline added`, `line endings CRLF → LF`)
-  and the `new directories:` line. Exactly 80 passes; 81 is refused with
-  `the change's diff is 81 lines, over the 80-line approval card limit; nothing was written. Split it …`
+- **The card shows minimal hunks (issue #510).** A `write_file` or `edit_file` card draws only the changed lines, one `@@ line N @@` header per run of changes (N is the line in the current file); unchanged lines between hunks are not drawn, so a rewrite that changes lines 1 and 100 of a 100-line file is a 6-line card. A change that needs more than 160 added plus removed lines (a bound on the search for the smallest diff, since its memory grows with the square) is drawn as one span from its first to its last change, which the card then pages or the cap below refuses. One contiguous change reads as before.
+- **A diff over one screen is paged (issue #485).** A `write_file` or `edit_file` card
+  whose diff does not fit the rows of the terminal is shown one page at a time instead of
+  being cut: the page note reads `[2/9 · lines 41-80 of 401 · 361 more diff lines ·
+  PgUp/PgDn]`, the `args` line shrinks to one row, and PageDown / PageUp turn the pages
+  (they scroll the transcript again once the card is answered, and on a card with a single
+  page). While a page other than the last is shown the key line reads `n deny · … · y is off
+  until the last page`; `y` and `a` are refused (with a notice) until the last page has
+  been shown, pages open one at a time (pressing PageDown faster than the screen redraws
+  never skips one), and a page counts as shown only when the whole card was on screen with
+  it. Reaching the last page restarts the 0.5 s arm delay, and so does paging back and
+  forward again. Resizing the terminal starts the paging over, so `y` is off again until
+  the last page of the new layout is shown. `n` and Esc deny on every page. Approval
+  writes exactly the previewed bytes and still refuses, with nothing written, when the file
+  changed since the preview. A card that cannot be paged stays deny-only as in #303: a
+  single line taller than a page, or a terminal too short for a page of at least 4 diff
+  rows (`[N more diff lines]`, `y is off: the whole card does not fit here …`). A paged
+  card is never covered by an [always-allow rule](#chat-always-allow-rules) (it asks every
+  time, though `a` on its last page still adds the rule for small edits) and is denied by
+  the headless `--approve workspace-edits` policy, since nobody pages it there.
+- **Over-cap changes are refused, not cut (issues #269, #485).** A card never hides lines
+  the owner is asked to approve. `write_file` and `edit_file` are refused when the card's
+  diff would pass 2000 lines (a size the owner can page through), counted as every line of
+  the diff text: each `@@` hunk header, the `-` and `+` lines, a line-ending note
+  (`final newline added`, `line endings CRLF → LF`) and the `new directories:` line.
+  Exactly 2000 passes; 2001 is refused with
+  `the change's diff is 2001 lines, over the 2000-line approval card limit; nothing was written. Split it …`
   before any card is shown, again at apply, and the file (and any directory) is left
-  untouched. `git_commit` (file listing) and `git_merge` (one `path | +added -deleted` row per file, built from `git diff --numstat -z` so
+  untouched. A diff of 80 lines or fewer needs no paging on a tall enough terminal and is
+  the most a rule or the headless policy applies. `git_commit` (file listing) and `git_merge` (one `path | +added -deleted` row per file, built from `git diff --numstat -z` so
   no name is shortened to `.../name`, control characters shown as `\xNN`, plus a count row;
-  a listing git printed past the read limit is refused, never cut) are refused the same way above 40 lines, with the index,
-  HEAD and working tree untouched. Secret, protected-path and read-only refusals are
+  a listing git printed past the read limit is refused, never cut) keep their cap and are refused above 40 lines, with the index,
+  HEAD and working tree untouched, and are not paged. Secret, protected-path and read-only refusals are
   checked first and still win. The caps bound the line count only. Whether the card then
-  fits the terminal is a separate check: a card whose lines do not all fit the rows
-  (including one very long line) is shown cut with `[N more diff lines]` and is deny-only,
-  as above, so a cut card can never be approved. A `git_merge` card lists at most 20
+  fits the terminal is a separate check: a git card, or a file card that cannot be paged,
+  whose lines do not all fit the rows (including one very long line) is shown cut with
+  `[N more diff lines]` and is deny-only, as above, so a cut card can never be approved. A `git_merge` card lists at most 20
   commits and ends the list with `[N more]` giving the count of the rest; that count is
   not a cap on what the merge brings in.
 - **Waiting on you.** While a card is pending the chat's side-pane row and its frame title

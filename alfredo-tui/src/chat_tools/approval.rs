@@ -64,6 +64,13 @@ impl Card {
     pub fn escalated(&self) -> bool {
         matches!(self.kind, CardKind::Shell { escalated: true })
     }
+
+    /// True for a file edit whose diff is over [`super::edit::MAX_PREVIEW_LINES`] (issue
+    /// #485): the owner pages through it, and no always-allow rule or headless policy
+    /// approves it unseen.
+    pub fn paged(&self) -> bool {
+        self.kind == CardKind::Edit && self.preview.lines().count() > super::edit::MAX_PREVIEW_LINES
+    }
 }
 
 /// What came of one card.

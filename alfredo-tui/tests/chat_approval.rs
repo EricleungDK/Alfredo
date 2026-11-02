@@ -631,33 +631,59 @@ fn write_file_diff_of_exactly_80_lines_gets_a_whole_card() {
 }
 
 #[test]
-fn write_file_diff_of_81_lines_is_refused_naming_the_cap_and_writes_nothing() {
+fn write_file_diff_of_81_lines_is_paged_and_the_hard_cap_still_refuses_and_writes_nothing() {
     let root = workspace("cap-write-81");
+    // 81 lines: over what an always-allow rule or headless policy applies unseen, so
+    // the card is paged (issue #485) instead of refused.
     let write = call(
         "write_file",
         json!({"path": "big.txt", "content": numbered(80)}),
     );
-    let error = approval::card(&root, &write).unwrap_err();
+    let card = approval::card(&root, &write).unwrap();
+    assert_eq!(card.preview.lines().count(), 81, "{}", card.preview);
+    assert!(card.paged());
     assert!(
-        error.contains("81 lines") && error.contains("80-line"),
+        !root.join("big.txt").exists(),
+        "nothing written before approval"
+    );
+    // Header + 1999 added lines = 2000 passes; one more is refused before any card.
+    let at_cap = call(
+        "write_file",
+        json!({"path": "cap.txt", "content": numbered(1999)}),
+    );
+    assert_eq!(
+        approval::card(&root, &at_cap)
+            .unwrap()
+            .preview
+            .lines()
+            .count(),
+        2000
+    );
+    let over = call(
+        "write_file",
+        json!({"path": "over.txt", "content": numbered(2000)}),
+    );
+    let error = approval::card(&root, &over).unwrap_err();
+    assert!(
+        error.contains("2001 lines") && error.contains("2000-line"),
         "{error}"
     );
     assert!(error.contains("smaller"), "{error}");
-    let result = chat_tools::dispatch(&root, &write);
+    let result = chat_tools::dispatch(&root, &over);
     assert!(
-        result.starts_with("error: ") && result.contains("80-line"),
+        result.starts_with("error: ") && result.contains("2000-line"),
         "{result}"
     );
-    assert!(!root.join("big.txt").exists());
+    assert!(!root.join("over.txt").exists());
     // Replacing an existing file is held to the same cap and left byte-identical.
     fs::write(root.join("old.txt"), numbered(3)).unwrap();
     let replace = call(
         "write_file",
-        json!({"path": "old.txt", "content": numbered(200)}),
+        json!({"path": "old.txt", "content": numbered(3000)}),
     );
     assert!(approval::card(&root, &replace)
         .unwrap_err()
-        .contains("80-line"));
+        .contains("2000-line"));
     assert!(chat_tools::dispatch(&root, &replace).starts_with("error: "));
     assert_eq!(
         fs::read_to_string(root.join("old.txt")).unwrap(),
@@ -673,10 +699,7 @@ fn a_400_line_new_file_gets_a_card_whose_shown_lines_are_exactly_the_written_byt
     use sha2::{Digest, Sha256};
     let root = workspace("page-400");
     let content = numbered(400);
-    let write = call(
-        "write_file",
-        json!({"path": "big.txt", "content": content}),
-    );
+    let write = call("write_file", json!({"path": "big.txt", "content": content}));
     let card = approval::card(&root, &write).unwrap();
     assert_eq!(card.preview.lines().count(), 401, "{}", card.preview);
     // The bytes the card shows: every `+` line, newline-terminated.
@@ -686,7 +709,10 @@ fn a_400_line_new_file_gets_a_card_whose_shown_lines_are_exactly_the_written_byt
         .filter_map(|line| line.strip_prefix('+'))
         .map(|line| format!("{line}\n"))
         .collect();
-    assert!(!root.join("big.txt").exists(), "nothing written before approval");
+    assert!(
+        !root.join("big.txt").exists(),
+        "nothing written before approval"
+    );
     approval::apply(&root, &card).unwrap();
     let written = fs::read(root.join("big.txt")).unwrap();
     assert_eq!(Sha256::digest(&written), Sha256::digest(shown.as_bytes()));
@@ -704,20 +730,34 @@ fn the_new_directories_line_counts_toward_the_write_file_cap() {
     );
     let card = approval::card(&root, &at_cap).unwrap();
     assert_eq!(card.preview.lines().count(), 80, "{}", card.preview);
+    assert!(!card.paged());
+    // The same line counts toward the hard cap: it + header + 1998 added = 2000 passes.
+    let hard = call(
+        "write_file",
+        json!({"path": "a/b/hard.txt", "content": numbered(1998)}),
+    );
+    assert_eq!(
+        approval::card(&root, &hard)
+            .unwrap()
+            .preview
+            .lines()
+            .count(),
+        2000
+    );
     let over = call(
         "write_file",
-        json!({"path": "a/b/big.txt", "content": numbered(79)}),
+        json!({"path": "a/b/big.txt", "content": numbered(1999)}),
     );
     assert!(approval::card(&root, &over)
         .unwrap_err()
-        .contains("80-line"));
+        .contains("2000-line"));
     assert!(chat_tools::dispatch(&root, &over).starts_with("error: "));
     assert!(!root.join("a").exists(), "no directory may be created");
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn edit_file_diff_of_exactly_80_lines_passes_and_81_is_refused_unchanged() {
+fn edit_file_diff_of_exactly_80_lines_passes_81_is_paged_and_the_hard_cap_refuses() {
     let root = workspace("cap-edit");
     let old = numbered(40);
     fs::write(root.join("f.txt"), &old).unwrap();
@@ -730,23 +770,35 @@ fn edit_file_diff_of_exactly_80_lines_passes_and_81_is_refused_unchanged() {
     let card = approval::card(&root, &at_cap).unwrap();
     assert_eq!(card.preview.lines().count(), 80, "{}", card.preview);
     assert!(!card.preview.contains("more"), "{}", card.preview);
-    // Header + 40 removed + 40 added = 81.
-    let over = call(
+    // Header + 40 removed + 40 added = 81: over what runs unseen, so the card is paged.
+    let paged = call(
         "edit_file",
         json!({"path": "f.txt", "old_text": &old,
                "new_text": (1..=40).map(|n| format!("new {n}\n")).collect::<String>()}),
     );
+    let card = approval::card(&root, &paged).unwrap();
+    assert_eq!(card.preview.lines().count(), 81, "{}", card.preview);
+    assert!(card.paged());
+    assert!(!approval::card(&root, &at_cap).unwrap().paged());
+    // Header + 1000 removed + 1000 added = 2001: over the hard cap, refused unchanged.
+    let big = numbered(1000);
+    fs::write(root.join("g.txt"), &big).unwrap();
+    let over = call(
+        "edit_file",
+        json!({"path": "g.txt", "old_text": &big,
+               "new_text": (1..=1000).map(|n| format!("new {n}\n")).collect::<String>()}),
+    );
     let error = approval::card(&root, &over).unwrap_err();
     assert!(
-        error.contains("81 lines") && error.contains("80-line"),
+        error.contains("2001 lines") && error.contains("2000-line"),
         "{error}"
     );
     let result = chat_tools::dispatch(&root, &over);
     assert!(
-        result.starts_with("error: ") && result.contains("80-line"),
+        result.starts_with("error: ") && result.contains("2000-line"),
         "{result}"
     );
-    assert_eq!(fs::read(root.join("f.txt")).unwrap(), old.as_bytes());
+    assert_eq!(fs::read(root.join("g.txt")).unwrap(), big.as_bytes());
     let _ = fs::remove_dir_all(root);
 }
 
@@ -767,13 +819,26 @@ fn a_line_ending_note_counts_toward_the_cap() {
             .count(),
         80
     );
+    // The same note counts toward the hard cap: header + `-x` + 1997 added + note = 2000.
+    let hard = call(
+        "write_file",
+        json!({"path": "n.txt", "content": numbered(1997)}),
+    );
+    assert_eq!(
+        approval::card(&root, &hard)
+            .unwrap()
+            .preview
+            .lines()
+            .count(),
+        2000
+    );
     let over = call(
         "write_file",
-        json!({"path": "n.txt", "content": numbered(78)}),
+        json!({"path": "n.txt", "content": numbered(1998)}),
     );
     assert!(approval::card(&root, &over)
         .unwrap_err()
-        .contains("80-line"));
+        .contains("2000-line"));
     assert_eq!(fs::read_to_string(root.join("n.txt")).unwrap(), "x");
     let _ = fs::remove_dir_all(root);
 }
@@ -1384,17 +1449,15 @@ fn write_file_session(root: &Path, content: &str) -> Session {
     session
 }
 
-/// Issue #269: a diff under the 80-line cap whose one line is far taller than the
-/// terminal is cut by the viewport, so `y` and `a` approve nothing; nothing is written.
+/// Issue #269: a diff whose one line is far taller than the terminal cannot be shown on
+/// any page, so `y` and `a` approve nothing; nothing is written. (Many wrapped lines are
+/// paged since issue #485: see `many_wrapped_lines_are_paged_not_deny_only`.)
 #[test]
 fn a_write_file_card_with_one_huge_line_is_deny_only_and_writes_nothing() {
     let huge = format!("{}\n", "x".repeat(200_000));
-    // A line of wide characters, and many wrapped lines under the cap, cut the same way.
+    // A line of wide characters is cut the same way.
     let wide = format!("{}\n", "漢".repeat(50_000));
-    let wrapped: String = (0..70)
-        .map(|i| format!("{i} {}\n", "w".repeat(150)))
-        .collect();
-    for content in [huge, wide, wrapped] {
+    for content in [huge, wide] {
         for (w, h) in [(80, 24), (100, 24), (80, 40)] {
             let root = workspace("hugeline");
             let probe = probe_session(write_file_session(&root, &content), w, h);
@@ -1409,6 +1472,355 @@ fn a_write_file_card_with_one_huge_line_is_deny_only_and_writes_nothing() {
             let _ = fs::remove_dir_all(root);
         }
     }
+}
+
+/// Issue #485: a diff over one screen is paged. A drawn session in a `width`x`height`
+/// terminal; every draw mirrors the main loop (`draw_and_report`).
+struct Paged {
+    app: App,
+    terminal: Terminal<TestBackend>,
+    now: Instant,
+}
+
+impl Paged {
+    fn new(session: Session, width: u16, height: u16) -> Self {
+        let mut app = App::new("m".into());
+        app.sessions[0] = session;
+        let mut paged = Self {
+            app,
+            terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
+            now: Instant::now(),
+        };
+        paged.draw();
+        paged
+    }
+
+    /// Draws at the current time and returns the screen.
+    fn draw(&mut self) -> String {
+        draw_and_report(&mut self.terminal, &mut self.app, self.now)
+    }
+
+    /// Waits `by`, then draws.
+    fn wait_and_draw(&mut self, by: Duration) -> String {
+        self.now += by;
+        self.draw()
+    }
+
+    fn session(&mut self) -> &mut Session {
+        &mut self.app.sessions[0]
+    }
+
+    fn page(&mut self, forward: bool) -> String {
+        assert!(self.session().page_approval(forward));
+        self.draw()
+    }
+
+    /// Pages forward, waiting out the arm delay on each page, to the last one.
+    fn page_to_the_end(&mut self) -> String {
+        let mut text = self.wait_and_draw(approval::ARM * 2);
+        for _ in 0..500 {
+            if self.session().approval_whole() {
+                return text;
+            }
+            text = self.page(true);
+            self.now += approval::ARM * 2;
+        }
+        panic!("never reached the last page:\n{text}");
+    }
+
+    fn answer(&mut self, key: char, after: Duration) -> Option<Decision> {
+        let at = self.now + after;
+        self.session().answer_approval(key, at)
+    }
+}
+
+fn big_session(tag: &str, content: &str) -> (PathBuf, Session) {
+    let root = workspace(tag);
+    let session = write_file_session(&root, content);
+    (root, session)
+}
+
+/// The `+line N` rows of a screen, in order.
+fn plus_rows(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|row| {
+            let at = row.find("+line ")?;
+            Some(row[at..].split('│').next()?.trim_end().to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn y_and_a_are_inert_until_the_last_page_was_shown_then_the_arm_delay_applies() {
+    for key in ['y', 'a'] {
+        let (root, session) = big_session("page-inert", &numbered(200));
+        let mut paged = Paged::new(session, 100, 24);
+        let first = paged.wait_and_draw(approval::ARM * 2);
+        assert!(paged.session().approval_pages() > 3, "{first}");
+        assert!(first.contains("+line 1"), "{first}");
+        assert!(first.contains("y is off"), "{first}");
+        assert!(first.contains("more diff lines"), "{first}");
+        assert!(!first.contains("+line 200"), "{first}");
+        // Long after the delay, no page but the last answers y or a; n always does.
+        let mut text = first;
+        while !paged.session().approval_whole() {
+            assert_eq!(paged.answer(key, approval::ARM * 3), None, "{text}");
+            paged.page(true);
+            paged.now += approval::ARM * 2;
+            text = paged.draw();
+        }
+        assert!(text.contains("+line 200"), "{text}");
+        assert!(paged.session().approval_whole(), "{text}");
+        // The arm delay restarts at the last page: too early decides nothing.
+        paged.now += approval::ARM;
+        let text = paged.page(false);
+        assert!(text.contains("y is off"), "{text}");
+        let text = paged.page(true);
+        assert!(text.contains("+line 200"), "{text}");
+        assert_eq!(paged.answer(key, approval::ARM / 2), None, "{text}");
+        let want = if key == 'y' {
+            Decision::Approve
+        } else {
+            Decision::AlwaysAllow
+        };
+        assert_eq!(paged.answer(key, approval::ARM), Some(want));
+        assert!(
+            !root.join("big.txt").exists(),
+            "deciding writes nothing itself"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
+fn n_denies_from_any_page_and_a_denied_paged_card_writes_nothing() {
+    let (root, session) = big_session("page-deny", &numbered(200));
+    let mut paged = Paged::new(session, 100, 24);
+    paged.wait_and_draw(approval::ARM * 2);
+    assert_eq!(paged.answer('n', approval::ARM), Some(Decision::Deny));
+    assert!(!root.join("big.txt").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #485 acceptance: the lines shown across the pages, hashed, equal the bytes
+/// approval writes.
+#[test]
+fn approval_after_the_last_page_writes_exactly_the_bytes_that_were_shown() {
+    use sha2::{Digest, Sha256};
+    let content = numbered(200);
+    let (root, session) = big_session("page-bytes", &content);
+    let card = session.pending_approval().unwrap().clone();
+    let mut paged = Paged::new(session, 100, 24);
+    let mut text = paged.wait_and_draw(approval::ARM * 2);
+    let mut shown = plus_rows(&text);
+    while !paged.session().approval_whole() {
+        text = paged.page(true);
+        shown.extend(plus_rows(&text));
+    }
+    // Every line appeared once, in order, none skipped.
+    let expected: Vec<String> = (1..=200).map(|n| format!("+line {n}")).collect();
+    assert_eq!(shown, expected);
+    let shown_bytes: String = shown.iter().map(|row| format!("{}\n", &row[1..])).collect();
+    assert_eq!(
+        paged.answer('y', approval::ARM * 3),
+        Some(Decision::Approve)
+    );
+    approval::apply(&root, &card).unwrap();
+    let written = fs::read(root.join("big.txt")).unwrap();
+    assert_eq!(
+        Sha256::digest(&written),
+        Sha256::digest(shown_bytes.as_bytes())
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #485: approval stays refused when the file changed after the paged preview.
+#[test]
+fn a_paged_card_is_refused_when_the_file_changed_since_the_preview() {
+    let root = workspace("page-stale");
+    fs::write(root.join("big.txt"), "old\n").unwrap();
+    let card = approval::card(
+        &root,
+        &call(
+            "write_file",
+            json!({"path": "big.txt", "content": numbered(200)}),
+        ),
+    )
+    .unwrap();
+    assert!(card.paged());
+    fs::write(root.join("big.txt"), "changed by someone\n").unwrap();
+    let error = approval::apply(&root, &card).unwrap_err();
+    assert!(error.contains("changed since the preview"), "{error}");
+    assert_eq!(
+        fs::read_to_string(root.join("big.txt")).unwrap(),
+        "changed by someone\n"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #485: two PgDn between draws still show the pages one at a time.
+#[test]
+fn pages_cannot_be_skipped_by_pressing_page_down_faster_than_the_draws() {
+    let (root, session) = big_session("page-skip", &numbered(200));
+    let mut paged = Paged::new(session, 100, 24);
+    paged.wait_and_draw(approval::ARM * 2);
+    for _ in 0..50 {
+        assert!(paged.session().page_approval(true));
+    }
+    let text = paged.draw();
+    assert!(text.contains("[2/"), "only the next page opens: {text}");
+    assert!(!paged.session().approval_whole());
+    assert_eq!(paged.answer('y', approval::ARM * 3), None);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #485: a page that was not fully on screen (the transcript scrolled) does not
+/// count as shown, however many times PgDn is pressed.
+#[test]
+fn a_page_scrolled_out_of_view_does_not_count_as_shown() {
+    let (root, session) = big_session("page-scrolled", &numbered(200));
+    session.scroll_rows(-3);
+    let mut paged = Paged::new(session, 100, 24);
+    paged.wait_and_draw(approval::ARM * 2);
+    for _ in 0..60 {
+        paged.session().page_approval(true);
+        paged.wait_and_draw(approval::ARM * 2);
+    }
+    assert!(!paged.session().approval_whole());
+    assert_eq!(paged.answer('y', approval::ARM * 3), None);
+    assert_eq!(paged.answer('a', approval::ARM * 3), None);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #485: resizing after the last page was shown starts over: `y` is off again
+/// until the card is paged to its end at the new size.
+#[test]
+fn resizing_after_the_last_page_requires_the_pages_again() {
+    let (root, session) = big_session("page-resize", &numbered(200));
+    let mut paged = Paged::new(session, 100, 24);
+    let text = paged.page_to_the_end();
+    assert!(text.contains("+line 200"), "{text}");
+    assert!(paged.session().approval_whole());
+    for (width, height) in [(100, 30), (120, 24), (100, 23)] {
+        let mut resized = Paged::new(
+            std::mem::replace(paged.session(), Session::new("m".into())),
+            width,
+            height,
+        );
+        let text = resized.wait_and_draw(approval::ARM * 2);
+        assert!(text.contains("y is off"), "{width}x{height}: {text}");
+        assert!(text.contains("+line 1"), "{width}x{height}: {text}");
+        assert!(!resized.session().approval_whole(), "{width}x{height}");
+        assert_eq!(
+            resized.answer('y', approval::ARM * 3),
+            None,
+            "{width}x{height}"
+        );
+        let last = resized.page_to_the_end();
+        assert!(last.contains("+line 200"), "{width}x{height}: {last}");
+        assert_eq!(
+            resized.answer('y', approval::ARM),
+            Some(Decision::Approve),
+            "{width}x{height}"
+        );
+        // Rebuild for the next size.
+        let (_, session) = big_session("page-resize-again", &numbered(200));
+        paged = Paged::new(session, 100, 24);
+        paged.page_to_the_end();
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #485: tiny terminals cannot page (deny-only), huge ones fit it whole or in
+/// fewer pages; nowhere does `y` approve a page that was not shown.
+#[test]
+fn tiny_and_huge_terminals_never_arm_an_unshown_diff() {
+    for (width, height, pages) in [(100u16, 16u16, false), (200, 60, true), (200, 300, false)] {
+        let (root, session) = big_session("page-sizes", &numbered(200));
+        let mut paged = Paged::new(session, width, height);
+        let text = paged.wait_and_draw(approval::ARM * 2);
+        assert_eq!(
+            paged.session().approval_pages() > 1,
+            pages,
+            "{width}x{height}: {text}"
+        );
+        if pages {
+            assert_eq!(paged.answer('y', approval::ARM * 3), None);
+            let last = paged.page_to_the_end();
+            assert!(last.contains("+line 200"), "{last}");
+            assert!(paged.session().approval_whole());
+        } else if height > 100 {
+            // 201 diff rows fit one 300-row screen: no paging, armed as ever.
+            assert!(paged.session().approval_whole(), "{text}");
+            assert!(text.contains("+line 200"), "{text}");
+            assert_eq!(
+                paged.answer('y', approval::ARM * 3),
+                Some(Decision::Approve)
+            );
+        } else {
+            assert!(!paged.session().approval_whole(), "{text}");
+            assert_eq!(paged.answer('y', approval::ARM * 3), None, "{text}");
+            assert_eq!(paged.answer('a', approval::ARM * 3), None, "{text}");
+            assert!(
+                !paged.session().page_approval(true),
+                "no paging key when deny-only"
+            );
+            assert!(text.contains("press n"), "{text}");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #485: a card that cannot be paged (one line taller than any page, among many)
+/// stays deny-only as with #303; PgUp/PgDn keep scrolling the transcript.
+#[test]
+fn a_long_diff_with_one_unpageable_line_stays_deny_only() {
+    let mut content = numbered(150);
+    content.push_str(&"x".repeat(200_000));
+    content.push('\n');
+    for (width, height) in [(80u16, 24u16), (100, 40)] {
+        let (root, session) = big_session("page-huge", &content);
+        let mut paged = Paged::new(session, width, height);
+        let text = paged.wait_and_draw(approval::ARM * 2);
+        assert!(text.contains("press n"), "{width}x{height}: {text}");
+        assert!(!paged.session().approval_whole());
+        assert!(!paged.session().page_approval(true));
+        assert_eq!(paged.answer('y', approval::ARM * 3), None);
+        assert_eq!(paged.answer('a', approval::ARM * 3), None);
+        assert_eq!(paged.answer('n', approval::ARM * 3), Some(Decision::Deny));
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #485: many wrapped lines, which #269 cut, are paged now.
+#[test]
+fn many_wrapped_lines_are_paged_not_deny_only() {
+    let wrapped: String = (0..70)
+        .map(|i| format!("{i} {}\n", "w".repeat(150)))
+        .collect();
+    for (width, height) in [(80u16, 24u16), (100, 24), (80, 40)] {
+        let (root, session) = big_session("page-wrapped", &wrapped);
+        let mut paged = Paged::new(session, width, height);
+        paged.wait_and_draw(approval::ARM * 2);
+        assert!(paged.session().approval_pages() > 1, "{width}x{height}");
+        let last = paged.page_to_the_end();
+        assert!(last.contains("+69"), "{width}x{height}: {last}");
+        assert_eq!(paged.answer('y', approval::ARM), Some(Decision::Approve));
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #485: PgDn with no card, or with a card that fits, scrolls the transcript as before.
+#[test]
+fn page_keys_page_only_a_card_taller_than_the_screen() {
+    let session = Session::new("m".into());
+    assert!(!session.page_approval(true));
+    let small = pending_session();
+    small.set_approval_whole(true);
+    let mut paged = Paged::new(small, 100, 40);
+    paged.wait_and_draw(approval::ARM * 2);
+    assert!(!paged.session().page_approval(true));
+    assert!(!paged.session().page_approval(false));
 }
 
 /// Issue #269: a write_file card that fits whole on screen still arms.

@@ -709,6 +709,37 @@ fn a_write_file_rule_does_not_cover_directory_creating_writes() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #485: a rule never approves a card the owner has to page through; the same
+/// rule still covers the small write.
+#[test]
+fn a_write_file_rule_does_not_cover_a_paged_card() {
+    let root = dir("write-paged");
+    let card = |lines: usize| {
+        approval::card(
+            &root,
+            &alfredo_tui::model::ToolCall {
+                name: "write_file".into(),
+                arguments: json!({"path": "a.txt",
+                    "content": (1..=lines).map(|n| format!("l{n}\n")).collect::<String>()}),
+            },
+        )
+        .unwrap()
+    };
+    let rules = Rules::new(&dir("write-paged-state"));
+    let small = card(79);
+    assert_eq!(small.preview.lines().count(), 80);
+    rules.add_for(&small).unwrap();
+    assert!(rules.matching(&small).is_some());
+    let paged = card(80);
+    assert!(paged.paged() && !small.paged());
+    assert!(
+        allow::offered(&paged),
+        "a is still offered on the last page"
+    );
+    assert!(rules.matching(&paged).is_none(), "a paged card always asks");
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #311: a HOST rule written before the fix matches neither its exact command nor a
 /// longer one.
 #[test]

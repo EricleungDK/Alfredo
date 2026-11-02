@@ -112,9 +112,10 @@ fn command_of(card: &Card) -> Option<&str> {
 }
 
 /// Whether `rule` covers `card`. A card that is not [`offered`] (a HOST run, a push) is
-/// never covered, so a rule from before issue #311 never matches a HOST run.
+/// never covered, so a rule from before issue #311 never matches a HOST run. A paged
+/// card (issue #485) is never covered either: the owner pages through it every time.
 pub fn matches(rule: &Rule, card: &Card) -> bool {
-    if !offered(card) || rule.tool != card.tool {
+    if !offered(card) || card.paged() || rule.tool != card.tool {
         return false;
     }
     match card.kind {

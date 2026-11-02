@@ -7,11 +7,15 @@ use std::path::{Component, Path, PathBuf};
 
 /// Largest file `write_file` or `edit_file` produces or edits, in bytes.
 pub(crate) const MAX_FILE: usize = 1024 * 1024;
-/// Most lines an approval card's diff may hold (issue #269). The count is every line of
-/// the diff text: the `@@` header, `-`/`+` lines, line-ending notes and the
-/// `new directories:` line. A change over it is refused before any card is shown, so
-/// the owner never approves lines the card cut off.
-const MAX_PREVIEW_LINES: usize = 80;
+/// Most diff lines a card may hold and still be approved without paging: an
+/// always-allow rule or the headless `--approve` policy only applies a change this small,
+/// since nobody sees it (issue #269). The count is every line of the diff text: the `@@`
+/// header, `-`/`+` lines, line-ending notes and the `new directories:` line.
+pub(crate) const MAX_PREVIEW_LINES: usize = 80;
+/// Most diff lines a card may hold at all (issue #485). A card over [`MAX_PREVIEW_LINES`]
+/// is paged on screen and `y` waits for its last page; a change over this is refused
+/// before any card, so the owner is never asked to page through an unbounded diff.
+const MAX_CARD_LINES: usize = 2000;
 
 pub const WRITE_FILE: Tool = Tool {
     name: "write_file",
@@ -517,12 +521,12 @@ fn plan_write(
 }
 
 /// Refuses a change whose card diff (plus `extra` card lines) would pass
-/// [`MAX_PREVIEW_LINES`], before anything is asked or written.
+/// [`MAX_CARD_LINES`], before anything is asked or written.
 fn refuse_over_cap(old: &str, new: &str, extra: usize) -> Result<(), String> {
     let lines = diff(old, new).lines().count() + extra;
-    if lines > MAX_PREVIEW_LINES {
+    if lines > MAX_CARD_LINES {
         return Err(format!(
-            "the change's diff is {lines} lines, over the {MAX_PREVIEW_LINES}-line approval card limit; nothing was written. Split it into smaller edits (edit_file on a part, or several write_file calls to separate files)"
+            "the change's diff is {lines} lines, over the {MAX_CARD_LINES}-line approval card limit; nothing was written. Split it into smaller edits (edit_file on a part, or several write_file calls to separate files)"
         ));
     }
     Ok(())
@@ -632,8 +636,8 @@ fn edit_file(root: &Path, arguments: &Value) -> Result<String, String> {
 /// `@@ line N @@` header (N is the old file's line number) with the `-` old lines then
 /// the `+` new lines; unchanged lines are not drawn. A change needing more than
 /// [`MAX_DIFF_EDITS`] edits shows as one span from the first to the last changed line,
-/// which [`refuse_over_cap`] then refuses. Never cut: callers refuse a change over
-/// [`MAX_PREVIEW_LINES`] first.
+/// which [`refuse_over_cap`] refuses only past [`MAX_CARD_LINES`]. Never cut: callers
+/// refuse a change over [`MAX_CARD_LINES`] first, and the card pages the rest.
 pub(crate) fn diff(old: &str, new: &str) -> String {
     let (old_text, new_text) = (old, new);
     let old: Vec<&str> = old.lines().collect();
@@ -669,8 +673,8 @@ pub(crate) fn diff(old: &str, new: &str) -> String {
     lines.join("\n")
 }
 
-/// Most inserted-plus-deleted lines the minimal diff searches for; a change needing more
-/// is over the card cap anyway.
+/// Most inserted-plus-deleted lines the minimal diff searches for (its memory grows with
+/// the square); a change needing more shows as one span, which the card pages.
 const MAX_DIFF_EDITS: usize = 2 * MAX_PREVIEW_LINES;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -948,29 +952,34 @@ mod tests {
     }
 
     #[test]
-    fn a_minimal_diff_still_over_the_cap_is_refused_with_todays_message() {
-        // 41 scattered one-line changes: 41 headers + 82 changed lines.
+    fn a_diff_over_one_card_is_paged_up_to_the_hard_cap_and_refused_past_it() {
+        // 41 scattered one-line changes: 41 headers + 82 changed lines = 123, over the
+        // unpaged 80 (the card pages it) and far under the hard cap.
         let changes: Vec<(usize, &str)> = (0..41).map(|i| (2 * i + 1, "changed")).collect();
         let (old, new) = hundred(&changes);
-        let error = refuse_over_cap(&old, &new, 0).unwrap_err();
+        assert_eq!(diff(&old, &new).lines().count(), 123);
+        assert!(refuse_over_cap(&old, &new, 0).is_ok());
+        // A new file: header + 1999 added lines = 2000 passes; the extra line counts.
+        let file = |lines: usize| (1..=lines).map(|n| format!("l{n}\n")).collect::<String>();
+        assert!(refuse_over_cap("", &file(1999), 0).is_ok());
+        assert!(refuse_over_cap("", &file(1999), 1).is_err());
+        let error = refuse_over_cap("", &file(2000), 0).unwrap_err();
         assert!(
-            error.starts_with("the change's diff is 123 lines, over the 80-line approval card limit; nothing was written. Split it into smaller edits"),
+            error.starts_with("the change's diff is 2001 lines, over the 2000-line approval card limit; nothing was written. Split it into smaller edits"),
             "{error}"
         );
-        // 26 changes: 26 headers + 52 changed lines = 78 passes; the extra line counts.
-        let changes: Vec<(usize, &str)> = (0..26).map(|i| (2 * i + 1, "changed")).collect();
-        let (old, new) = hundred(&changes);
-        assert_eq!(diff(&old, &new).lines().count(), 78);
-        assert!(refuse_over_cap(&old, &new, 2).is_ok());
-        assert!(refuse_over_cap(&old, &new, 3).is_err());
     }
 
     #[test]
-    fn a_change_beyond_the_diff_bound_falls_back_to_the_span_and_is_refused() {
-        let old: String = (0..400).map(|n| format!("o{n}\n")).collect();
-        let new: String = (0..400).map(|n| format!("n{n}\n")).collect();
+    fn a_change_beyond_the_diff_bound_falls_back_to_the_span_and_is_refused_past_the_cap() {
+        let old: String = (0..1100).map(|n| format!("o{n}\n")).collect();
+        let new: String = (0..1100).map(|n| format!("n{n}\n")).collect();
         assert!(diff(&old, &new).starts_with("@@ line 1 @@\n-o0\n"));
         assert!(refuse_over_cap(&old, &new, 0).is_err());
+        // The same fallback under the cap is paged on the card, not refused.
+        let (old, new) = (&old[..old.len() / 2], &new[..new.len() / 2]);
+        assert!(diff(old, new).starts_with("@@ line 1 @@\n-o0\n"));
+        assert!(refuse_over_cap(old, new, 0).is_ok());
     }
 
     #[test]

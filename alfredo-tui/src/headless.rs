@@ -701,7 +701,9 @@ impl Policy {
                     .components()
                     .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
         };
+        // A paged card (issue #485) needs an owner who pages through it: denied here.
         let edit = card.kind == CardKind::Edit
+            && !card.paged()
             && matches!(card.tool.as_str(), "edit_file" | "write_file")
             && card
                 .arguments
@@ -1386,6 +1388,18 @@ mod tests {
         assert!(Policy::parse("all")
             .unwrap_err()
             .contains("workspace-edits"));
+    }
+
+    /// Issue #485: nobody pages a headless card, so one over the unpaged 80 lines is denied.
+    #[test]
+    fn workspace_edits_denies_a_card_that_needs_paging() {
+        let policy = Policy::WorkspaceEdits;
+        let mut card = card("write_file", CardKind::Edit, "new.txt");
+        card.preview = (0..80).map(|n| format!("+{n}\n")).collect();
+        assert_eq!(policy.decide(&card), Decision::Approve);
+        card.preview.push_str("+one more\n");
+        assert!(card.paged());
+        assert_eq!(policy.decide(&card), Decision::Deny);
     }
 
     #[test]

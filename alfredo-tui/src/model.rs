@@ -381,10 +381,33 @@ pub struct Session {
     /// Only then may `y` or `a` answer it (issue #303); `n` needs just the header.
     #[serde(skip)]
     approval_whole: std::cell::Cell<bool>,
+    /// Which page of a paged card (issue #485) the owner asked for and has seen.
+    #[serde(skip)]
+    approval_paging: std::cell::Cell<ApprovalPaging>,
+    /// The page or the terminal size changed since the card was last armed: arming
+    /// restarts at the next [`Self::approval_visible`].
+    #[serde(skip)]
+    approval_rearm: std::cell::Cell<bool>,
     /// When the key before the current one, and the current one, were pressed
     /// (issue #264: a y/n only answers a card after a quiet gap).
     #[serde(skip)]
     key_times: (Option<std::time::Instant>, Option<std::time::Instant>),
+}
+
+/// Page state of an approval card whose diff is taller than the viewport (issue #485).
+/// `y` and `a` need `reached` to be the last page, and pages open one at a time, so every
+/// page up to `reached` was fully on screen in some draw.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ApprovalPaging {
+    /// The page the owner asked for.
+    page: usize,
+    /// The furthest page that was fully on screen.
+    reached: usize,
+    /// The page the last draw showed, and how many pages there were.
+    drawn: usize,
+    pages: usize,
+    /// Terminal (width, rows) of the last draw; a change starts over.
+    size: (u16, usize),
 }
 
 impl Session {
@@ -431,6 +454,8 @@ impl Session {
             approval: None,
             approval_header_drawn: std::cell::Cell::new(false),
             approval_whole: std::cell::Cell::new(false),
+            approval_paging: Default::default(),
+            approval_rearm: std::cell::Cell::new(false),
             key_times: (None, None),
             aside: None,
         }
@@ -1272,7 +1297,11 @@ impl Session {
     /// Whether the card is on screen now. Arming ([`crate::chat_tools::approval::ARM`])
     /// starts when it first becomes visible and restarts each time it is shown again.
     pub fn approval_visible(&mut self, visible: bool, now: std::time::Instant) {
+        let rearm = self.approval_rearm.replace(false);
         if let Some((_, shown)) = &mut self.approval {
+            if rearm {
+                *shown = None;
+            }
             match (visible, *shown) {
                 (true, None) => *shown = Some(now),
                 (false, _) => *shown = None,
@@ -1302,6 +1331,57 @@ impl Session {
         self.approval_whole.set(whole);
     }
 
+    /// The page of a paged card to draw at this terminal `size`: the one asked for, but
+    /// never more than one past the furthest page fully shown. A new size starts over.
+    pub fn approval_page_wanted(&self, size: (u16, usize)) -> usize {
+        let mut paging = self.approval_paging.get();
+        if paging.size != size {
+            paging = ApprovalPaging {
+                size,
+                ..Default::default()
+            };
+            self.approval_paging.set(paging);
+        }
+        paging.page.min(paging.reached + 1)
+    }
+
+    /// Called by the draw of a paged card: it showed `page` of `pages`, `complete` when
+    /// the page was fully inside the viewport. True when `y` and `a` may answer: this is
+    /// the last page and every page before it was shown.
+    pub fn approval_page_drawn(&self, page: usize, pages: usize, complete: bool) -> bool {
+        let mut paging = self.approval_paging.get();
+        if complete && page <= paging.reached + 1 {
+            paging.reached = paging.reached.max(page);
+        }
+        if paging.pages != 0 && (page != paging.drawn || pages != paging.pages) {
+            self.approval_rearm.set(true);
+        }
+        (paging.page, paging.drawn, paging.pages) = (page, page, pages);
+        self.approval_paging.set(paging);
+        complete && pages > 0 && page + 1 == pages && paging.reached + 1 >= pages
+    }
+
+    /// PgUp/PgDn on a paged card: one page back or forward. False when the pending card
+    /// has a single page, so the key scrolls the transcript as usual.
+    pub fn page_approval(&self, forward: bool) -> bool {
+        let mut paging = self.approval_paging.get();
+        if self.pending_approval().is_none() || paging.pages < 2 {
+            return false;
+        }
+        paging.page = if forward {
+            (paging.page + 1).min(paging.pages - 1)
+        } else {
+            paging.page.saturating_sub(1)
+        };
+        self.approval_paging.set(paging);
+        true
+    }
+
+    /// Pages of the pending card as last drawn (1 when it is not paged).
+    pub fn approval_pages(&self) -> usize {
+        self.approval_paging.get().pages.max(1)
+    }
+
     pub fn await_approval(
         &mut self,
         attempt: u64,
@@ -1317,6 +1397,7 @@ impl Session {
         // A new card is unseen until a draw says otherwise (issue #303).
         self.approval_header_drawn.set(false);
         self.approval_whole.set(false);
+        self.approval_paging.set(Default::default());
         self.approval = Some((card, None));
         true
     }
@@ -1399,6 +1480,7 @@ impl Session {
         self.approval = None;
         self.approval_header_drawn.set(false);
         self.approval_whole.set(false);
+        self.approval_paging.set(Default::default());
         self.running_command = false;
         self.pending_rule = None;
         if self.status.active() {

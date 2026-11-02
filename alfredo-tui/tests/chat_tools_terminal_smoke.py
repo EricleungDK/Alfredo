@@ -462,7 +462,7 @@ class ChatTools(unittest.TestCase):
         root = Path(os.path.realpath(self.repo.name))
         self.terminal.write(b'create big file\r')
         self.terminal.wait_for('Approve write_file')
-        self.terminal.wait_for('y is off until the last page')
+        self.terminal.wait_for('y is off')
         self.assertIn('+line 1', self.terminal.screen())
         time.sleep(0.8)
         self.terminal.write(b'y')
