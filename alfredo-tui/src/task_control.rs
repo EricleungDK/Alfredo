@@ -1462,6 +1462,8 @@ impl TaskControl {
     /// Queue the chat row for a dispatch that just turned itself off: the notice
     /// text plus the way back. One call per turn-off.
     fn queue_dispatch_off_row(&mut self, notice: &str) {
+        // Bounded: if the main loop has not drained four rows, the newest is dropped
+        // rather than growing the queue without limit.
         if self.dispatch_off_rows.len() < 4 {
             self.dispatch_off_rows
                 .push(format!("{notice}\nResume with /dispatch on"));
