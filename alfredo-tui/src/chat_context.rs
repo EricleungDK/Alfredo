@@ -57,7 +57,7 @@ fn task_block(
         block.push_str(&format!(
             "\nFiles: {}\nCheck: {}",
             policy.files.join(", "),
-            policy.check.join(" ")
+            crate::argv_display::check_line(&policy.check)
         ));
     }
     let Some(run) = &task.run else {

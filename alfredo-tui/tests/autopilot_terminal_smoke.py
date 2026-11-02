@@ -507,6 +507,33 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertEqual(self.git('status', '--porcelain'), '')
         self.quit(terminal)
 
+    def test_repair_after_an_unreachable_stop_reenters_the_loop_and_builds_the_branch(self):
+        self.fixture.drop_worker = True
+        self.fixture.release_app.set()
+        head = self.git('rev-parse', 'HEAD')
+        terminal = self.terminal(resume=False)
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.screen_has(terminal, 'Autopilot ✗ failed', 90)
+        self.screen_has(terminal, 'Start Ollama, then /repair 1 retry')
+        markers = self.fixture.markers()
+        self.assertEqual(markers[0], 'PLAN')
+        self.assertTrue(len(markers) > 1 and set(markers[1:]) == {'DROP'}, markers)
+        self.assertEqual(self.git('for-each-ref', 'refs/heads/alfredo/'), '')
+
+        self.fixture.drop_worker = False
+        terminal.send('/repair 1 retry\r')
+        self.screen_has(terminal, 'git switch alfredo/go-', 90)
+        self.assertEqual(self.fixture.markers()[len(markers):], ['REPAIR', 'APP'])
+        self.assertEqual(self.statuses(), [(1, 'failed', None), (2, 'accepted', None), (3, 'accepted', 1)])
+        self.assertIn('Autopilot ✓ done   2/2', terminal.screen())
+        branches = self.git('for-each-ref', '--format=%(refname:short)', 'refs/heads/alfredo/').split()
+        self.assertEqual(len(branches), 1, branches)
+        self.assertEqual(self.git('show', f'{branches[0]}:calc.py'), 'def answer():\n    return 42')
+        self.assertIn('answer={answer()}', self.git('show', f'{branches[0]}:app.py'))
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+        self.quit(terminal)
+
     def test_failed_summary_shows_the_cause_and_a_next_step_when_the_model_writes_prose(self):
         self.fixture.prose_worker = True
         terminal = self.terminal(resume=False)

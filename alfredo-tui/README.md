@@ -302,6 +302,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/selection.rs`, `src/selection_command.rs`, `src/selection_store.rs`, `src/missions.rs` | Startup workspace selection, its intent and journal; mission namespace discovery |
 | `src/conversations.rs`, `src/reading.rs`, `src/transcript_cache.rs`, `src/agent_drafts.rs` | Conversation snapshots, reading positions, rendered-message cache, unsent agent drafts |
 | `src/agent.rs`, `src/agent_view.rs`, `src/instruct.rs`, `src/assignment.rs`, `src/architecture.rs` | Local Agent continuity, agent view, owner instructions, `/assign`, Architect revisions |
+| `src/argv_display.rs` | One quoted display form of a check argv shared by the plan draft, task panel, agent view, chat context and commit message |
 | `src/planner_command.rs`, `src/plan_lint.rs`, `src/understanding.rs` | Saved planner provenance, unattended-plan lint, project understanding |
 | `src/review.rs`, `src/assessment.rs`, `src/dependencies.rs`, `src/branch.rs` | Review projection, reviewer assertions, composing accepted results, branch handoff |
 | `src/command_intent.rs`, `src/console_command.rs`, `src/control_command.rs` | Persistable command intent and operator actions (never approval or proof of effect) |
