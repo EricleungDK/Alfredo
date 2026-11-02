@@ -2092,43 +2092,45 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             let name = typed.split_whitespace().next().unwrap_or("").to_owned();
                             let expanded =
                                 alfredo_tui::user_commands::expand(&commands_dir, &typed);
-                            if work.wayfinder.active() || pending_command.is_some() {
-                                work.app.notice =
-                                    "Wait for the pending command or scope receipt first".into();
-                            } else if work.app.sessions[index].status.active() {
-                                work.app.notice =
-                                    "Wait for the reply to end, then run the command".into();
-                            } else if let Some(Ok(prompt)) = expanded {
-                                let session = &mut work.app.sessions[index];
-                                session.clear_draft();
-                                if session.insert(&prompt).truncated {
-                                    session.clear_draft();
-                                    session.insert(&typed);
-                                    work.app.notice = format!(
-                                        "{name} refused: the prompt is over the 16 KiB limit"
-                                    );
-                                    work.app.sessions[index].reject_draft();
-                                } else if work.app.sessions[index]
-                                    .compaction_due(provider.num_ctx())
-                                    && command_staging::spawn_compaction(
-                                        &runtime,
-                                        &provider,
-                                        &compact_sender,
-                                        &mut jobs[index],
-                                        &mut work.app.sessions[index],
-                                        index,
-                                        true,
-                                    )
-                                    .is_ok()
-                                {
-                                    work.app.models_visible = false;
-                                    work.tasks.set_visible(false);
-                                    work.app.notice = "Conversation is near its size limit; summarising earlier turns…".into();
-                                } else {
-                                    work.app.models_visible = false;
-                                    work.tasks.set_visible(false);
-                                    request = Some(work.app.sessions[index].begin());
-                                    work.app.notice = format!("{name} sent as your message");
+                            let blocked = work.wayfinder.active() || pending_command.is_some();
+                            if let Some(Ok(prompt)) = expanded {
+                                match alfredo_tui::user_commands::stage(
+                                    &mut work.app.sessions[index],
+                                    &name,
+                                    &typed,
+                                    &prompt,
+                                    blocked,
+                                ) {
+                                    Err(error) => work.app.notice = error,
+                                    Ok(()) => {
+                                        work.app.models_visible = false;
+                                        work.tasks.set_visible(false);
+                                        if work.app.sessions[index]
+                                            .compaction_due(provider.num_ctx())
+                                            && command_staging::spawn_compaction(
+                                                &runtime,
+                                                &provider,
+                                                &compact_sender,
+                                                &mut jobs[index],
+                                                &mut work.app.sessions[index],
+                                                index,
+                                                true,
+                                            )
+                                            .is_ok()
+                                        {
+                                            work.app.notice = "Conversation is near its size limit; summarising earlier turns…".into();
+                                        } else {
+                                            let sent = alfredo_tui::user_commands::send(
+                                                &mut work.app.sessions[index],
+                                                &typed,
+                                            );
+                                            work.app.notice = match &sent {
+                                                Ok(_) => format!("{name} sent as your message"),
+                                                Err(error) => (*error).into(),
+                                            };
+                                            request = Some(sent);
+                                        }
+                                    }
                                 }
                             } else {
                                 work.app.notice = match expanded {

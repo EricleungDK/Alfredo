@@ -1,7 +1,8 @@
 //! Issue #486: user-defined slash commands load only from `<state dir>/commands`.
 use alfredo_tui::{
     commands::Completion,
-    user_commands::{directory, expand, publish, scan, MAX_BYTES},
+    model::{Session, Status, MAX_DRAFT},
+    user_commands::{directory, expand, publish, scan, send, stage, MAX_BYTES},
 };
 use std::{
     fs,
@@ -123,6 +124,88 @@ fn a_symlinked_commands_directory_is_not_followed() {
     let found = scan(&dir);
     assert!(found.names.is_empty());
     assert!(found.notice().unwrap().contains("symbolic link"));
+    // Enter does not need the listing: a linked directory must not leak its files either.
+    assert!(
+        expand(&dir, "/x hi").is_none(),
+        "nothing is read through a linked directory"
+    );
+}
+
+#[test]
+fn a_commands_directory_linked_into_a_repository_sends_nothing() {
+    let root = Temp::new();
+    let repo = root.path().join("repo/.alfredo/commands");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("leak.md"), "PLANTED $ARGUMENTS").unwrap();
+    let dir = directory(&root.path().join("state"));
+    fs::create_dir_all(dir.parent().unwrap()).unwrap();
+    symlink(&repo, &dir).unwrap();
+    assert!(scan(&dir).names.is_empty());
+    assert!(expand(&dir, "/leak hi").is_none());
+}
+
+fn staged(typed: &str) -> Session {
+    let mut session = Session::new("fixture".into());
+    session.insert(typed);
+    session
+}
+
+#[test]
+fn stage_puts_the_expanded_prompt_in_the_draft() {
+    let mut session = staged("/fix it");
+    stage(&mut session, "/fix", "/fix it", "Fix it now", false).unwrap();
+    assert_eq!(session.draft, "Fix it now");
+    let sent = send(&mut session, "/fix it").unwrap();
+    assert_eq!(sent.last().unwrap().role, "user");
+    assert_eq!(sent.last().unwrap().content, "Fix it now");
+    assert!(session.draft.is_empty());
+}
+
+#[test]
+fn stage_refuses_while_a_command_is_pending_and_keeps_the_typed_command() {
+    let mut session = staged("/fix it");
+    let error = stage(&mut session, "/fix", "/fix it", "Fix it now", true).unwrap_err();
+    assert!(error.contains("pending command"), "{error}");
+    assert_eq!(session.draft, "/fix it");
+}
+
+#[test]
+fn stage_refuses_while_a_reply_runs_and_keeps_the_typed_command() {
+    for status in [Status::Connecting, Status::Streaming] {
+        let mut session = staged("/fix it");
+        session.status = status;
+        let error = stage(&mut session, "/fix", "/fix it", "Fix it now", false).unwrap_err();
+        assert!(error.contains("reply to end"), "{error}");
+        assert_eq!(session.draft, "/fix it");
+    }
+    let mut session = staged("/fix it");
+    session.status = Status::Complete;
+    assert!(stage(&mut session, "/fix", "/fix it", "Fix it now", false).is_ok());
+}
+
+#[test]
+fn stage_refuses_a_prompt_over_the_draft_limit_and_restores_the_typed_command() {
+    let mut session = staged("/fix it");
+    let over = "a".repeat(MAX_DRAFT + 1);
+    let error = stage(&mut session, "/fix", "/fix it", &over, false).unwrap_err();
+    assert!(
+        error.contains("/fix") && error.contains("16 KiB"),
+        "{error}"
+    );
+    assert_eq!(session.draft, "/fix it");
+    assert!(session.replace_pending(), "shown as a rejected draft");
+    let exact = "a".repeat(MAX_DRAFT);
+    let mut session = staged("/fix it");
+    stage(&mut session, "/fix", "/fix it", &exact, false).unwrap();
+    assert_eq!(session.draft.len(), MAX_DRAFT);
+}
+
+#[test]
+fn a_send_the_session_refuses_brings_the_typed_command_back() {
+    let mut session = Session::new("fixture".into());
+    assert_eq!(send(&mut session, "/fix it").unwrap_err(), "Enter a prompt");
+    assert_eq!(session.draft, "/fix it");
+    assert!(session.replace_pending());
 }
 
 #[test]

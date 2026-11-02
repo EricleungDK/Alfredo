@@ -7,9 +7,11 @@
 //! through a descriptor opened with `O_NOFOLLOW` and checked there (regular file, at most
 //! [`MAX_BYTES`], UTF-8), so a symlink or a swap after listing is refused, not followed.
 use crate::commands::{CAPABILITIES, COMMANDS};
+use crate::model::{Message, Session};
 use std::{
     fs,
     io::Read,
+    os::fd::{AsRawFd, FromRawFd},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::RwLock,
@@ -86,21 +88,36 @@ fn valid_name(stem: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// Reads `path` without following a symlink; refuses non-files, files over [`MAX_BYTES`],
-/// non-UTF-8 and empty bodies. The error names `command`.
-fn read_body(path: &Path, command: &str) -> Result<String, String> {
-    let refuse = |why: &str| format!("{command} refused: {why}");
-    let file = fs::OpenOptions::new()
+/// Opens the commands directory itself without following a symlink.
+fn open_dir(dir: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|error| {
-            if error.raw_os_error() == Some(libc::ELOOP) {
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir)
+}
+
+/// Reads `file_name` inside the already-open `dir` without following a symlink (`openat`
+/// with `O_NOFOLLOW`, so neither the directory nor the file can be a link); refuses
+/// non-files, files over [`MAX_BYTES`], non-UTF-8 and empty bodies. The error names `command`.
+fn read_body(dir: &fs::File, file_name: &str, command: &str) -> Result<String, String> {
+    let refuse = |why: &str| format!("{command} refused: {why}");
+    let name = std::ffi::CString::new(file_name).map_err(|_| refuse("cannot be opened"))?;
+    let flags =
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
+    // SAFETY: `name` is a valid NUL-terminated string and `dir` is an open descriptor;
+    // a nonnegative result is a fresh descriptor that nothing else owns.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ELOOP) {
                 refuse("symbolic link")
             } else {
                 refuse("cannot be opened")
-            }
-        })?;
+            },
+        );
+    }
+    // SAFETY: `fd` was just returned by `openat` and is owned by no other object.
+    let file = unsafe { fs::File::from_raw_fd(fd) };
     let meta = file.metadata().map_err(|_| refuse("cannot be read"))?;
     if !meta.is_file() {
         return Err(refuse("not a regular file"));
@@ -136,18 +153,18 @@ pub fn scan(dir: &Path) -> Scan {
         }
         _ => return found,
     }
-    let Ok(entries) = fs::read_dir(dir) else {
+    let (Ok(handle), Ok(entries)) = (open_dir(dir), fs::read_dir(dir)) else {
         return found;
     };
     let mut files: Vec<_> = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
-            Some((name.strip_suffix(".md")?.to_owned(), entry.path()))
+            Some(name.strip_suffix(".md")?.to_owned())
         })
         .collect();
     files.sort();
-    for (stem, path) in files {
+    for stem in files {
         let command = format!("/{}", shown(&stem));
         let refuse =
             |found: &mut Scan, why: &str| found.refused.push((command.clone(), why.into()));
@@ -158,7 +175,7 @@ pub fn scan(dir: &Path) -> Scan {
         } else if found.names.len() >= MAX_COMMANDS {
             refuse(&mut found, "more than 64 commands");
         } else {
-            match read_body(&path, &command) {
+            match read_body(&handle, &format!("{stem}.md"), &command) {
                 Ok(_) => found.names.push(command),
                 Err(error) => {
                     let why = error
@@ -182,11 +199,13 @@ pub fn expand(dir: &Path, text: &str) -> Option<Result<String, String>> {
         return None;
     }
     let arguments = text[word.len()..].trim();
-    let path = dir.join(format!("{stem}.md"));
-    // Absent is not a user command (the usual "Unknown command"); anything else present
-    // is read under the same checks as the listing.
-    fs::symlink_metadata(&path).ok()?;
-    Some(read_body(&path, word).map(|body| {
+    // A missing or linked commands directory has no commands; a missing file is the usual
+    // "Unknown command". Anything else present is read under the listing's checks.
+    let handle = open_dir(dir).ok()?;
+    let file_name = format!("{stem}.md");
+    // Existence only picks "Unknown command" over a refusal; the read below decides.
+    fs::symlink_metadata(dir.join(&file_name)).ok()?;
+    Some(read_body(&handle, &file_name, word).map(|body| {
         let body = body.trim();
         if body.contains("$ARGUMENTS") {
             body.replace("$ARGUMENTS", arguments)
@@ -196,4 +215,46 @@ pub fn expand(dir: &Path, text: &str) -> Option<Result<String, String>> {
             format!("{body}\n\nARGUMENTS: {arguments}")
         }
     }))
+}
+
+/// Puts the expanded `prompt` of `typed` (`name` args) into `session`'s draft so it can be
+/// sent as an ordinary chat message. Refuses, leaving the typed command in the draft, while
+/// a command or scope receipt is pending (`blocked`), while a reply runs, or when the
+/// prompt does not fit the draft limit.
+pub fn stage(
+    session: &mut Session,
+    name: &str,
+    typed: &str,
+    prompt: &str,
+    blocked: bool,
+) -> Result<(), String> {
+    if blocked {
+        return Err("Wait for the pending command or scope receipt first".into());
+    }
+    if session.status.active() {
+        return Err("Wait for the reply to end, then run the command".into());
+    }
+    session.clear_draft();
+    if session.insert(prompt).truncated {
+        restore(session, typed);
+        return Err(format!(
+            "{name} refused: the prompt is over the 16 KiB limit"
+        ));
+    }
+    Ok(())
+}
+
+/// Sends the staged draft; when the session refuses it, the typed command comes back.
+pub fn send(session: &mut Session, typed: &str) -> Result<Vec<Message>, &'static str> {
+    let sent = session.begin();
+    if sent.is_err() {
+        restore(session, typed);
+    }
+    sent
+}
+
+fn restore(session: &mut Session, typed: &str) {
+    session.clear_draft();
+    session.insert(typed);
+    session.reject_draft();
 }
