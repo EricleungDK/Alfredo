@@ -73,6 +73,7 @@ fn open(state: &Path, workspace: &Path) -> Workstation {
 
 #[test]
 fn repository_without_commits_gets_the_fix_notice() {
+    assert!(notice(true, false).contains("git commit --allow-empty"));
 }
 
 #[test]

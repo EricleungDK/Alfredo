@@ -8,7 +8,7 @@
 pub(crate) fn check_line(argv: &[String]) -> String {
     argv.iter()
         .map(|arg| {
-            if !arg.is_empty() && !arg.contains(|c: char| c.is_whitespace() || "'\"\\$`".contains(c))
+            if !arg.is_empty() && !arg.contains(|c: char| c.is_whitespace() || "'\"\\$".contains(c))
             {
                 arg.clone()
             } else {
