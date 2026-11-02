@@ -20,7 +20,7 @@ use std::{
     collections::BTreeSet,
     io::Write,
     path::{Component, PathBuf},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
     time::{Duration, Instant},
 };
 use tokio::runtime::Runtime;
@@ -29,6 +29,41 @@ static INTERRUPTED: AtomicU32 = AtomicU32::new(0);
 
 extern "C" fn on_signal(_: libc::c_int) {
     INTERRUPTED.fetch_add(1, Ordering::SeqCst);
+}
+
+/// `--output-format stream-json`: stdout carries one JSON event per line.
+static STREAM: AtomicBool = AtomicBool::new(false);
+
+/// Version of the stream-json event schema (`"v"` on every line).
+const STREAM_VERSION: u32 = 1;
+
+/// Turn the stream on or off for this process (`--output-format`).
+pub fn set_stream(on: bool) {
+    STREAM.store(on, Ordering::SeqCst);
+}
+
+/// One stream-json line, `{"v":1,"type":kind,…fields}`; a no-op without the flag.
+/// A closed pipe must not abort the run.
+fn emit(kind: &str, fields: serde_json::Value) {
+    if !STREAM.load(Ordering::SeqCst) {
+        return;
+    }
+    let mut event = fields;
+    event["v"] = STREAM_VERSION.into();
+    event["type"] = kind.into();
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{event}");
+    let _ = out.flush();
+}
+
+/// The final result object: a plain line, or the stream's last `result` event.
+fn print_result(result: serde_json::Value) {
+    if STREAM.load(Ordering::SeqCst) {
+        emit("result", result);
+    } else {
+        let _ = writeln!(std::io::stdout(), "{result}");
+        let _ = std::io::stdout().flush();
+    }
 }
 
 /// Progress line on stderr; a closed pipe must not abort the run.
@@ -75,9 +110,12 @@ struct Progress {
     planned: bool,
     approved: BTreeSet<u64>,
     running: BTreeSet<u64>,
+    started: BTreeSet<u64>,
     settled: BTreeSet<u64>,
     repairs: std::collections::BTreeMap<u64, u32>,
     state: Option<RunState>,
+    /// Stream events matching the lines of the last `lines` call: (type, fields).
+    events: Vec<(&'static str, serde_json::Value)>,
 }
 impl Progress {
     fn lines(&mut self, status: &Status, outcomes: &[TaskOutcome]) -> Vec<String> {
@@ -94,15 +132,38 @@ impl Progress {
             if outcome.status == TaskStatus::Running && self.running.insert(id) {
                 lines.push(format!("#{id} running"));
             }
+            // The poll can miss a short `Running` phase; a task that repaired or settled
+            // did start, so its event is never skipped (stderr keeps its own lines).
+            if (outcome.status == TaskStatus::Running
+                || outcome.repairs > 0
+                || outcome.result.is_some())
+                && self.started.insert(id)
+            {
+                self.events
+                    .push(("task_started", serde_json::json!({ "id": id })));
+            }
             let before = self.repairs.insert(id, outcome.repairs).unwrap_or(0);
             if outcome.repairs > before {
                 let cause = outcome.repair_cause.map_or("check failed", |c| c.label());
                 lines.push(format!("#{id} {cause} → repair #{}", outcome.head));
+                self.events.push((
+                    "repair",
+                    serde_json::json!({ "id": id, "cause": cause, "head": outcome.head }),
+                ));
             }
             match &outcome.result {
-                Some(Ok(())) if self.settled.insert(id) => lines.push(format!("#{id} accepted")),
+                Some(Ok(())) if self.settled.insert(id) => {
+                    lines.push(format!("#{id} accepted"));
+                    self.events
+                        .push(("check", serde_json::json!({ "id": id, "passed": true })));
+                }
                 Some(Err(reason)) if self.settled.insert(id) => {
-                    lines.push(format!("#{id} failed: {}", failed_reason(outcome, reason)));
+                    let reason = failed_reason(outcome, reason);
+                    lines.push(format!("#{id} failed: {reason}"));
+                    self.events.push((
+                        "check",
+                        serde_json::json!({ "id": id, "passed": false, "reason": reason }),
+                    ));
                 }
                 _ => {}
             }
@@ -376,6 +437,9 @@ pub fn run(options: Options) -> Result<i32, String> {
         for line in progress.lines(&status, &outcomes) {
             say(&line);
         }
+        for (kind, fields) in std::mem::take(&mut progress.events) {
+            emit(kind, fields);
+        }
         if let Some(warning) = history.poll(&work.app.sessions) {
             say(&warning);
         }
@@ -420,8 +484,7 @@ pub fn run(options: Options) -> Result<i32, String> {
             }
             let mut result = result_json(&model, &status, &outcomes, &reason, fatal.is_some());
             result["usage"] = work.autopilot.usage(&work.tasks).json();
-            let _ = writeln!(std::io::stdout(), "{result}");
-            let _ = std::io::stdout().flush();
+            print_result(result);
             // The JSON is out; now let a started hook finish (or be killed) and report.
             let grace = alfredo_tui::on_finish::TIMEOUT + Duration::from_secs(5);
             for failure in work.autopilot.finish_hooks(grace) {
@@ -779,6 +842,11 @@ impl Turn {
                 .as_ref()
                 .map_or_else(String::new, |d| format!(": {d}")),
         ));
+        let mut event = serde_json::json!({ "tool": call.name, "path": path, "result": result });
+        if let Some(detail) = &detail {
+            event["detail"] = detail.clone().into();
+        }
+        emit("tool", event);
         self.calls.push(Call {
             tool: call.name.clone(),
             path,
@@ -1016,9 +1084,9 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
     if !attachment.files.is_empty() {
         value["attached"] = attachment.files.into();
     }
-    let _ = writeln!(std::io::stdout(), "{value}");
-    let _ = std::io::stdout().flush();
-    Ok(i32::from(value["state"] != "done"))
+    let state_done = value["state"] == "done";
+    print_result(value);
+    Ok(i32::from(!state_done))
 }
 
 #[cfg(test)]
@@ -1131,6 +1199,54 @@ mod tests {
         assert_eq!(
             progress.lines(&status(RunState::Done, 2), &done),
             ["#1 accepted", "done 2/2 alfredo/go-ab12"]
+        );
+    }
+
+    #[test]
+    fn progress_events_start_a_task_once_then_repair_and_check() {
+        let mut progress = Progress::default();
+        let events = |progress: &mut Progress| std::mem::take(&mut progress.events);
+        progress.lines(
+            &status(RunState::Running, 0),
+            &[outcome(1, TaskStatus::Approved, 0, None)],
+        );
+        assert!(events(&mut progress).is_empty());
+        let running = [outcome(1, TaskStatus::Running, 0, None)];
+        progress.lines(&status(RunState::Running, 0), &running);
+        progress.lines(&status(RunState::Running, 0), &running);
+        assert_eq!(
+            events(&mut progress),
+            [("task_started", serde_json::json!({"id": 1}))]
+        );
+        progress.lines(
+            &status(RunState::Running, 0),
+            &[outcome(1, TaskStatus::Failed, 1, None)],
+        );
+        assert_eq!(
+            events(&mut progress),
+            [(
+                "repair",
+                serde_json::json!({"id": 1, "cause": "check failed", "head": 3})
+            )]
+        );
+        // A task whose Running phase was never polled still gets its start before its check.
+        progress.lines(
+            &status(RunState::Running, 0),
+            &[
+                outcome(1, TaskStatus::Accepted, 1, Some(Ok(()))),
+                outcome(2, TaskStatus::Failed, 0, Some(Err("bad".into()))),
+            ],
+        );
+        assert_eq!(
+            events(&mut progress),
+            [
+                ("check", serde_json::json!({"id": 1, "passed": true})),
+                ("task_started", serde_json::json!({"id": 2})),
+                (
+                    "check",
+                    serde_json::json!({"id": 2, "passed": false, "reason": "bad"})
+                ),
+            ]
         );
     }
 
