@@ -628,9 +628,12 @@ fn edit_file(root: &Path, arguments: &Value) -> Result<String, String> {
     Ok(format!("edited {} (1 replacement)", display(root, &target)))
 }
 
-/// Line diff: unchanged head and tail are skipped; the changed middle shows as
-/// `-` old lines then `+` new lines. Never cut: callers refuse a change over
-/// [`MAX_PREVIEW_LINES`] first (see [`refuse_over_cap`]).
+/// Line diff as minimal hunks (issue #510): each run of changed lines gets its own
+/// `@@ line N @@` header (N is the old file's line number) with the `-` old lines then
+/// the `+` new lines; unchanged lines are not drawn. A change needing more than
+/// [`MAX_DIFF_EDITS`] edits shows as one span from the first to the last changed line,
+/// which [`refuse_over_cap`] then refuses. Never cut: callers refuse a change over
+/// [`MAX_PREVIEW_LINES`] first.
 pub(crate) fn diff(old: &str, new: &str) -> String {
     let (old_text, new_text) = (old, new);
     let old: Vec<&str> = old.lines().collect();
@@ -642,11 +645,20 @@ pub(crate) fn diff(old: &str, new: &str) -> String {
         .zip(new[head..].iter().rev())
         .take_while(|(a, b)| a == b)
         .count();
-    let mut lines = vec![format!("@@ line {} @@", head + 1)];
-    lines.extend(old[head..old.len() - tail].iter().map(|l| format!("-{l}")));
-    lines.extend(new[head..new.len() - tail].iter().map(|l| format!("+{l}")));
+    let (old_mid, new_mid) = (&old[head..old.len() - tail], &new[head..new.len() - tail]);
+    let mut lines = vec![];
+    if !old_mid.is_empty() || !new_mid.is_empty() {
+        match edit_script(old_mid, new_mid) {
+            Some(script) => hunks(&script, old_mid, new_mid, head, &mut lines),
+            None => {
+                lines.push(format!("@@ line {} @@", head + 1));
+                lines.extend(old_mid.iter().map(|l| format!("-{l}")));
+                lines.extend(new_mid.iter().map(|l| format!("+{l}")));
+            }
+        }
+    }
     let notes = ending_notes(old_text, new_text);
-    if lines.len() == 1 {
+    if lines.is_empty() {
         return if notes.is_empty() {
             "(no line changes)".into()
         } else {
@@ -655,6 +667,105 @@ pub(crate) fn diff(old: &str, new: &str) -> String {
     }
     lines.extend(notes);
     lines.join("\n")
+}
+
+/// Most inserted-plus-deleted lines the minimal diff searches for; a change needing more
+/// is over the card cap anyway.
+const MAX_DIFF_EDITS: usize = 2 * MAX_PREVIEW_LINES;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Step {
+    Keep,
+    Delete,
+    Insert,
+}
+
+/// Shortest edit script from `a` to `b` (Myers, O(ND)), or `None` past [`MAX_DIFF_EDITS`].
+fn edit_script(a: &[&str], b: &[&str]) -> Option<Vec<Step>> {
+    let (n, m) = (a.len() as isize, b.len() as isize);
+    let max = MAX_DIFF_EDITS as isize;
+    let at = |k: isize| (k + max + 1) as usize;
+    let mut v = vec![0isize; 2 * MAX_DIFF_EDITS + 3];
+    let mut trace: Vec<Vec<isize>> = vec![];
+    let mut found = None;
+    'search: for d in 0..=max {
+        trace.push(v.clone());
+        let mut k = -d;
+        while k <= d {
+            let mut x = if k == -d || (k != d && v[at(k - 1)] < v[at(k + 1)]) {
+                v[at(k + 1)]
+            } else {
+                v[at(k - 1)] + 1
+            };
+            let mut y = x - k;
+            while x < n && y < m && a[x as usize] == b[y as usize] {
+                x += 1;
+                y += 1;
+            }
+            v[at(k)] = x;
+            if x >= n && y >= m {
+                found = Some(d);
+                break 'search;
+            }
+            k += 2;
+        }
+    }
+    let d_end = found?;
+    let (mut x, mut y) = (n, m);
+    let mut steps = vec![];
+    for d in (0..=d_end).rev() {
+        let v = &trace[d as usize];
+        let k = x - y;
+        let previous = if k == -d || (k != d && v[at(k - 1)] < v[at(k + 1)]) {
+            k + 1
+        } else {
+            k - 1
+        };
+        let (prev_x, prev_y) = (v[at(previous)], v[at(previous)] - previous);
+        while x > prev_x && y > prev_y {
+            steps.push(Step::Keep);
+            x -= 1;
+            y -= 1;
+        }
+        if d > 0 {
+            steps.push(if x == prev_x {
+                Step::Insert
+            } else {
+                Step::Delete
+            });
+        }
+        x = prev_x;
+        y = prev_y;
+    }
+    steps.reverse();
+    Some(steps)
+}
+
+/// Appends one `@@ line N @@` hunk per run of changed steps; `offset` is the number of
+/// leading lines both texts share.
+fn hunks(steps: &[Step], old: &[&str], new: &[&str], offset: usize, out: &mut Vec<String>) {
+    let (mut o, mut n) = (0, 0);
+    let mut i = 0;
+    while i < steps.len() {
+        if steps[i] == Step::Keep {
+            (o, n, i) = (o + 1, n + 1, i + 1);
+            continue;
+        }
+        out.push(format!("@@ line {} @@", offset + o + 1));
+        let (mut removed, mut added) = (vec![], vec![]);
+        while i < steps.len() && steps[i] != Step::Keep {
+            if steps[i] == Step::Delete {
+                removed.push(format!("-{}", old[o]));
+                o += 1;
+            } else {
+                added.push(format!("+{}", new[n]));
+                n += 1;
+            }
+            i += 1;
+        }
+        out.extend(removed);
+        out.extend(added);
+    }
 }
 
 /// Card lines for a change to line endings or the final newline, which `lines()` hides.
@@ -796,5 +907,226 @@ mod tests {
         assert_eq!(std::fs::read(&fresh).unwrap(), b"hi\n");
         assert!(leftovers(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Issue #510: the card shows minimal hunks, one `@@ line N @@` header each.
+    fn hundred(changes: &[(usize, &str)]) -> (String, String) {
+        let old: String = (1..=100).map(|n| format!("x{n}\n")).collect();
+        let new: String = (1..=100)
+            .map(|n| match changes.iter().find(|(at, _)| *at == n) {
+                Some((_, text)) => format!("{text}\n"),
+                None => format!("x{n}\n"),
+            })
+            .collect();
+        (old, new)
+    }
+
+    #[test]
+    fn scattered_changes_show_one_hunk_each_and_no_unchanged_lines() {
+        let (old, new) = hundred(&[(1, "first"), (100, "last")]);
+        assert_eq!(
+            diff(&old, &new),
+            "@@ line 1 @@\n-x1\n+first\n@@ line 100 @@\n-x100\n+last"
+        );
+        assert!(refuse_over_cap(&old, &new, 0).is_ok());
+    }
+
+    #[test]
+    fn insertions_deletions_and_replacements_get_their_own_headers() {
+        let old = "a\nb\nc\nd\ne\nf\n";
+        let new = "a\nB\nc\nd\nnew\ne\n";
+        assert_eq!(
+            diff(old, new),
+            "@@ line 2 @@\n-b\n+B\n@@ line 5 @@\n+new\n@@ line 6 @@\n-f"
+        );
+    }
+
+    #[test]
+    fn a_single_contiguous_change_is_one_span_hunk_as_before() {
+        let old = "a\nb\nc\nd\n";
+        assert_eq!(diff(old, "a\nX\nY\nd\n"), "@@ line 2 @@\n-b\n-c\n+X\n+Y");
+    }
+
+    #[test]
+    fn a_minimal_diff_still_over_the_cap_is_refused_with_todays_message() {
+        // 41 scattered one-line changes: 41 headers + 82 changed lines.
+        let changes: Vec<(usize, &str)> = (0..41).map(|i| (2 * i + 1, "changed")).collect();
+        let (old, new) = hundred(&changes);
+        let error = refuse_over_cap(&old, &new, 0).unwrap_err();
+        assert!(
+            error.starts_with("the change's diff is 123 lines, over the 80-line approval card limit; nothing was written. Split it into smaller edits"),
+            "{error}"
+        );
+        // 26 changes: 26 headers + 52 changed lines = 78 passes; the extra line counts.
+        let changes: Vec<(usize, &str)> = (0..26).map(|i| (2 * i + 1, "changed")).collect();
+        let (old, new) = hundred(&changes);
+        assert_eq!(diff(&old, &new).lines().count(), 78);
+        assert!(refuse_over_cap(&old, &new, 2).is_ok());
+        assert!(refuse_over_cap(&old, &new, 3).is_err());
+    }
+
+    #[test]
+    fn a_change_beyond_the_diff_bound_falls_back_to_the_span_and_is_refused() {
+        let old: String = (0..400).map(|n| format!("o{n}\n")).collect();
+        let new: String = (0..400).map(|n| format!("n{n}\n")).collect();
+        assert!(diff(&old, &new).starts_with("@@ line 1 @@\n-o0\n"));
+        assert!(refuse_over_cap(&old, &new, 0).is_err());
+    }
+
+    #[test]
+    fn the_diff_bound_is_exactly_160_edits() {
+        let alternating = |changes: usize| {
+            let old: String = (0..2 * changes).map(|n| format!("o{n}\n")).collect();
+            let new: String = (0..2 * changes)
+                .map(|n| {
+                    if n % 2 == 0 {
+                        format!("n{n}\n")
+                    } else {
+                        format!("o{n}\n")
+                    }
+                })
+                .collect();
+            (old, new)
+        };
+        // 80 one-line replacements = 160 edits: still minimal hunks, 80 headers.
+        let (old, new) = alternating(80);
+        let card = diff(&old, &new);
+        assert_eq!(card.matches("@@ line").count(), 80, "{card}");
+        assert!(!card.contains("-o1\n"), "{card}");
+        // 81 = 162 edits: one span from the first to the last change, unchanged lines too.
+        let (old, new) = alternating(81);
+        let card = diff(&old, &new);
+        assert_eq!(card.matches("@@ line").count(), 1, "{card}");
+        assert!(card.contains("-o1\n"), "{card}");
+    }
+
+    /// Applies a card diff to `old` line by line (the reviewer's reading of it).
+    fn apply_card(old: &str, card: &str) -> Vec<String> {
+        let old: Vec<&str> = old.lines().collect();
+        let mut out: Vec<String> = vec![];
+        let mut at = 0; // next old line index
+        let mut removed = 0;
+        let mut pending: Vec<String> = vec![];
+        let flush = |out: &mut Vec<String>,
+                     at: &mut usize,
+                     removed: &mut usize,
+                     pending: &mut Vec<String>| {
+            *at += *removed;
+            out.append(pending);
+            *removed = 0;
+        };
+        for line in card.lines() {
+            if let Some(n) = line
+                .strip_prefix("@@ line ")
+                .and_then(|r| r.strip_suffix(" @@"))
+            {
+                flush(&mut out, &mut at, &mut removed, &mut pending);
+                let start: usize = n.parse().unwrap();
+                while at < start - 1 {
+                    out.push(old[at].to_string());
+                    at += 1;
+                }
+            } else if let Some(gone) = line.strip_prefix('-') {
+                assert_eq!(
+                    old[at + removed],
+                    gone,
+                    "a removed line must match the old text"
+                );
+                removed += 1;
+            } else if let Some(added) = line.strip_prefix('+') {
+                pending.push(added.to_string());
+            }
+        }
+        flush(&mut out, &mut at, &mut removed, &mut pending);
+        out.extend(old[at..].iter().map(|l| l.to_string()));
+        out
+    }
+
+    struct Prng(u64);
+    impl Prng {
+        fn next(&mut self, bound: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % bound as u64) as usize
+        }
+    }
+
+    #[test]
+    fn applying_the_hunks_to_the_old_text_reproduces_the_new_text() {
+        let mut rng = Prng(0x9E37_79B9_7F4A_7C15);
+        let mut pairs = 0;
+        for _ in 0..600 {
+            let eol = ["\n", "\r\n"][rng.next(2)];
+            let len = rng.next(14);
+            let old_lines: Vec<String> = (0..len).map(|_| format!("l{}", rng.next(6))).collect();
+            let mut new_lines = old_lines.clone();
+            for _ in 0..rng.next(5) {
+                match rng.next(3) {
+                    0 if !new_lines.is_empty() => {
+                        let at = rng.next(new_lines.len());
+                        new_lines.remove(at);
+                    }
+                    1 => {
+                        let at = rng.next(new_lines.len() + 1);
+                        new_lines.insert(at, format!("n{}", rng.next(6)));
+                    }
+                    _ if !new_lines.is_empty() => {
+                        let at = rng.next(new_lines.len());
+                        new_lines[at] = format!("r{}", rng.next(6));
+                    }
+                    _ => {}
+                }
+            }
+            let join = |lines: &[String], eol: &str, final_eol: bool| {
+                let mut text = lines.join(eol);
+                if final_eol && !lines.is_empty() {
+                    text.push_str(eol);
+                }
+                text
+            };
+            let new_eol = if rng.next(4) == 0 {
+                ["\n", "\r\n"][rng.next(2)]
+            } else {
+                eol
+            };
+            let old = join(&old_lines, eol, rng.next(3) != 0);
+            let new = join(&new_lines, new_eol, rng.next(3) != 0);
+            let card = diff(&old, &new);
+            let expected: Vec<String> = new.lines().map(str::to_string).collect();
+            assert_eq!(
+                apply_card(&old, &card),
+                expected,
+                "old={old:?} new={new:?}\n{card}"
+            );
+            if old != new {
+                assert_ne!(card, "(no line changes)", "old={old:?} new={new:?}");
+            }
+            // Every changed line is on the card: removed and added counts match the lines
+            // the old/new texts hold beyond their common subsequence.
+            let removed = card.lines().filter(|l| l.starts_with('-')).count();
+            let added = card.lines().filter(|l| l.starts_with('+')).count();
+            assert_eq!(
+                old.lines().count() - removed,
+                new.lines().count() - added,
+                "unchanged lines must agree: old={old:?} new={new:?}"
+            );
+            pairs += 1;
+        }
+        assert_eq!(pairs, 600);
+    }
+
+    #[test]
+    fn crlf_and_final_newline_changes_keep_their_notes_beside_the_hunks() {
+        assert_eq!(
+            diff("a\r\nb\r\n", "a\nb\n"),
+            "line endings CRLF \u{2192} LF"
+        );
+        assert_eq!(
+            diff("a\nb\nc\n", "a\nB\nc"),
+            "@@ line 2 @@\n-b\n+B\nfinal newline removed"
+        );
+        assert_eq!(diff("a\nb", "a\nb\n"), "final newline added");
+        assert_eq!(diff("a\n", "a\n"), "(no line changes)");
     }
 }
