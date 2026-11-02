@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   mech-review:
-    uses: EricleungDK/ek/.github/workflows/mech-review.yml@v0.2.2
+    uses: EricleungDK/ek/.github/workflows/mech-review.yml@v0.2.3
     with:
       stack: rust
       rust-toolchain: 1.96.0
