@@ -86,6 +86,15 @@ class FlagTests(unittest.TestCase):
         self.assertIn('are hidden in this sandbox', reference)
         self.assertIn('move them out of the Coding Workspace', reference)
 
+    def test_env_templates_are_documented_as_read_only_in_the_sandbox(self):
+        # Issue #598: the read tools' three template names are bound read-only, not masked.
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        for text in ('`.env.example`, `.env.sample` and `.env.template`', 'read-only over its own path',
+                     'do not count toward the 128-mask limit', 'looks empty',
+                     'the usual `escalate: true` advice is left out'):
+            self.assertIn(text, reference)
+        self.assertNotIn('fail with Permission denied; they need the owner', reference)
+
     def test_readme_documents_every_flag(self):
         source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
         flags = set(re.findall(r'^\s*"(--[a-z-]+)"(?: \| "--[a-z-]+")* =>', source, re.M))

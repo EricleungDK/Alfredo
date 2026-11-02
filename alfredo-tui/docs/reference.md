@@ -1791,7 +1791,7 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   rename limit is refused, not shown. git_diff reads the changed names and the patch in
   two git calls, so a file changed between them is not covered.
   In a sandboxed `run_command` the same list is enforced by masking instead of refusing:
-  each workspace file it matches fails with `Permission denied` when opened and each matching directory appears empty, so
+  each workspace file it matches fails with `Permission denied` when opened and each matching directory appears empty (the three exact template names `.env.example`, `.env.sample` and `.env.template` are the exception: see **Sandboxed (default)**), so
   no approved command, including one an always-allow rule covers, returns a secret's contents
   (issue #469). See **Sandboxed (default)** under `run_command` for the limits. The workspace's
   root `.git` is not masked: `.git/config` and committed history stay visible to sandboxed
@@ -2120,12 +2120,18 @@ default false), `timeout_seconds` (1–600, default 120).
   workspace's root `.git` is skipped; a nested `.git` directory or file is masked like any
   secret entry, so git inside a nested repository fails in the sandbox. Each matching file is
   bound over with `/dev/null`: it fails with `Permission denied` when opened (`cat .env` prints an error, not the contents) and cannot be
-  written. Each matching directory is bound over with an empty read-only directory: `ls .ssh`
+  written. The exception is a regular file named exactly `.env.example`, `.env.sample` or
+  `.env.template` (issue #598), the same names `read_file` opens: the sandbox binds it
+  read-only over its own path, so `cat .env.example` and `cp .env.example .env` work while
+  appending to, overwriting, renaming or deleting it fails and the host file is unchanged. Templates
+  do not count toward the 128-mask limit; only 120 are bound per run and any further one is masked
+  and counted. `.env`, `.env.example.local`, `.envrc`, anything under a directory named
+  `.env.example`, and a template that is a symbolic link stay masked or refuse the run as before. Each matching directory is bound over with an empty read-only directory: `ls .ssh`
   lists nothing, and a path inside it reports `No such file or directory`. The run is refused,
   with `nothing ran` and the reason, rather than started unmasked, when the scan cannot finish:
   more than 128 masks, more than 250,000 entries, nesting past 64 directories, an unreadable
   directory, a name that is not UTF-8 and matches the list, or a symbolic link whose own name
-  matches the list (remove or rename it). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and fail with Permission denied; they need the owner, do not retry on the host to read them` (a count only, never names). Not covered:
+  matches the list (remove or rename it). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them` (a count only, never names). On a failing run with at least one mask, the usual `escalate: true` advice is left out so the two notes never give opposite next steps; the run still states the sandbox limits. Not covered:
   a file the command creates during the run; an `escalate: true` run, which is on the host and
   unmasked (its card says it runs outside the sandbox); a non-secret name hard-linked to a
   secret, which the read tools also allow; and the workspace's root `.git` directory, which

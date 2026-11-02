@@ -255,7 +255,7 @@ fn a_masked_npmrc_read_explains_the_hidden_file_with_a_count_only() {
     let note = note_line(&out).unwrap();
     assert_eq!(
         note,
-        "note: 1 secret file(s)/directory(ies) are hidden in this sandbox and fail with Permission denied; they need the owner, do not retry on the host to read them"
+        "note: 1 secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them"
     );
     assert!(!note.contains("npmrc"), "the note names the file: {note}");
     assert!(!out.contains("registry=x"), "contents leaked: {out}");

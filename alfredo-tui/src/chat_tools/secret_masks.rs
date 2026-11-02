@@ -3,6 +3,9 @@
 //! the read tools refuse. Before each sandboxed run, every workspace entry the secret
 //! predicate ([`crate::planning_context::secret`]) matches is hidden: a secret file is
 //! bound over with `/dev/null`, and a secret directory with an empty read-only directory.
+//! The one exception is the three exact env template file names the read tools open
+//! ([`crate::planning_context::read_secret`], issue #598): a regular file of that name is
+//! bound read-only over itself instead, so the sandbox can read it but never change it.
 //!
 //! The walk is bounded and does not follow symbolic links. It includes git-ignored files,
 //! which are exactly the ones a `.gitignore` leaves out of Git. Only the workspace's own
@@ -23,6 +26,10 @@ use std::{
 /// binds declared with the sandbox's other read-only bindings, which the execution
 /// validator caps at 256 entries; the rest of the run takes a handful of those.
 pub(crate) const LIMIT: usize = 128;
+/// Most env templates one run binds read-only. They share the sandbox's 256-entry
+/// read-only binding cap with the masks ([`LIMIT`]) and the run's other binds, so a surplus
+/// template is masked like any secret rather than bound, and then counts toward [`LIMIT`].
+pub(crate) const TEMPLATE_LIMIT: usize = 120;
 /// Entries one walk may visit before it refuses, so a huge tree cannot stall a run.
 const VISIT_LIMIT: usize = 250_000;
 /// Directory depth one walk may descend before it refuses.
@@ -37,6 +44,9 @@ pub(crate) struct Masks {
     pub(crate) files: Vec<String>,
     /// Secret directories, each bound over with the empty read-only directory of the run.
     pub(crate) dirs: Vec<String>,
+    /// Regular files with an env template name, each bound read-only over itself. Not
+    /// masks: they do not count toward [`LIMIT`] (up to [`TEMPLATE_LIMIT`] of them).
+    pub(crate) templates: Vec<String>,
 }
 
 /// The mounts one sandboxed run binds over its masks, and the host directory the directory
@@ -46,7 +56,7 @@ pub(crate) struct Mounts {
     /// Present only when a directory is masked. Held for its drop, never read.
     _empty: Option<EmptyDir>,
     /// `(source, destination)` read-only bindings: `/dev/null` for each file, the empty
-    /// directory for each directory. The sandbox binds these and declares them to the
+    /// directory for each directory, and each template over itself. The sandbox binds these and declares them to the
     /// validator, so both come from this one list and cannot drift apart.
     pub(crate) pairs: Vec<(String, String)>,
 }
@@ -76,6 +86,11 @@ impl Masks {
                     .map(|dir| (empty.path().to_string(), dir.clone())),
             );
         }
+        pairs.extend(
+            self.templates
+                .iter()
+                .map(|file| (file.clone(), file.clone())),
+        );
         Ok(Mounts {
             _empty: empty,
             pairs,
@@ -148,6 +163,17 @@ impl Scan {
                         "{child} is a symbolic link named like a secret file, and a link cannot be masked safely; remove it or rename it"
                     ));
                 }
+                continue;
+            }
+            if secret
+                && file_type.is_file()
+                && !planning_context::read_secret(&child)
+                && self.masks.templates.len() < TEMPLATE_LIMIT
+            {
+                let text = entry.path().into_os_string().into_string().map_err(|_| {
+                    format!("{child} is not valid UTF-8 and matches a secret file name")
+                })?;
+                self.masks.templates.push(text);
                 continue;
             }
             if secret {
@@ -383,6 +409,78 @@ mod tests {
         let empty_path = PathBuf::from(&empty.0);
         drop(mounts);
         assert!(!empty_path.exists(), "the empty directory outlived its run");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn env_templates_are_bound_read_only_and_are_not_masks() {
+        let root = scratch("templates");
+        fs::create_dir_all(root.join("sub/.env.example")).unwrap();
+        fs::write(root.join("sub/.env.example/inner"), "x").unwrap();
+        for name in [".env.example", ".env.sample", ".env.template"] {
+            fs::write(root.join(name), "A=1").unwrap();
+        }
+        fs::write(root.join(".env.example.local"), "x").unwrap();
+        fs::write(root.join(".env"), "x").unwrap();
+        let masks = scan(&root).unwrap();
+        let mut templates = masks.templates.clone();
+        templates.sort();
+        assert_eq!(
+            templates,
+            vec![
+                text(&root.join(".env.example")),
+                text(&root.join(".env.sample")),
+                text(&root.join(".env.template")),
+            ]
+        );
+        let mut files = masks.files.clone();
+        files.sort();
+        assert_eq!(
+            files,
+            vec![
+                text(&root.join(".env")),
+                text(&root.join(".env.example.local"))
+            ]
+        );
+        assert_eq!(masks.dirs, vec![text(&root.join("sub/.env.example"))]);
+        assert_eq!(masks.len(), 3);
+        let mounts = masks.mounts().unwrap();
+        let own = text(&root.join(".env.sample"));
+        assert!(mounts.pairs.contains(&(own.clone(), own)));
+        assert_eq!(mounts.pairs.len(), 6);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_template_that_is_not_a_regular_file_is_masked_or_refused() {
+        let root = scratch("template-kinds");
+        let fifo = root.join(".env.example");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let masks = scan(&root).unwrap();
+        assert!(masks.templates.is_empty());
+        assert_eq!(masks.files, vec![text(&fifo)]);
+        fs::remove_file(&fifo).unwrap();
+        std::os::unix::fs::symlink(".env", root.join(".env.example")).unwrap();
+        let error = scan(&root).unwrap_err();
+        assert!(error.contains(".env.example is a symbolic link"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn templates_past_the_bind_budget_are_masked_and_then_count() {
+        let root = scratch("template-budget");
+        for index in 0..TEMPLATE_LIMIT + 2 {
+            fs::create_dir_all(root.join(format!("d{index}"))).unwrap();
+            fs::write(root.join(format!("d{index}/.env.example")), "A=1").unwrap();
+        }
+        let masks = scan(&root).unwrap();
+        assert_eq!(masks.templates.len(), TEMPLATE_LIMIT);
+        assert_eq!(masks.files.len(), 2);
+        assert_eq!(masks.len(), 2);
         let _ = fs::remove_dir_all(root);
     }
 
