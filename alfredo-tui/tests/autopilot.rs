@@ -1356,6 +1356,12 @@ fn sandbox_denied_failure_does_not_say_install_bubblewrap() {
     assert!(!report.contains("apt install"), "{report}");
     assert!(!notice.contains("apt install"), "{notice}");
     assert!(report.contains("user namespaces"), "{report}");
+    // Only a missing file earns the install hint.
+    assert_eq!(
+        alfredo_tui::doctor::sandbox_start_hint(false),
+        alfredo_tui::doctor::BWRAP_FIX
+    );
+    assert!(!alfredo_tui::doctor::sandbox_start_hint(true).contains("apt install"));
 }
 
 fn sandbox_refused_with(

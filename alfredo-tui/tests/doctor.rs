@@ -389,6 +389,67 @@ fn doctor_fails_when_bubblewrap_cannot_start_a_sandbox() {
     assert!(!text.contains("Preflight checks passed."), "{text}");
 }
 
+fn recording_bwrap(dir: &std::path::Path, name: &str, body: &str) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let log = dir.join(format!("{name}.log"));
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\n{body}\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    (path, log)
+}
+
+#[test]
+fn sandbox_probe_is_the_readme_no_op_run_and_cached_except_for_the_doctor() {
+    let fixture = Fixture::new();
+    let (ok, log) = recording_bwrap(&fixture.root, "okbwrap", "exit 0");
+    let ok = ok.to_str().unwrap();
+    assert_eq!(alfredo_tui::doctor::sandbox_probe_at(ok, true), Ok(()));
+    assert_eq!(alfredo_tui::doctor::sandbox_probe_at(ok, true), Ok(()));
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "--ro-bind / / --unshare-user --unshare-pid --unshare-net true\n",
+        "one probe for two cached calls"
+    );
+    assert_eq!(alfredo_tui::doctor::sandbox_probe_at(ok, false), Ok(()));
+    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 2);
+    // A different path is a different cache entry.
+    let (bad, bad_log) = recording_bwrap(
+        &fixture.root,
+        "badbwrap",
+        "echo 'bwrap: denied\n\tnow' >&2; exit 1",
+    );
+    let bad = bad.to_str().unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            alfredo_tui::doctor::sandbox_probe_at(bad, true),
+            Err("bwrap: denied now".to_owned())
+        );
+    }
+    assert_eq!(fs::read_to_string(&bad_log).unwrap().lines().count(), 1);
+    // The cached preflight text carries the stderr and the host-policy fix.
+    let message = alfredo_tui::doctor::sandbox_denied_message("bwrap: denied now");
+    assert!(message.contains("bwrap: denied now"), "{message}");
+    assert!(message.contains("user namespaces"), "{message}");
+}
+
+#[test]
+fn sandbox_probe_names_a_silent_failure_and_stops_a_hung_bwrap() {
+    let fixture = Fixture::new();
+    let (silent, _) = recording_bwrap(&fixture.root, "silent", "exit 3");
+    let error = alfredo_tui::doctor::sandbox_probe_at(silent.to_str().unwrap(), false).unwrap_err();
+    assert!(error.contains("exited") && error.contains('3'), "{error}");
+    let (hung, _) = recording_bwrap(&fixture.root, "hung", "exec sleep 60");
+    let error = alfredo_tui::doctor::sandbox_probe_at(hung.to_str().unwrap(), false).unwrap_err();
+    assert!(error.contains("within 5 s"), "{error}");
+    let error =
+        alfredo_tui::doctor::sandbox_probe_at("/nonexistent/alfredo/bwrap", false).unwrap_err();
+    assert!(error.contains("could not start"), "{error}");
+}
+
 fn plain_folder_report() -> (String, std::path::PathBuf) {
     let fixture = Fixture::new();
     let plain = fixture.root.join("plain");
