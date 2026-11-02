@@ -77,6 +77,15 @@ class FlagTests(unittest.TestCase):
         readme = (ROOT / 'alfredo-tui/README.md').read_text(encoding='utf-8')
         self.assertIn('--chat -', readme)
 
+    def test_masked_secret_files_are_documented_as_permission_denied(self):
+        # Issue #582: /dev/null is bound nodev, so a masked file fails to open.
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        self.assertNotIn('reads as empty', reference)
+        self.assertNotIn('prints nothing', reference)
+        self.assertGreaterEqual(reference.count('fails with `Permission denied`'), 2)
+        self.assertIn('are hidden in this sandbox', reference)
+        self.assertIn('move them out of the Coding Workspace', reference)
+
     def test_readme_documents_every_flag(self):
         source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
         flags = set(re.findall(r'^\s*"(--[a-z-]+)"(?: \| "--[a-z-]+")* =>', source, re.M))
