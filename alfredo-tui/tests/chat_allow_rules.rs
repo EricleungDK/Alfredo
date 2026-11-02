@@ -1,6 +1,6 @@
 //! Issue #238: always-allow rules. Per mission, by tool or run_command command prefix,
-//! persisted in the State Directory; push never; escalated runs need escalated rules;
-//! auto-approved calls are still fingerprint-checked and logged with their rule.
+//! persisted in the State Directory; push never; HOST (escalated) runs always ask
+//! (issue #311); auto-approved calls are still fingerprint-checked and logged with their rule.
 mod ollama_fixture;
 
 use alfredo_tui::{
@@ -63,6 +63,22 @@ fn plain(tool: &str, kind: CardKind) -> Card {
         preview: String::new(),
         fingerprint: String::new(),
     }
+}
+
+/// The approval card of a HOST (`escalate: true`) run_command, built as the tool loop builds it.
+fn host_card(root: &Path, command: &str, cwd: Option<&str>) -> Card {
+    let mut arguments = json!({"command": command, "escalate": true});
+    if let Some(cwd) = cwd {
+        arguments["cwd"] = json!(cwd);
+    }
+    approval::card(
+        root,
+        &alfredo_tui::model::ToolCall {
+            name: "run_command".into(),
+            arguments,
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -234,27 +250,31 @@ fn push_is_never_allowlistable_even_from_a_hand_edited_file() {
     let _ = fs::remove_dir_all(state);
 }
 
+/// Issue #311: a HOST run gets no rule, and a sandboxed rule never covers it. A rule with
+/// `escalated` (written before the fix) never matches, host or sandboxed.
 #[test]
-fn escalated_runs_need_an_explicitly_escalated_rule() {
+fn escalated_runs_never_match_a_rule() {
     let state = dir("escalated");
     let rules = Rules::new(&state);
     let sandboxed = rules.add_for(&shell("npm install", false)).unwrap();
     assert!(!sandboxed.escalated);
+    // A sandboxed rule does not cover a host run.
     assert_eq!(rules.matching(&shell("npm install", true)), None);
-    let host = rules.add_for(&shell("npm install", true)).unwrap();
+    assert!(rules.add_for(&shell("npm install", true)).is_err());
+    fs::write(
+        state.join(allow::FILE),
+        r#"[{"id":1,"tool":"run_command","command":"npm install","escalated":true}]"#,
+    )
+    .unwrap();
+    let host = rules.list().unwrap().remove(0);
     assert!(host.escalated);
-    assert_eq!(
-        rules.matching(&shell("npm install", true)),
-        Some(host.clone())
-    );
+    assert_eq!(rules.matching(&shell("npm install", true)), None);
+    assert_eq!(rules.matching(&shell("npm install", false)), None);
     assert!(
-        allow::describe(&host).contains("HOST"),
+        allow::describe(&host).contains("inactive, HOST runs always ask"),
         "{}",
         allow::describe(&host)
     );
-    // An escalated rule does not cover sandboxed runs either.
-    rules.remove(sandboxed.id).unwrap();
-    assert_eq!(rules.matching(&shell("npm install", false)), None);
     let _ = fs::remove_dir_all(state);
 }
 
@@ -287,11 +307,17 @@ fn screen(card: Card) -> String {
 }
 
 #[test]
-fn the_card_offers_always_allow_except_for_push_and_says_host_when_escalated() {
+fn the_card_offers_always_allow_except_for_push_and_host_runs() {
     assert!(screen(plain("edit_file", CardKind::Edit)).contains("a always allow"));
     assert!(!screen(plain("git_push", CardKind::Push)).contains("a always allow"));
+    assert!(screen(shell("npm install", false)).contains("a always allow"));
+    // Issue #311: a HOST run is never offered `a`, and its key line says why.
     let host = screen(shell("npm install", true));
-    assert!(host.contains("a always allow on HOST"), "{host}");
+    assert!(!host.contains("a always allow"), "{host}");
+    assert!(
+        host.contains("a not offered: HOST runs always ask"),
+        "{host}"
+    );
 }
 
 #[test]
@@ -577,13 +603,17 @@ fn allow_lists_every_rule_in_full_at_100_columns() {
     );
     // Over 80 characters no card offers `a` any more (#409), but an older rule file can
     // still hold such a rule, and `/allow` shows it in full.
+    // A HOST rule from before issue #311 (no card can add one now) is listed as inactive.
     fs::write(
         state.join(allow::FILE),
-        json!([{"id": 1, "tool": "run_command", "command": long}]).to_string(),
+        json!([
+            {"id": 1, "tool": "run_command", "command": long},
+            {"id": 2, "tool": "run_command", "command": "echo onhost true", "escalated": true}
+        ])
+        .to_string(),
     )
     .unwrap();
     rules.add_for(&plain("edit_file", CardKind::Edit)).unwrap();
-    rules.add_for(&shell("echo onhost true", true)).unwrap();
     let listed = allow::slash(&rules, "").unwrap();
     assert_eq!(listed.lines().count(), 4, "heading and one row per rule");
     assert!(!listed.contains('…'), "{listed}");
@@ -615,6 +645,10 @@ fn allow_lists_every_rule_in_full_at_100_columns() {
         );
     }
     assert!(listed.contains("on HOST"), "{listed}");
+    assert!(
+        listed.contains("inactive, HOST runs always ask"),
+        "{listed}"
+    );
     let _ = fs::remove_dir_all(state);
 }
 
@@ -675,17 +709,116 @@ fn a_write_file_rule_does_not_cover_directory_creating_writes() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #311: a HOST rule written before the fix matches neither its exact command nor a
+/// longer one.
 #[test]
-fn escalated_rules_match_only_the_exact_command() {
+fn escalated_rules_from_before_issue_311_never_match_their_exact_command() {
     let state = dir("exact-host");
     let rules = Rules::new(&state);
-    let host = rules.add_for(&shell("npm install", true)).unwrap();
-    assert_eq!(rules.matching(&shell("npm install", true)), Some(host));
+    fs::write(
+        state.join(allow::FILE),
+        r#"[{"id":1,"tool":"run_command","command":"npm install","escalated":true}]"#,
+    )
+    .unwrap();
+    assert_eq!(rules.matching(&shell("npm install", true)), None);
     assert_eq!(
         rules.matching(&shell("npm install attacker-pkg", true)),
         None
     );
+    assert!(rules.add_for(&shell("npm install", true)).is_err());
     assert!(!allow::describe(&rules.list().unwrap()[0]).contains("longer"));
+    let _ = fs::remove_dir_all(state);
+}
+
+/// Issue #311: a HOST (escalated) run_command is never offered `a`, so no rule can make a
+/// later host run skip its card. On main these five all got `a`: four are push commands
+/// the `git push` word check misses, and `./build.sh` is a repeatable host command.
+#[test]
+fn host_runs_are_never_offered_always_allow_so_no_rule_can_skip_their_card() {
+    let root = dir("host-never");
+    fs::create_dir(root.join("sub")).unwrap();
+    let state = dir("host-never-state");
+    let rules = Rules::new(&state);
+    for command in [
+        "g''it push origin main",
+        "git pu''sh origin main",
+        "G=git; $G push origin main",
+        "git -c alias.p=push p origin main",
+        "./build.sh",
+    ] {
+        for cwd in [None, Some("sub")] {
+            let card = host_card(&root, command, cwd);
+            assert!(card.escalated(), "{command} {cwd:?}");
+            assert!(!allow::offered(&card), "{command} {cwd:?}: offered");
+            assert_eq!(allow::offer(&card), None, "{command} {cwd:?}: hinted");
+            assert!(
+                rules.add_for(&card).is_err(),
+                "{command} {cwd:?}: a rule was added"
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(state);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #311: an escalated rule in `chat-allow.json` (written before the fix) never
+/// matches a host run, whatever its command or cwd. Each of the five commands from the
+/// issue is a legacy rule, and a legacy tool-wide escalated rule is included.
+#[test]
+fn an_old_escalated_rule_never_matches_a_host_run_from_any_cwd() {
+    let root = dir("host-old-rule");
+    fs::create_dir(root.join("sub")).unwrap();
+    let state = dir("host-old-rule-state");
+    let commands = [
+        "./build.sh",
+        "g''it push origin main",
+        "git pu''sh origin main",
+        "G=git; $G push origin main",
+        "git -c alias.p=push p origin main",
+    ];
+    let mut legacy: Vec<String> = commands
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            format!(
+                r#"{{"id":{},"tool":"run_command","command":{},"escalated":true}}"#,
+                index + 1,
+                json!(command)
+            )
+        })
+        .collect();
+    legacy.push(r#"{"id":9,"tool":"run_command","escalated":true}"#.into());
+    fs::write(state.join(allow::FILE), format!("[{}]", legacy.join(","))).unwrap();
+    let rules = Rules::new(&state);
+    assert_eq!(rules.list().unwrap().len(), commands.len() + 1);
+    for command in commands {
+        for cwd in [None, Some("sub")] {
+            let card = host_card(&root, command, cwd);
+            assert_eq!(rules.matching(&card), None, "{command} {cwd:?}");
+            assert!(allow::offer(&card).is_none(), "{command} {cwd:?}");
+        }
+    }
+    let _ = fs::remove_dir_all(state);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #311: a legacy escalated rule is listed as inactive in every form `/allow` shows,
+/// including a tool-wide one (`command` absent), which would otherwise read as coverage.
+#[test]
+fn every_legacy_escalated_rule_is_listed_inactive() {
+    let state = dir("legacy-inactive");
+    let rules = Rules::new(&state);
+    fs::write(
+        state.join(allow::FILE),
+        r#"[{"id":1,"tool":"run_command","command":"./build.sh","escalated":true},{"id":2,"tool":"run_command","escalated":true}]"#,
+    )
+    .unwrap();
+    let listed = rules.list().unwrap();
+    assert_eq!(listed.len(), 2);
+    for rule in &listed {
+        let text = allow::describe(rule);
+        assert!(text.contains("inactive, HOST runs always ask"), "{text}");
+    }
     let _ = fs::remove_dir_all(state);
 }
 
@@ -728,28 +861,32 @@ fn git_push_through_run_command_is_never_allowlistable() {
 fn the_hint_shows_commands_of_80_characters_and_drops_a_at_81() {
     let at_limit = format!("echo {}", "A".repeat(75));
     assert_eq!(at_limit.chars().count(), 80);
-    for escalated in [false, true] {
-        let hint = allow::offer(&shell(&at_limit, escalated)).unwrap();
-        assert!(hint.contains(&format!("`{at_limit}`")), "{hint}");
-    }
+    // Sandboxed: the hint shows the whole command. (A HOST run is never offered, #311.)
+    let hint = allow::offer(&shell(&at_limit, false)).unwrap();
+    assert!(hint.contains(&format!("`{at_limit}`")), "{hint}");
     let over = format!("{at_limit}B");
-    for escalated in [false, true] {
-        let card = shell(&over, escalated);
-        assert!(allow::offer(&card).is_none());
-        assert!(!allow::available(&card));
-        assert!(rules_for_test().add_for(&card).is_err());
-        let text = screen(card);
-        assert!(!text.contains("a always allow"), "{text}");
-        assert!(
-            text.contains("a not offered: too long to always-allow"),
-            "{text}"
-        );
-        assert!(
-            text.contains("y approve") && text.contains("n deny"),
-            "{text}"
-        );
-        assert!(!text.contains("exactly"), "{text}");
-    }
+    let card = shell(&over, false);
+    assert!(allow::offer(&card).is_none());
+    assert!(!allow::available(&card));
+    assert!(rules_for_test().add_for(&card).is_err());
+    let text = screen(card);
+    assert!(!text.contains("a always allow"), "{text}");
+    assert!(
+        text.contains("a not offered: too long to always-allow"),
+        "{text}"
+    );
+    assert!(
+        text.contains("y approve") && text.contains("n deny"),
+        "{text}"
+    );
+    assert!(!text.contains("exactly"), "{text}");
+    // A HOST run of any length is not offered, and the reason is that it always asks.
+    let host = shell(&at_limit, true);
+    assert!(allow::offer(&host).is_none());
+    assert_eq!(
+        allow::unavailable_reason(&host).as_deref(),
+        Some("HOST runs always ask")
+    );
 }
 
 fn rules_for_test() -> Rules {
@@ -759,7 +896,7 @@ fn rules_for_test() -> Rules {
 #[test]
 fn the_hint_shows_a_tab_as_an_arrow_and_a_newline_as_a_return_arrow() {
     let tabbed = "echo AAAAAAAAAAAAAAAAAAAA ok;\techo SECOND; echo THIRD";
-    let hint = allow::offer(&shell(tabbed, true)).unwrap();
+    let hint = allow::offer(&shell(tabbed, false)).unwrap();
     assert!(hint.contains("→"), "{hint}");
     assert!(hint.contains("echo SECOND; echo THIRD"), "{hint}");
     assert!(
@@ -769,7 +906,9 @@ fn the_hint_shows_a_tab_as_an_arrow_and_a_newline_as_a_return_arrow() {
     assert!(hint.ends_with(" exactly"), "{hint}");
     // The issue's repro (over 80 shown) is no longer cut: `a` is not offered.
     let long = format!("echo {} ok;\techo SECOND_PART; echo THIRD", "A".repeat(60));
-    assert!(allow::offer(&shell(&long, true)).is_none());
+    assert!(allow::offer(&shell(&long, false)).is_none());
+    // A HOST run of the same command is not offered at all (issue #311).
+    assert!(allow::offer(&shell(tabbed, true)).is_none());
     let multi = "printf 'a\tb\n'\tcat t.py";
     let hint = allow::offer(&shell(multi, false)).unwrap();
     assert!(hint.contains("'a→"), "{hint}");
@@ -808,11 +947,16 @@ fn the_card_s_dollar_lines_and_the_hint_show_the_same_command_text() {
         ),
     ];
     for (command, rows, hint) in cases {
+        assert_eq!(allow::show_command(command), hint);
         for escalated in [false, true] {
             let card = shell_with_preview(command, escalated);
-            let offer = allow::offer(&card).unwrap();
-            assert!(offer.contains(&format!("`{hint}`")), "{command:?}: {offer}");
-            assert_eq!(allow::show_command(command), hint);
+            if escalated {
+                // Issue #311: a HOST card offers no hint; its `$` lines still show the command.
+                assert!(allow::offer(&card).is_none(), "{command:?}");
+            } else {
+                let offer = allow::offer(&card).unwrap();
+                assert!(offer.contains(&format!("`{hint}`")), "{command:?}: {offer}");
+            }
             let text = screen(card);
             let mut from = 0;
             for row in rows {
@@ -843,21 +987,27 @@ fn a_control_character_or_escape_lookalike_is_checked_before_trimming() {
         .contains("`ls`"));
     // Text that looks like an escape could pass for a different command.
     for command in ["echo <U+21B5> x", "echo <U+2192>"] {
-        let card = shell(command, true);
+        let card = shell(command, false);
         assert!(allow::offer(&card).is_none(), "{command}");
         assert!(allow::unavailable_reason(&card)
             .unwrap()
             .contains("looks like an escape"));
+        // A HOST run says why first (issue #311).
+        assert_eq!(
+            allow::unavailable_reason(&shell(command, true)).as_deref(),
+            Some("HOST runs always ask")
+        );
     }
 }
 
+/// Issue #409 / #320: the hint and `/allow` show a sandboxed command the same way. (Was: an
+/// escalated card; a HOST run is never offered `a` since issue #311.)
 #[test]
-fn the_escalated_card_shows_the_whole_command_and_slash_allow_shows_it_the_same_way() {
+fn the_hint_and_slash_allow_show_the_whole_command_the_same_way() {
     let command = "make\tbuild;\necho done → ok";
-    let card = shell(command, true);
+    let card = shell(command, false);
     let text = screen(card.clone());
     let shown = allow::show_command(command);
-    assert!(text.contains("on HOST (escalated rule)"), "{text}");
     assert!(text.contains(&shown), "{text}");
     let state = dir("same-view");
     let rules = Rules::new(&state);
@@ -866,6 +1016,10 @@ fn the_escalated_card_shows_the_whole_command_and_slash_allow_shows_it_the_same_
     let described = allow::describe(&rule);
     assert!(described.contains(&format!("`{shown}`")), "{described}");
     assert!(allow::offer(&card).unwrap().contains(&format!("`{shown}`")));
+    // The same command on HOST is neither offered nor added (issue #311).
+    let host = shell(command, true);
+    assert!(allow::offer(&host).is_none());
+    assert!(rules.add_for(&host).is_err());
     let _ = fs::remove_dir_all(state);
 }
 
