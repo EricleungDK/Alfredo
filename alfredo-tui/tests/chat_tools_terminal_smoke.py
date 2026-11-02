@@ -151,6 +151,12 @@ class ChatTools(unittest.TestCase):
         root = os.path.realpath(self.repo.name)
         subprocess.run(['git', '-C', root, 'init', '-q', '--template='], check=True)
         Path(root, 'README.md').write_text(README)
+        # Issue #486: a user command in the State Directory, and a decoy a cloned repo might ship.
+        Path(self.state.name, 'commands').mkdir()
+        Path(self.state.name, 'commands', 'redraft-readme.md').write_text(
+            'redraft README, focus: $ARGUMENTS\n')
+        Path(root, '.alfredo/commands').mkdir(parents=True)
+        Path(root, '.alfredo/commands', 'planted.md').write_text('PLANTED_BODY')
         binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
             str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
         env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=self.state.name)
@@ -401,6 +407,35 @@ class ChatTools(unittest.TestCase):
         self.check_signal_kills_the_host_command(signal.SIGTERM)
         self.assertIn(b'\x1b[?1049l', bytes(self.terminal.output), 'alternate screen left')
         self.assertTrue(termios.tcgetattr(self.terminal.slave)[3] & termios.ICANON, 'raw mode off')
+
+    def test_a_user_command_sends_its_body_and_its_edit_still_needs_the_card(self):
+        # Issue #486: /NAME args sends the body ($ARGUMENTS replaced) as the owner's
+        # message; the edit it triggers waits on the normal approval card.
+        self.terminal.write(b'/redraft-readme USER_ARG_MARKER\r')
+        self.terminal.wait_for('Approve edit_file')
+        self.assertNotIn('Unknown command', self.terminal.screen())
+        prompt = [m for m in self.fixture.chats()[0]['messages'] if m['role'] == 'user'][-1]
+        self.assertEqual(prompt['content'], 'redraft README, focus: USER_ARG_MARKER')
+        self.assertEqual(self.readme(), README, 'nothing written before approval')
+        time.sleep(0.7)
+        self.terminal.write(b'y')
+        self.terminal.wait_for('MODEL_SAW_EDIT')
+        self.assertIn('REDRAFTED_MARKER: a small', self.readme())
+
+    def test_f1_and_the_type_ahead_list_user_commands_and_ignore_the_repo_directory(self):
+        self.terminal.write(b'/redr')
+        self.terminal.wait_for('user command')
+        self.terminal.write(b'\x15')
+        time.sleep(0.3)
+        self.terminal.write(b'\x1b')
+        time.sleep(0.3)
+        self.terminal.write(b'\x1bOP')
+        self.terminal.wait_for('User commands')
+        self.terminal.write(b'\x1b')
+        time.sleep(0.3)
+        self.terminal.write(b'/planted\r')
+        self.terminal.wait_for('Unknown command /planted')
+        self.assertEqual(self.fixture.chats(), [], 'repo-committed commands are never read')
 
     def test_a_denied_edit_never_touches_the_file(self):
         self.terminal.write(b'redraft README\r')

@@ -16,6 +16,7 @@ pub mod activity;
 pub mod clean;
 pub mod commands;
 pub mod conversations;
+pub mod user_commands;
 
 pub mod review;
 
