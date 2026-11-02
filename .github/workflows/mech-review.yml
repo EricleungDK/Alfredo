@@ -11,9 +11,10 @@ permissions:
 
 jobs:
   mech-review:
-    uses: EricleungDK/ek/.github/workflows/mech-review.yml@v0.2.0
+    uses: EricleungDK/ek/.github/workflows/mech-review.yml@v0.2.1
     with:
       stack: rust
+      rust-toolchain: 1.96.0
       project-dir: alfredo-tui
       test-paths: |
         alfredo-tui/tests/**
