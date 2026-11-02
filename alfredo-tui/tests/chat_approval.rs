@@ -1692,6 +1692,32 @@ fn a_page_scrolled_out_of_view_does_not_count_as_shown() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #485: a page drawn while the card was not wholly on screen is shown again, and
+/// the next page opens only after that.
+#[test]
+fn a_page_drawn_off_screen_must_be_shown_again_before_the_next_opens() {
+    let (root, session) = big_session("page-again", &numbered(200));
+    session.scroll_rows(-3);
+    let mut paged = Paged::new(session, 100, 24);
+    paged.wait_and_draw(approval::ARM * 2);
+    for _ in 0..5 {
+        paged.session().page_approval(true);
+    }
+    let text = paged.draw();
+    assert!(text.contains("+line 1"), "still the first page: {text}");
+    assert!(!text.contains("[2/"), "{text}");
+    paged.session().scroll_rows(3);
+    let text = paged.draw();
+    assert!(
+        text.contains("[1/"),
+        "the first page, now wholly on screen: {text}"
+    );
+    assert!(text.contains("+line 1"), "{text}");
+    let text = paged.page(true);
+    assert!(text.contains("[2/"), "{text}");
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #485: resizing after the last page was shown starts over: `y` is off again
 /// until the card is paged to its end at the new size.
 #[test]

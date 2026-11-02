@@ -395,14 +395,14 @@ pub struct Session {
 }
 
 /// Page state of an approval card whose diff is taller than the viewport (issue #485).
-/// `y` and `a` need `reached` to be the last page, and pages open one at a time, so every
-/// page up to `reached` was fully on screen in some draw.
+/// `y` and `a` need every page to have been fully on screen (`seen` of them), and a page
+/// opens only once all before it were seen, so none is skipped.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ApprovalPaging {
     /// The page the owner asked for.
     page: usize,
-    /// The furthest page that was fully on screen.
-    reached: usize,
+    /// How many pages, from the first, were fully on screen in some draw.
+    seen: usize,
     /// The page the last draw showed, and how many pages there were.
     drawn: usize,
     pages: usize,
@@ -1332,7 +1332,7 @@ impl Session {
     }
 
     /// The page of a paged card to draw at this terminal `size`: the one asked for, but
-    /// never more than one past the furthest page fully shown. A new size starts over.
+    /// never past the first page not yet fully shown. A new size starts over.
     pub fn approval_page_wanted(&self, size: (u16, usize)) -> usize {
         let mut paging = self.approval_paging.get();
         if paging.size != size {
@@ -1342,7 +1342,7 @@ impl Session {
             };
             self.approval_paging.set(paging);
         }
-        paging.page.min(paging.reached + 1)
+        paging.page.min(paging.seen)
     }
 
     /// Called by the draw of a paged card: it showed `page` of `pages`, `complete` when
@@ -1350,15 +1350,15 @@ impl Session {
     /// the last page and every page before it was shown.
     pub fn approval_page_drawn(&self, page: usize, pages: usize, complete: bool) -> bool {
         let mut paging = self.approval_paging.get();
-        if complete && page <= paging.reached + 1 {
-            paging.reached = paging.reached.max(page);
+        if complete && page <= paging.seen {
+            paging.seen = paging.seen.max(page + 1);
         }
         if paging.pages != 0 && (page != paging.drawn || pages != paging.pages) {
             self.approval_rearm.set(true);
         }
         (paging.page, paging.drawn, paging.pages) = (page, page, pages);
         self.approval_paging.set(paging);
-        complete && pages > 0 && page + 1 == pages && paging.reached + 1 >= pages
+        complete && pages > 0 && page + 1 == pages && paging.seen >= pages
     }
 
     /// PgUp/PgDn on a paged card: one page back or forward. False when the pending card
