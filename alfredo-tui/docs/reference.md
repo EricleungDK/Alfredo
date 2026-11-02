@@ -1792,7 +1792,7 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   rename limit is refused, not shown. git_diff reads the changed names and the patch in
   two git calls, so a file changed between them is not covered.
   In a sandboxed `run_command` the same list is enforced by masking instead of refusing:
-  each workspace file it matches reads as empty and each matching directory appears empty, so
+  each workspace file it matches fails with `Permission denied` when opened and each matching directory appears empty, so
   no approved command, including one an always-allow rule covers, returns a secret's contents
   (issue #469). See **Sandboxed (default)** under `run_command` for the limits. The workspace's
   root `.git` is not masked: `.git/config` and committed history stay visible to sandboxed
@@ -2120,13 +2120,13 @@ default false), `timeout_seconds` (1–600, default 120).
   files** above), git-ignored files included, without following symbolic links. Only the
   workspace's root `.git` is skipped; a nested `.git` directory or file is masked like any
   secret entry, so git inside a nested repository fails in the sandbox. Each matching file is
-  bound over with `/dev/null`: it reads as empty (`cat .env` prints nothing) and cannot be
+  bound over with `/dev/null`: it fails with `Permission denied` when opened (`cat .env` prints an error, not the contents) and cannot be
   written. Each matching directory is bound over with an empty read-only directory: `ls .ssh`
   lists nothing, and a path inside it reports `No such file or directory`. The run is refused,
   with `nothing ran` and the reason, rather than started unmasked, when the scan cannot finish:
   more than 128 masks, more than 250,000 entries, nesting past 64 directories, an unreadable
   directory, a name that is not UTF-8 and matches the list, or a symbolic link whose own name
-  matches the list (remove or rename it). A link to a masked file reads the mask. Not covered:
+  matches the list (remove or rename it). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and fail with Permission denied; they need the owner, do not retry on the host to read them` (a count only, never names). Not covered:
   a file the command creates during the run; an `escalate: true` run, which is on the host and
   unmasked (its card says it runs outside the sandbox); a non-secret name hard-linked to a
   secret, which the read tools also allow; and the workspace's root `.git` directory, which
