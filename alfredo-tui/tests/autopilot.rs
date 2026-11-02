@@ -1349,6 +1349,15 @@ fn failed_run_shows_the_token_totals_line_when_the_server_reported_counts() {
     );
 }
 
+#[test]
+fn sandbox_denied_failure_does_not_say_install_bubblewrap() {
+    // /usr/bin/bwrap exists here, so a sandbox-start failure is a host denial.
+    let (report, notice) = sandbox_refused_with(0, |_| None);
+    assert!(!report.contains("apt install"), "{report}");
+    assert!(!notice.contains("apt install"), "{notice}");
+    assert!(report.contains("user namespaces"), "{report}");
+}
+
 fn sandbox_refused_with(
     max_repairs: u32,
     usage: impl Fn(&Value) -> Option<Value> + Send + Sync + 'static,
@@ -1392,7 +1401,8 @@ fn sandbox_refused_with(
         report.contains("bwrap: No permissions to create new namespace"),
         "{report}"
     );
-    assert!(report.contains("sudo apt install bubblewrap"), "{report}");
+    assert!(!report.contains("apt install"), "{report}");
+    assert!(report.contains("user namespaces"), "{report}");
     assert!(!report.contains("repair budget exhausted"), "{report}");
     assert!(
         !server

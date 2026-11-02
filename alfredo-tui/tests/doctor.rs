@@ -357,6 +357,38 @@ fn sandbox_preflight_names_bubblewrap_and_the_fix_only_when_it_is_unusable() {
     assert!(!alfredo_tui::doctor::worker_tool_ready("/etc"));
 }
 
+/// An executable `bwrap` stand-in that exists but refuses to build a sandbox.
+fn denying_bwrap(dir: &std::path::Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fakebwrap");
+    fs::write(
+        &path,
+        "#!/bin/sh\necho \"bwrap: setting up uid map: Permission denied\" >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn doctor_fails_when_bubblewrap_cannot_start_a_sandbox() {
+    let fixture = Fixture::new();
+    let bwrap = denying_bwrap(&fixture.root);
+    let (endpoint, server) = catalog("initial-model");
+    let mut command = fixture.command(&endpoint);
+    command.env("ALFREDO_TEST_BWRAP_PATH", &bwrap);
+    let (code, text) = doctor_text(command, server);
+    assert_eq!(code, Some(2), "{text}");
+    assert!(text.contains("FAIL sandbox"), "{text}");
+    assert!(
+        text.contains("bwrap: setting up uid map: Permission denied"),
+        "{text}"
+    );
+    assert!(text.contains("user namespaces"), "{text}");
+    assert!(!text.contains("apt install"), "{text}");
+    assert!(!text.contains("Preflight checks passed."), "{text}");
+}
+
 fn plain_folder_report() -> (String, std::path::PathBuf) {
     let fixture = Fixture::new();
     let plain = fixture.root.join("plain");
