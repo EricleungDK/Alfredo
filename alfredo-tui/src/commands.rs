@@ -169,6 +169,15 @@ pub fn capability_prompt(text: &str) -> Result<Option<&str>, String> {
     Ok(Some(prompt))
 }
 
+/// Marks a user-defined command (issue #486) in the type-ahead and F1.
+pub const USER_COMMAND: &str = "user command · sends its file as your message";
+
+fn user_choices() -> impl Iterator<Item = (String, &'static str)> {
+    crate::user_commands::listed()
+        .into_iter()
+        .map(|name| (name, USER_COMMAND))
+}
+
 pub struct Choice {
     pub name: String,
     pub description: &'static str,
@@ -292,17 +301,19 @@ impl Completion {
         }
         let mut ranked: Vec<_> = COMMANDS
             .iter()
-            .filter_map(|(name, description)| Some((Self::rank(name, draft)?, *name, *description)))
+            .map(|(name, description)| ((*name).to_owned(), *description))
+            .chain(user_choices())
+            .filter_map(|(name, description)| Some((Self::rank(&name, draft)?, name, description)))
             .collect();
         ranked.sort_by_key(|(rank, ..)| *rank);
         let mut completion = Self::from_choices(
             ranked
                 .into_iter()
                 .map(|(_, name, description)| Choice {
-                    name: name.into(),
+                    draft: format!("{name} "),
+                    name,
                     description,
                     group: None,
-                    draft: format!("{name} "),
                 })
                 .collect(),
         )?;
@@ -384,6 +395,11 @@ impl Completion {
         {
             return None;
         }
+        let user = if draft.starts_with('@') {
+            Vec::new()
+        } else {
+            user_choices().collect()
+        };
         Self::from_choices(
             (if draft.starts_with('@') {
                 CAPABILITIES
@@ -391,12 +407,14 @@ impl Completion {
                 COMMANDS
             })
             .iter()
+            .map(|(name, description)| ((*name).to_owned(), *description))
+            .chain(user)
             .filter(|(name, _)| name.starts_with(draft))
             .map(|(name, description)| Choice {
-                name: (*name).into(),
+                draft: format!("{name} "),
+                name,
                 description,
                 group: None,
-                draft: format!("{name} "),
             })
             .collect(),
         )
@@ -471,9 +489,15 @@ impl Completion {
                 }
             }
         }
-        // Anything not yet grouped still appears, under Advanced.
+        // User commands (issue #486) get their own group; anything else not yet grouped
+        // still appears, under Advanced.
+        let user = crate::user_commands::listed();
         choices.extend(remaining.into_iter().map(|mut choice| {
-            choice.group = Some("Advanced");
+            choice.group = Some(if user.contains(&choice.name) {
+                "User commands"
+            } else {
+                "Advanced"
+            });
             choice
         }));
         Self {

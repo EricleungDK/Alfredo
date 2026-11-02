@@ -90,8 +90,8 @@ fn symlinked_and_oversized_files_are_refused() {
         assert!(notice.contains(refused), "{refused} in {notice}");
     }
     assert!(!notice.contains("SECRET"), "{notice}");
-    assert!(expand(&dir, "/link").is_none());
-    assert!(matches!(expand(&dir, "/big"), None | Some(Err(_))));
+    assert!(matches!(expand(&dir, "/link"), Some(Err(_))));
+    assert!(matches!(expand(&dir, "/big"), Some(Err(_))));
 }
 
 #[test]

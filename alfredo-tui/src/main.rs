@@ -108,6 +108,13 @@ fn read_stdin_prompt(reader: impl std::io::Read) -> Result<String, String> {
     Ok(prompt)
 }
 
+/// Rescans the user command directory for the type-ahead and F1; the notice names refusals.
+fn reload_user_commands(dir: &std::path::Path) -> Option<String> {
+    let found = alfredo_tui::user_commands::scan(dir);
+    alfredo_tui::user_commands::publish(&found);
+    found.notice()
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let starting = std::env::current_dir()?;
     let mut workspace = None;
@@ -532,6 +539,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     work.tasks.refresh(&runtime);
+    // Issue #486: user commands come from the State Directory only, never the workspace.
+    let commands_dir = alfredo_tui::user_commands::directory(&state_dir);
+    if let Some(refused) = reload_user_commands(&commands_dir) {
+        work.app.notice = refused;
+    }
     if let Some(goal) = &go_goal {
         let model = work.app.sessions[work.app.selected].model.clone();
         work.app.notice = work
@@ -1593,6 +1605,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             work.app.sessions[index].toggle_tool_results();
                         }
                         KeyCode::F(1) if work.app.sessions[index].draft.is_empty() => {
+                            if let Some(refused) = reload_user_commands(&commands_dir) {
+                                work.app.notice = refused;
+                            }
                             work.app.completion = Some(alfredo_tui::commands::Completion::all());
                         }
                         // The open model list owns the arrows; Enter picks unless a command is typed.
@@ -2017,7 +2032,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Enter if work.app.sessions[index].draft.trim() == "/help" => {
                             work.app.sessions[index].remember_submission();
                             work.app.sessions[index].clear_draft();
-                            work.app.notice.clear();
+                            work.app.notice =
+                                reload_user_commands(&commands_dir).unwrap_or_default();
                             work.app.completion = Some(alfredo_tui::commands::Completion::all());
                         }
                         KeyCode::Enter
@@ -2060,6 +2076,66 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     work.app.notice = error;
                                 }
                                 None => {}
+                            }
+                        }
+                        // Issue #486: `/NAME args` for a user command sends its body as the
+                        // owner's chat prompt (never parsed as a command); tools still ask.
+                        KeyCode::Enter
+                            if work.tasks.agent_shown().is_none()
+                                && alfredo_tui::user_commands::expand(
+                                    &commands_dir,
+                                    &work.app.sessions[index].draft,
+                                )
+                                .is_some() =>
+                        {
+                            let typed = work.app.sessions[index].draft.trim().to_owned();
+                            let name = typed.split_whitespace().next().unwrap_or("").to_owned();
+                            let expanded =
+                                alfredo_tui::user_commands::expand(&commands_dir, &typed);
+                            if work.wayfinder.active() || pending_command.is_some() {
+                                work.app.notice =
+                                    "Wait for the pending command or scope receipt first".into();
+                            } else if work.app.sessions[index].status.active() {
+                                work.app.notice =
+                                    "Wait for the reply to end, then run the command".into();
+                            } else if let Some(Ok(prompt)) = expanded {
+                                let session = &mut work.app.sessions[index];
+                                session.clear_draft();
+                                if session.insert(&prompt).truncated {
+                                    session.clear_draft();
+                                    session.insert(&typed);
+                                    work.app.notice = format!(
+                                        "{name} refused: the prompt is over the 16 KiB limit"
+                                    );
+                                    work.app.sessions[index].reject_draft();
+                                } else if work.app.sessions[index]
+                                    .compaction_due(provider.num_ctx())
+                                    && command_staging::spawn_compaction(
+                                        &runtime,
+                                        &provider,
+                                        &compact_sender,
+                                        &mut jobs[index],
+                                        &mut work.app.sessions[index],
+                                        index,
+                                        true,
+                                    )
+                                    .is_ok()
+                                {
+                                    work.app.models_visible = false;
+                                    work.tasks.set_visible(false);
+                                    work.app.notice = "Conversation is near its size limit; summarising earlier turns…".into();
+                                } else {
+                                    work.app.models_visible = false;
+                                    work.tasks.set_visible(false);
+                                    request = Some(work.app.sessions[index].begin());
+                                    work.app.notice = format!("{name} sent as your message");
+                                }
+                            } else {
+                                work.app.notice = match expanded {
+                                    Some(Err(error)) => error,
+                                    _ => format!("{name} is no longer available"),
+                                };
+                                work.app.sessions[index].reject_draft();
                             }
                         }
                         KeyCode::Enter
@@ -2551,6 +2627,7 @@ const HELP_LINES: &[&str] = &[
     "/allow list always-allow rules (a on an approval card adds one; never for push) · /allow clear [ID]",
     "/exit, /quit quit Alfredo, same as Ctrl+Q",
     "/undo restore the files the last chat turn's approved edits changed; refuses any file changed since and names it (no run_command, no Git)",
+    "/NAME [args] your own command: sends <state dir>/commands/NAME.md as your message, $ARGUMENTS replaced; listed in F1 (never read from the repository)",
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
     "Enter send · Ctrl+N new · Tab switch · Esc or Ctrl+C (while replying) cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",

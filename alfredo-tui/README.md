@@ -56,6 +56,7 @@ F1 on an empty prompt lists every command. Most used:
 | `/models`, `/model NAME`, `/workspace` | Model and workspace switching |
 | `/allow`, `/allow clear [ID]` | List or remove always-allow rules. `a` on a chat approval card approves and adds a rule for that tool (or `run_command` command prefix) in this mission; never for `git_push` or HOST (escalated) runs (see `docs/reference.md#chat-always-allow-rules`) |
 | `/exit`, `/quit` | Quit like Ctrl+Q (see `docs/reference.md`) |
+| `/NAME [args]` (your own) | A user command: sends `NAME.md` from `<State Directory>/commands/` as your chat message, `$ARGUMENTS` replaced by `args`. Listed in F1 and the `/` type-ahead as `user command`; never read from the repository (see `docs/reference.md#user-defined-slash-commands`) |
 | `/clear`, `/compact` | Restart this conversation (tasks are kept), or summarise its older turns now. Long chats are summarised automatically near the size limit instead of stopping (see `docs/reference.md#long-conversations-compaction-and-clear`) |
 | `/scope [JSON]`, `/scope-confirm REV`, `@wayfinder REQUEST` | Project scope agreement |
 
@@ -279,6 +280,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/ui.rs`, `src/ui/inspector.rs`, `src/ui/activity_lines.rs`, `src/model.rs` | Rendering (task inspector and receipts; activity and command lines) and conversation state |
 | `src/chat_tools/allow.rs` | Chat always-allow rules: per-mission store, strict matching, `/allow` |
 | `src/chat_tools/undo.rs` | `/undo`: pre-images of the last chat turn's approved edits in the State Directory, per-file refusal when changed since |
+| `src/user_commands.rs` | User-defined slash commands: `NAME.md` files in `<State Directory>/commands/`, no-follow read, 64 KiB cap, `$ARGUMENTS` |
 | `src/compaction.rs` | Chat compaction: summarise older turns into a note, `/clear`, `/compact` |
 | `src/console_log.rs` | Console command history on `Session` (child of `model`): sequences, admission, budget eviction, task receipts |
 | `src/side_pane.rs`, `src/theme.rs` | Side pane projection and keys; icons, status glyphs, palette, spinner |

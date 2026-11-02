@@ -2008,6 +2008,34 @@ Approval (ADR 0004); there is no skip-approval mode.
   covered: `run_command`, Git (commits, branches, pushes), `/go` runs, the
   conversation itself. Directories a `write_file` created are left in place.
 
+## User-defined slash commands
+
+Issue #486. A repeated prompt can be saved as a command: create
+`<State Directory>/commands/NAME.md` (the State Directory is `--state-dir` /
+`ALFREDO_STATE_DIR`, default `~/.local/state/alfredo`) and type `/NAME some arguments`.
+
+- **What is sent.** The file's body becomes your chat message, with every `$ARGUMENTS`
+  replaced by the text after the name (replaced once, so arguments are never expanded
+  again). With no `$ARGUMENTS` in the body, non-empty arguments are appended as a final
+  `ARGUMENTS: ...` paragraph. The expanded text is what the transcript shows as your
+  message, and it is sent as ordinary chat, never parsed as a command, even if it starts
+  with `/`. Every tool call it causes meets the normal approval card (`y`/`n`/`a`).
+- **Where from.** The State Directory only. `.alfredo/commands/` in a repository, or any
+  workspace path, is never read, so a cloned repository cannot plant a command.
+- **Names.** `NAME` is 1-32 letters, digits, `-` or `_`; the file is `NAME.md`. A name
+  that matches a built-in (`/go`, `/help`, `@wayfinder`, ...) is refused and named in a
+  notice. At most 64 commands load.
+- **Refused files.** A symlink (the file is opened with `O_NOFOLLOW` and checked on the
+  open descriptor, so a swap after listing is refused too, as is a symlinked `commands`
+  directory), anything that is not a regular file, a file over 64 KiB, non-UTF-8 and
+  empty files. A notice names each refusal. An expansion over the 16 KiB prompt limit is
+  refused and the typed command stays in the prompt.
+- **Listing.** Commands load at launch and again when F1 or `/help` opens; each is shown
+  in the `/` type-ahead and in F1 (group `User commands`) as `user command`. The file is
+  read afresh when you press Enter.
+- **Not in this slice.** Frontmatter (model, allowed tools), skills, headless use, and
+  running a command while a reply is streaming (it waits; the draft stays).
+
 ## Chat git writes and push
 
 Four git tools act on your real repository, on the host (your identity and remote

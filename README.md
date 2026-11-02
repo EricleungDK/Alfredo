@@ -166,6 +166,8 @@ Chat can also act: it reads and searches the repository, and with your approval 
 (`write_file`, `edit_file`), runs shell commands (`run_command`) and does git writes. Each
 needs a `y / n / a` card (`a` adds an always-allow rule; `/allow` lists and removes them). For
 large work it calls `propose_plan`, which only prefills `/plan` or `/go` for you to confirm.
+Your own prompts can be commands too: put `NAME.md` in `<state dir>/commands/` and type `/NAME args`
+(`$ARGUMENTS` is replaced; nothing is read from the repository; tools still ask first).
 Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 [the reference](alfredo-tui/docs/reference.md#chat-always-allow-rules).
 
