@@ -228,6 +228,93 @@ fn too_many_secret_masks_refuse_the_run_and_run_nothing() {
     assert!(out.contains("nothing ran"), "{out}");
     assert!(!out.contains("exit code"), "the command ran: {out}");
     assert!(!root.join("ran").exists(), "the command ran: {out}");
+    assert!(
+        out.contains("more than 128 secret files and directories"),
+        "{out}"
+    );
+    assert!(
+        out.contains("remove or rename them, or move them out of the Coding Workspace"),
+        "{out}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The note line of a result, if any.
+fn note_line(out: &str) -> Option<&str> {
+    out.lines()
+        .find(|line| line.contains("hidden in this sandbox"))
+}
+
+#[test]
+fn a_masked_npmrc_read_explains_the_hidden_file_with_a_count_only() {
+    let root = workspace("note");
+    write(&root, ".npmrc", "registry=x\n");
+    let out = run(&root, "cat .npmrc");
+    assert!(out.contains("Permission denied"), "{out}");
+    assert!(out.contains("hidden in this sandbox"), "{out}");
+    let note = note_line(&out).unwrap();
+    assert_eq!(
+        note,
+        "note: 1 secret file(s)/directory(ies) are hidden in this sandbox and fail with Permission denied; they need the owner, do not retry on the host to read them"
+    );
+    assert!(!note.contains("npmrc"), "the note names the file: {note}");
+    assert!(!out.contains("registry=x"), "contents leaked: {out}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_hidden_note_counts_files_and_directories_and_shows_on_a_successful_run() {
+    let root = workspace("note-count");
+    write(&root, ".env", "A=1\n");
+    write(&root, ".ssh/id_rsa", "k\n");
+    let out = run(&root, "echo END");
+    assert!(out.contains("exit code 0"), "{out}");
+    assert!(
+        note_line(&out)
+            .is_some_and(|n| n.starts_with("note: 2 secret file(s)/directory(ies) are hidden")),
+        "{out}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn no_hidden_note_when_there_are_no_secret_files() {
+    let root = workspace("note-none");
+    write(&root, "README.md", "hi\n");
+    let out = run(&root, "echo Permission denied >&2; exit 1");
+    assert!(out.contains("exit code 1"), "{out}");
+    assert!(out.contains("Permission denied"), "{out}");
+    assert!(!out.contains("hidden in this sandbox"), "{out}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_unmasked_runs_result_text_is_unchanged() {
+    let root = workspace("note-bytes");
+    write(&root, "README.md", "hi\n");
+    let ok = run(&root, "echo hi");
+    assert!(
+        ok.starts_with("exit code 0 \u{b7} sandboxed \u{b7} cwd "),
+        "{ok}"
+    );
+    assert!(ok.ends_with("\nstdout:\nhi\nstderr:\n"), "{ok}");
+    assert_eq!(ok.lines().count(), 4, "{ok}");
+    let failed = run(&root, "exit 3");
+    let lines: Vec<&str> = failed.lines().collect();
+    assert_eq!(lines.len(), 5, "{failed}");
+    assert!(
+        lines[0].starts_with("exit code 3 \u{b7} sandboxed"),
+        "{failed}"
+    );
+    assert!(
+        lines[1].starts_with("note: ran sandboxed (network off;"),
+        "{failed}"
+    );
+    assert!(
+        lines[1].ends_with("the owner must approve running it on the host."),
+        "{failed}"
+    );
+    assert_eq!(&lines[2..], ["stdout:", "", "stderr:"], "{failed}");
     let _ = fs::remove_dir_all(root);
 }
 
