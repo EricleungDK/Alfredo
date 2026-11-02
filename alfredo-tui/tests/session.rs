@@ -298,6 +298,67 @@ fn project_notes_arrival_row_is_shown_once_reset_by_clear_and_never_sent_or_save
     assert!(session.show_project_notes(1, line.into()));
 }
 
+/// Issue #587: dispatch turning itself off is a display-only row after the messages so far.
+#[test]
+fn a_dispatch_off_row_sits_after_the_messages_so_far_and_is_never_sent_or_saved() {
+    use ratatui::{backend::TestBackend, Terminal};
+    fn screen(session: &Session, width: u16) -> String {
+        let mut app = App::new("fixture".into());
+        app.sessions[0] = session.clone();
+        let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+        terminal
+            .draw(|frame| alfredo_tui::ui::draw(frame, &app))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+    let mut session = started();
+    let (status, messages) = (session.status.clone(), session.messages.clone());
+    let request = session.request_through(0);
+    let after = session.messages.len();
+    session.show_dispatch_off(
+        "Task refresh failed; dispatch off: boom\nResume with /dispatch on".into(),
+    );
+    assert_eq!(session.dispatch_off_rows()[0].0, after);
+    let shown = screen(&session, 120);
+    assert!(
+        shown.contains("Task refresh failed; dispatch off: boom"),
+        "{shown}"
+    );
+    assert!(shown.contains("Resume with /dispatch on"), "{shown}");
+    assert_eq!(session.request_through(0), request);
+    assert_eq!(
+        (session.status.clone(), session.messages.clone()),
+        (status, messages)
+    );
+    let json = serde_json::to_string(&session).unwrap();
+    assert!(!json.contains("dispatch off"), "{json}");
+    // Invisible characters never reach the screen, and a long row wraps.
+    session.show_dispatch_off("bad\u{202e}row".into());
+    let shown = screen(&session, 120);
+    assert!(
+        shown.contains("<U+202E>") && !shown.contains('\u{202e}'),
+        "{shown}"
+    );
+    session.show_dispatch_off(format!("{} tail-marker", "word ".repeat(30)));
+    assert!(screen(&session, 40).contains("tail-marker"));
+    // Only the latest four are kept.
+    for n in 0..6 {
+        session.show_dispatch_off(format!("row {n}"));
+    }
+    let kept: Vec<&str> = session
+        .dispatch_off_rows()
+        .iter()
+        .map(|r| r.1.as_str())
+        .collect();
+    assert_eq!(kept, ["row 2", "row 3", "row 4", "row 5"]);
+}
+
 /// Issue #391: each `@path` refusal is its own display-only transcript row.
 #[test]
 fn every_mention_refusal_is_a_transcript_row_replaced_by_the_next_prompt_and_never_sent_or_saved() {

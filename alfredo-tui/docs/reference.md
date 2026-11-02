@@ -1183,6 +1183,7 @@ A task needs an exact policy, no previous run and Accepted dependencies. Dispatc
 shares the four-worker limit and model admission queue. `/dispatch off` stops new
 starts; active workers continue until completion or `/cancel-task ID`. Shutdown
 turns dispatch off before cancelling workers. Every new terminal starts with it off.
+When dispatch turns itself off (task store busy past five refreshes, or a refresh error), the F2 status line says why and the selected chat gets one display-only row with the same text and `/dispatch on` to resume.
 
 An approval is attempted at most once automatically during the terminal process,
 including any earlier manual start. Failed starts remain visible in task details;

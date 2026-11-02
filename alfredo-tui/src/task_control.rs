@@ -94,6 +94,8 @@ pub struct TaskControl {
     control_receiver: mpsc::UnboundedReceiver<ControlResult>,
     control_pending: Option<crate::control_command::Request>,
     control_events: Vec<crate::control_command::Event>,
+    /// Chat rows for dispatch turning itself off, taken by the main loop (issue #587).
+    dispatch_off_rows: Vec<String>,
     control_acknowledged: BTreeMap<String, crate::control_command::Event>,
     worker_identities: BTreeMap<u64, WorkerIdentity>,
     pub planner: crate::planner::Planner,
@@ -223,6 +225,7 @@ impl TaskControl {
             control_receiver,
             control_pending: None,
             control_events: Vec::new(),
+            dispatch_off_rows: Vec::new(),
             control_acknowledged: BTreeMap::new(),
             worker_identities: BTreeMap::new(),
             planner: Default::default(),
@@ -625,7 +628,7 @@ impl TaskControl {
     /// A background read failed. A busy store is a skipped tick (dispatch stays
     /// on, the last snapshot is kept) for up to `TRANSIENT_LIMIT` consecutive
     /// failures; any other error, or one more busy tick, turns dispatch off.
-    fn background_refresh_failed(&mut self, refusal: &Refusal) {
+    pub fn background_refresh_failed(&mut self, refusal: &Refusal) {
         use crate::dispatch::TRANSIENT_LIMIT;
         if refusal.transient() {
             if !self.dispatch.enabled {
@@ -640,10 +643,17 @@ impl TaskControl {
                 "Task refresh failed {} times in a row; dispatch off: {refusal}",
                 TRANSIENT_LIMIT + 1
             );
+            let notice = self.notice.clone();
+            self.queue_dispatch_off_row(&notice);
             return;
         }
+        let was_on = self.dispatch.enabled;
         self.disable_dispatch();
         self.notice = format!("Task refresh failed; dispatch off: {refusal}");
+        if was_on {
+            let notice = self.notice.clone();
+            self.queue_dispatch_off_row(&notice);
+        }
     }
 
     /// The intent was refused before any write, so it can only be refused again.
@@ -1441,6 +1451,20 @@ impl TaskControl {
                 request.correlation,
                 "Dispatch enable superseded by a later shutdown or scope hold".into(),
             );
+        }
+    }
+
+    /// Chat-transcript rows for dispatch turning itself off (issue #587).
+    pub fn take_dispatch_off_rows(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.dispatch_off_rows)
+    }
+
+    /// Queue the chat row for a dispatch that just turned itself off: the notice
+    /// text plus the way back. One call per turn-off.
+    fn queue_dispatch_off_row(&mut self, notice: &str) {
+        if self.dispatch_off_rows.len() < 4 {
+            self.dispatch_off_rows
+                .push(format!("{notice}\nResume with /dispatch on"));
         }
     }
 
