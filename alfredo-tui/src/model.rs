@@ -1353,12 +1353,12 @@ impl Session {
         if complete && page <= paging.seen {
             paging.seen = paging.seen.max(page + 1);
         }
-        if paging.pages != 0 && (page != paging.drawn || pages != paging.pages) {
+        if paging.pages != 0 && page != paging.drawn {
             self.approval_rearm.set(true);
         }
         (paging.page, paging.drawn, paging.pages) = (page, page, pages);
         self.approval_paging.set(paging);
-        complete && pages > 0 && page + 1 == pages && paging.seen >= pages
+        complete && page + 1 == pages && paging.seen >= pages
     }
 
     /// PgUp/PgDn on a paged card: one page back or forward. False when the pending card

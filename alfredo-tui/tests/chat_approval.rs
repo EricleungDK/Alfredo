@@ -1842,6 +1842,71 @@ fn many_wrapped_lines_are_paged_not_deny_only() {
     }
 }
 
+/// Issue #485: only a page or size change restarts arming; the first draw of a card that
+/// fits (already visible earlier) keeps the time it became visible.
+#[test]
+fn a_card_that_fits_keeps_its_arm_time_across_its_first_draws() {
+    let root = workspace("page-keeps-arm");
+    let mut session = write_file_session(&root, "one\ntwo\n");
+    let shown = Instant::now() - approval::ARM * 2;
+    session.approval_visible(true, shown);
+    let mut paged = Paged::new(session, 100, 24);
+    assert!(paged.session().approval_whole());
+    assert_eq!(paged.answer('y', Duration::ZERO), Some(Decision::Approve));
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #485: the draw's report arms only the last page, and only after every page
+/// before it was reported as fully on screen.
+#[test]
+fn only_the_last_page_after_all_earlier_pages_were_shown_arms_the_card() {
+    let session = pending_session();
+    // A page beyond the first unseen one, however it got drawn, arms nothing.
+    assert!(!session.approval_page_drawn(1, 2, true));
+    assert!(
+        !session.approval_page_drawn(0, 2, false),
+        "not wholly on screen"
+    );
+    assert!(
+        !session.approval_page_drawn(0, 2, true),
+        "not the last page"
+    );
+    assert!(
+        !session.approval_page_drawn(1, 2, false),
+        "not wholly on screen"
+    );
+    assert!(session.approval_page_drawn(1, 2, true));
+    // Going back disarms; no pages at all arms nothing.
+    assert!(!session.approval_page_drawn(0, 2, true));
+    assert!(!session.approval_page_drawn(0, 0, true));
+    assert_eq!(session.approval_pages(), 1);
+}
+
+/// Issue #485: two pages are enough to page; one (or none) leaves the key to the transcript.
+#[test]
+fn page_keys_move_between_exactly_two_pages_and_stop_at_the_ends() {
+    let session = pending_session();
+    let size = (100, 24);
+    assert_eq!(session.approval_page_wanted(size), 0);
+    session.approval_page_drawn(0, 1, true);
+    assert!(!session.page_approval(true), "one page");
+    session.approval_page_drawn(0, 2, true);
+    assert!(session.page_approval(true));
+    assert_eq!(session.approval_page_wanted(size), 1);
+    assert!(session.page_approval(true), "stays on the last page");
+    assert_eq!(session.approval_page_wanted(size), 1);
+    assert!(session.page_approval(false));
+    assert_eq!(session.approval_page_wanted(size), 0);
+    assert!(session.page_approval(false), "stays on the first page");
+    assert_eq!(session.approval_page_wanted(size), 0);
+    // A new terminal size starts over: page 0 again, and no pages known until a draw.
+    assert!(session.page_approval(true));
+    assert_eq!(session.approval_page_wanted(size), 1);
+    assert_eq!(session.approval_page_wanted((101, 24)), 0);
+    assert!(!session.page_approval(true));
+    assert_eq!(session.approval_pages(), 1);
+}
+
 /// Issue #485: PgDn with no card, or with a card that fits, scrolls the transcript as before.
 #[test]
 fn page_keys_page_only_a_card_taller_than_the_screen() {
