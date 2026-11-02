@@ -666,6 +666,34 @@ fn write_file_diff_of_81_lines_is_refused_naming_the_cap_and_writes_nothing() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #485: a diff over one screen is no longer refused up to the hard card cap; the
+/// card holds the whole diff (the terminal pages it) and approval writes the shown bytes.
+#[test]
+fn a_400_line_new_file_gets_a_card_whose_shown_lines_are_exactly_the_written_bytes() {
+    use sha2::{Digest, Sha256};
+    let root = workspace("page-400");
+    let content = numbered(400);
+    let write = call(
+        "write_file",
+        json!({"path": "big.txt", "content": content}),
+    );
+    let card = approval::card(&root, &write).unwrap();
+    assert_eq!(card.preview.lines().count(), 401, "{}", card.preview);
+    // The bytes the card shows: every `+` line, newline-terminated.
+    let shown: String = card
+        .preview
+        .lines()
+        .filter_map(|line| line.strip_prefix('+'))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert!(!root.join("big.txt").exists(), "nothing written before approval");
+    approval::apply(&root, &card).unwrap();
+    let written = fs::read(root.join("big.txt")).unwrap();
+    assert_eq!(Sha256::digest(&written), Sha256::digest(shown.as_bytes()));
+    assert_eq!(written, content.as_bytes());
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn the_new_directories_line_counts_toward_the_write_file_cap() {
     let root = workspace("cap-write-dirs");

@@ -29,6 +29,7 @@ from terminal_smoke import Pty
 
 LONG = 'echo ' + 'a ' * 440 + '; touch pwned'
 SLOW = 'echo $$ > pid; touch started; sleep 4; touch marker'
+BIG = ''.join(f'line {n}\n' for n in range(1, 401))
 README = '# Demo project\nREADME_BODY_MARKER: a tiny repository used by the smoke.\n'
 
 
@@ -75,6 +76,14 @@ class Fixture:
                 elif 'find handle_request' in prompt:
                     seen = 'src/app.py:1:def handle_request' in tool_results[-1]['content']
                     chunks = [{'message': {'content': 'GREP_FOUND_APP' if seen else 'GREP_VENV_NOISE'},
+                               'done': False}]
+                elif 'create big file' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'write_file', 'arguments': {
+                            'path': 'big.txt', 'content': BIG}}}]}, 'done': False}]
+                elif 'create big file' in prompt:
+                    made = 'created big.txt' in tool_results[-1]['content']
+                    chunks = [{'message': {'content': 'BIG_CREATED' if made else 'BIG_REFUSED'},
                                'done': False}]
                 elif 'redraft' in prompt and not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
@@ -437,6 +446,49 @@ class ChatTools(unittest.TestCase):
         self.terminal.wait_for('LONG_DENIED')
         self.assertFalse(root.joinpath('pwned').exists())
         self.assertEqual(self.approval_outcomes(), ['denied'])
+
+    def page_until(self, text, limit=120):
+        for _ in range(limit):
+            try:
+                self.terminal.wait_for(text, timeout=0.3)
+                return
+            except AssertionError:
+                self.terminal.write(b'\x1b[6~')
+        self.fail(f'never paged to {text!r}:\n{self.terminal.screen()}')
+
+    def test_a_400_line_new_file_is_approved_only_after_paging_to_the_last_page(self):
+        # Issue #485: a diff over one screen is paged (PgUp/PgDn); y and a stay off until
+        # the last page was shown, then approval writes exactly the bytes shown.
+        root = Path(os.path.realpath(self.repo.name))
+        self.terminal.write(b'create big file\r')
+        self.terminal.wait_for('Approve write_file')
+        self.terminal.wait_for('y is off until the last page')
+        self.assertIn('+line 1', self.terminal.screen())
+        time.sleep(0.8)
+        self.terminal.write(b'y')
+        time.sleep(0.8)
+        self.terminal.write(b'a')
+        time.sleep(0.8)
+        self.assertIn('Approve write_file', self.terminal.screen())
+        self.assertFalse(root.joinpath('big.txt').exists(), 'y before the last page wrote')
+        self.page_until('+line 400')
+        self.assertFalse(root.joinpath('big.txt').exists())
+        self.assertNotIn('y is off', self.terminal.screen())
+        # Arming restarts at the last page: an immediate y after PgDn decides nothing.
+        time.sleep(0.8)
+        self.terminal.write(b'y')
+        self.terminal.wait_for('BIG_CREATED')
+        self.assertEqual(root.joinpath('big.txt').read_text(), BIG)
+        self.assertEqual(self.approval_outcomes(), ['applied'])
+
+    def test_a_400_line_new_file_can_be_denied_from_the_first_page(self):
+        root = Path(os.path.realpath(self.repo.name))
+        self.terminal.write(b'create big file\r')
+        self.terminal.wait_for('Approve write_file')
+        time.sleep(0.8)
+        self.terminal.write(b'n')
+        self.terminal.wait_for('BIG_REFUSED')
+        self.assertFalse(root.joinpath('big.txt').exists())
 
     def tool_names(self, request):
         return [tool['function']['name'] for tool in request.get('tools') or []]
