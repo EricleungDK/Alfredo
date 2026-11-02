@@ -1946,8 +1946,8 @@ Approval (ADR 0004); there is no skip-approval mode.
   until the last page`; `y` and `a` are refused (with a notice) until the last page has
   been shown, pages open one at a time (pressing PageDown faster than the screen redraws
   never skips one), and a page counts as shown only when the whole card was on screen with
-  it. Reaching the last page restarts the 0.5 s arm delay, and so does paging back and
-  forward again. Resizing the terminal starts the paging over, so `y` is off again until
+  it (not under the narrow-terminal side-pane overlay). Reaching the last page restarts the 0.5 s arm delay, and so does paging back and
+  forward again. Resizing the terminal starts the paging and the arm delay over, so `y` is off again until
   the last page of the new layout is shown. `n` and Esc deny on every page. Approval
   writes exactly the previewed bytes and still refuses, with nothing written, when the file
   changed since the preview. A card that cannot be paged stays deny-only as in #303: a

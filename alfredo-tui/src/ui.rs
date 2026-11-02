@@ -245,13 +245,16 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         // Tiny terminals keep every row for the detail; F6 still opens the pane.
         body
     };
+    // The narrow-terminal pane overlay is drawn over the transcript, which is still
+    // rendered underneath: a card there is not shown (issue #485).
+    let covered = !wide && (app.pane.overlay || app.pane.focus.is_some());
     let help = app.completion.as_ref().filter(|completion| completion.help);
     if let Some(help) = help {
         draw_help(frame, help, right);
     } else {
-        draw_right(frame, app, tasks, right, now);
+        draw_right(frame, app, tasks, right, now, covered);
     }
-    if !wide && (app.pane.overlay || app.pane.focus.is_some()) {
+    if covered {
         draw_side_pane(frame, body, app, &projection, now);
     }
     let focused = app.pane.focus.is_some();
@@ -861,10 +864,17 @@ fn draw_help(frame: &mut Frame, help: &crate::commands::Completion, area: Rect) 
 }
 
 /// The right pane: chat, task detail or one of the focused task views.
-fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: Rect, now: Instant) {
+fn draw_right(
+    frame: &mut Frame,
+    app: &App,
+    tasks: Option<&TaskControl>,
+    area: Rect,
+    now: Instant,
+    covered: bool,
+) {
     let session = &app.sessions[app.selected];
     if tasks.is_none_or(|tasks| !tasks.visible) && !app.models_visible && app.completion.is_none() {
-        draw_transcript(frame, app, tasks, area);
+        draw_transcript(frame, app, tasks, area, covered);
     }
     let width = usize::from(area.width.saturating_sub(4));
     if let Some(tasks) =
@@ -1272,7 +1282,13 @@ fn draw_agent(
     );
 }
 
-fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: Rect) {
+fn draw_transcript(
+    frame: &mut Frame,
+    app: &App,
+    tasks: Option<&TaskControl>,
+    area: Rect,
+    covered: bool,
+) {
     let session = &app.sessions[app.selected];
     let identity = tasks.and_then(|tasks| tasks.snapshot.as_ref());
     // `lines` is the current run of non-message rows; message bodies come from the
@@ -1596,7 +1612,9 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         // paged card (issue #485) its last page once every earlier page was shown.
         let (seen, whole) =
             card_head.map_or((false, false), |(at, head, count, fits, (page, pages))| {
-                let seen = rows_to(at + 1) >= top && rows_to(at + head + 1) <= top + viewport;
+                // Under the pane overlay nothing is shown: no page is credited.
+                let seen =
+                    !covered && rows_to(at + 1) >= top && rows_to(at + head + 1) <= top + viewport;
                 let on_screen = fits && seen && rows_to(at + count) <= top + viewport;
                 (seen, session.approval_page_drawn(page, pages, on_screen))
             });

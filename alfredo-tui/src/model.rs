@@ -1336,6 +1336,10 @@ impl Session {
     pub fn approval_page_wanted(&self, size: (u16, usize)) -> usize {
         let mut paging = self.approval_paging.get();
         if paging.size != size {
+            // A new size is a new card: the arm delay restarts too.
+            if paging.size != Default::default() {
+                self.approval_rearm.set(true);
+            }
             paging = ApprovalPaging {
                 size,
                 ..Default::default()
