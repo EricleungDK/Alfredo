@@ -292,10 +292,22 @@ fn chat_row_shows_the_first_user_message_as_its_second_line() {
 }
 
 #[test]
-fn chat_row_without_a_user_message_stays_one_line() {
+fn chat_rows_without_a_usable_user_message_stay_one_line_beside_one_with_a_preview() {
     let mut app = App::new("fixture".into());
+    app.sessions[0].insert("why does login fail");
+    app.sessions[0].begin().unwrap();
     app.add_session();
     app.sessions[1].insert("only a draft");
+    app.add_session();
+    app.sessions[2].messages.push(alfredo_tui::model::Message {
+        role: "user".into(),
+        content: " \t\n\u{a0} ".into(),
+    });
+    app.add_session();
+    app.sessions[3].messages.push(alfredo_tui::model::Message {
+        role: "user".into(),
+        content: "a".repeat(300),
+    });
     let projection = side_pane::project(&app, None, Instant::now());
     let chats: Vec<_> = projection
         .work
@@ -303,7 +315,16 @@ fn chat_row_without_a_user_message_stays_one_line() {
         .filter(|row| matches!(row.key, RowKey::Chat(_)))
         .map(|row| (row.label.as_str(), row.second.as_deref()))
         .collect();
-    assert_eq!(chats, [("chat 1", None), ("chat 2", None)]);
+    // A draft or a whitespace-only first message gives no preview; a long one is bounded.
+    assert_eq!(
+        chats,
+        [
+            ("chat 1", Some("why does login fail")),
+            ("chat 2", None),
+            ("chat 3", None),
+            ("chat 4", Some("a".repeat(256).as_str())),
+        ]
+    );
 }
 
 #[test]
