@@ -1250,10 +1250,11 @@ impl Autopilot {
             .collect();
         let saved = self.saved.as_mut().unwrap();
         for (root, repairs) in counted {
-            // After an unreachable stop the family may not have spent its budget:
-            // the owner's repair counts against it, and never lowers it.
+            // As after a budget stop, the owner's repair is the one beyond
+            // `--max-repairs`. An unreachable stop may leave the budget unspent, so
+            // the limit is at least that, and never lower than what was counted.
             let limit = if reentrant {
-                repairs.max(saved.max_repairs)
+                repairs.max(saved.max_repairs.saturating_add(1))
             } else {
                 repairs
             };

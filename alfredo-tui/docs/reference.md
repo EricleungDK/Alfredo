@@ -106,7 +106,7 @@ http://127.0.0.1:11434; the server is down or the endpoint is wrong.` The `Next`
 start Ollama, then `/repair ID retry` (a failed task re-enters through `/repair`;
 `/requeue` is only for cancelled runs). That `/repair` resumes the stopped run: the repair is
 approved and run, held dependents follow, and the run ends on one `alfredo/go-*` branch; the
-repair counts against `--max-repairs`, and sandbox and file-too-large stops stay finished. A manual `/run` shows the same text, and headless
+repair is one more than `--max-repairs` allows the stopped task's family, and sandbox and file-too-large stops stay finished. A manual `/run` shows the same text, and headless
 `--go` prints the Reason on stderr and exits 1. Bad `FILE` blocks and failing checks stay
 repairable. Auto-pause and resume on reconnect are not part of this.
 

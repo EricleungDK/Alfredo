@@ -1744,7 +1744,7 @@ fn repair_after_an_unreachable_stop_with_no_budget_runs_once_and_ends_failed_if_
 }
 
 #[test]
-fn repair_after_an_unreachable_stop_counts_against_max_repairs_and_stops_at_it() {
+fn repair_after_an_unreachable_stop_adds_one_beyond_max_repairs_and_stops_at_it() {
     let fixture = Fixture::new();
     let down = Arc::new(AtomicBool::new(true));
     let server = flaky_server(down.clone(), true);
@@ -1769,11 +1769,11 @@ fn repair_after_an_unreachable_stop_counts_against_max_repairs_and_stops_at_it()
     let snapshot = fixture.store.snapshot().unwrap();
     assert_eq!(
         snapshot.tasks.len(),
-        4,
-        "the owner's repair plus one automatic repair: --max-repairs 2 in all"
+        5,
+        "the owner's repair plus --max-repairs 2 automatic repairs"
     );
     let report = autopilot.report().unwrap().to_string();
-    assert!(report.contains("repair budget exhausted (2/2)"), "{report}");
+    assert!(report.contains("repair budget exhausted (3/3)"), "{report}");
 }
 
 #[test]
