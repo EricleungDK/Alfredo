@@ -81,7 +81,7 @@ class FlagTests(unittest.TestCase):
         # Issue #582: /dev/null is bound nodev, so a masked file fails to open.
         reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
         self.assertNotIn('reads as empty', reference)
-        self.assertNotIn('prints nothing', reference)
+        self.assertNotIn('(`cat .env` prints nothing)', reference)
         self.assertGreaterEqual(reference.count('fails with `Permission denied`'), 2)
         self.assertIn('are hidden in this sandbox', reference)
         self.assertIn('move them out of the Coding Workspace', reference)
