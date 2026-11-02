@@ -1777,6 +1777,39 @@ fn repair_after_an_unreachable_stop_counts_against_max_repairs_and_stops_at_it()
 }
 
 #[test]
+fn repair_after_an_unreachable_stop_gives_the_family_one_more_than_max_repairs() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down.clone(), true);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = unreachable_two_task_run(&fixture, &server, &runtime, 1);
+    down.store(false, Ordering::SeqCst);
+    assert_eq!(owner_repair(&mut control, &runtime, 1, "retry"), 3);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "one more",
+        |autopilot, control| {
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state == RunState::Failed)
+                && autopilot
+                    .report()
+                    .is_some_and(|report| report.contains("repair budget exhausted"))
+        },
+    );
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(
+        snapshot.tasks.len(),
+        4,
+        "the owner's repair plus --max-repairs 1 automatic repair, as after a budget stop"
+    );
+    let report = autopilot.report().unwrap().to_string();
+    assert!(report.contains("repair budget exhausted (2/2)"), "{report}");
+}
+
+#[test]
 fn repair_after_an_unreachable_stop_that_is_unreachable_again_stops_again_and_stays_repairable() {
     let fixture = Fixture::new();
     let down = Arc::new(AtomicBool::new(true));
