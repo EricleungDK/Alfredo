@@ -1,0 +1,29 @@
+name: mech-review
+
+# Mechanical PR review: test-diff guard, red-first, determinism, mutation. See docs/agents/testing.md.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  mech-review:
+    uses: EricleungDK/ek/.github/workflows/mech-review.yml@v0.2.0
+    with:
+      stack: rust
+      project-dir: alfredo-tui
+      test-paths: |
+        alfredo-tui/tests/**
+      protected-paths: |
+        .github/**
+        AGENTS.md
+        docs/agents/**
+        alfredo-tui/scripts/agent-*
+      agent-branch-prefix: claude/
+      mutation-budget: "10"
+      extra-apt-packages: bubblewrap util-linux
+      # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces that bwrap needs.
+      setup-command: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

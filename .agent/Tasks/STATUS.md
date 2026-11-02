@@ -8,6 +8,7 @@
   `v0.1.0` at `8226708` (after release fix #104); draft GitHub release created, not
   published. Later changes are under `[Unreleased]` in `CHANGELOG.md`.
 - **Build**: Rust 1.96.0, `cargo build --release --locked --manifest-path alfredo-tui/Cargo.toml`.
+- **Mechanical review** (ek #20): every PR gets a `mech-review` check and one sticky comment from ek `v0.2.0` (`.github/workflows/mech-review.yml`, `docs/agents/testing.md`).
 - **Test**: see `alfredo-tui/README.md#test` (fmt, clippy, `cargo test --locked`, 6 PTY
   smokes, Python unittests incl. `test_docs.py` doc-drift guards, `cargo audit`). CI:
   `.github/workflows/rust-terminal.yml`; tag `v*` -> `release.yml` draft release.

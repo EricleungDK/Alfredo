@@ -32,6 +32,10 @@ The default five-label triage vocabulary is used unchanged. See `docs/agents/tri
 
 This is a single-context repo with a root `CONTEXT.md`. See `docs/agents/domain.md`.
 
+### Testing
+
+Read `docs/agents/testing.md` for the testing standard and how to read the `<!-- mech-review -->` PR comment.
+
 ### Scheduled automation runs
 
 Scheduled scan and build agents: read `docs/agents/automation-runbook.md` first, then `source alfredo-tui/scripts/agent-env.sh` and use `alfredo-tui/scripts/agent-gates.sh` for the CI gates.
