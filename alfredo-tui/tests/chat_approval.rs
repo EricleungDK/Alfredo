@@ -1763,6 +1763,70 @@ fn resizing_after_the_last_page_requires_the_pages_again() {
     let _ = fs::remove_dir_all(root);
 }
 
+impl Paged {
+    /// Draws like the main loop: the card arms only while `chat_shown` (no overlay over it).
+    fn draw_as_main(&mut self, chat_shown: bool) -> String {
+        self.terminal
+            .draw(|frame| alfredo_tui::ui::draw(frame, &self.app))
+            .unwrap();
+        let now = self.now;
+        let session = &mut self.app.sessions[0];
+        let drawn = session.approval_header_drawn();
+        session.approval_visible(chat_shown && drawn, now);
+        screen(&self.terminal)
+    }
+}
+
+/// Issue #485 (security review): a page drawn underneath the narrow-terminal side-pane
+/// overlay is not shown, so paging through it credits nothing.
+#[test]
+fn pages_drawn_under_the_side_pane_overlay_are_not_credited_as_shown() {
+    for focus in [false, true] {
+        let (root, session) = big_session("page-overlay", &numbered(200));
+        let mut paged = Paged::new(session, 80, 24);
+        paged.wait_and_draw(approval::ARM * 2);
+        assert!(paged.session().approval_pages() > 3);
+        if focus {
+            paged.app.pane.focus = Some(alfredo_tui::side_pane::Section::Work);
+        } else {
+            paged.app.pane.overlay = true;
+        }
+        paged.draw_as_main(false);
+        for _ in 0..100 {
+            paged.session().page_approval(true);
+            paged.now += approval::ARM * 2;
+            paged.draw_as_main(false);
+        }
+        paged.app.pane.focus = None;
+        paged.app.pane.overlay = false;
+        paged.draw_as_main(true);
+        paged.now += approval::ARM * 2;
+        let text = paged.draw_as_main(true);
+        assert!(text.contains("+line 1"), "back on the first page: {text}");
+        assert!(!paged.session().approval_whole(), "focus={focus}: {text}");
+        assert_eq!(paged.answer('y', approval::ARM * 3), None, "{text}");
+        assert_eq!(paged.answer('a', approval::ARM * 3), None, "{text}");
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #485 (code review): a resize restarts the arm delay, even when the resized card
+/// fits one page.
+#[test]
+fn a_resize_that_makes_the_card_fit_restarts_the_arm_delay() {
+    let (root, session) = big_session("page-resize-rearm", &numbered(30));
+    let mut paged = Paged::new(session, 100, 24);
+    paged.wait_and_draw(approval::ARM * 2);
+    assert!(paged.session().approval_pages() > 1);
+    paged.terminal.backend_mut().resize(100, 80);
+    let text = paged.draw();
+    assert_eq!(paged.session().approval_pages(), 1, "{text}");
+    assert!(paged.session().approval_whole(), "{text}");
+    assert_eq!(paged.answer('y', approval::ARM / 2), None, "{text}");
+    assert_eq!(paged.answer('y', approval::ARM), Some(Decision::Approve));
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #485: tiny terminals cannot page (deny-only), huge ones fit it whole or in
 /// fewer pages; nowhere does `y` approve a page that was not shown.
 #[test]
