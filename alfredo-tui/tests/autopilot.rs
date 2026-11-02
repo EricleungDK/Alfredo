@@ -1940,6 +1940,53 @@ fn reentrant_run_names_the_stopped_task_only_after_an_unreachable_stop() {
 }
 
 #[test]
+fn reentrant_run_names_the_dependent_task_when_it_is_the_one_that_stopped() {
+    let fixture = Fixture::new();
+    // Task 1 succeeds; only task 2 (`Add app`) meets the dropped connection.
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return two_task_plan();
+        }
+        if worker_prompt(request).starts_with("Implement this task: Add app") {
+            DROP_CONNECTION.into()
+        } else {
+            good_calc()
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make answer return 42 and add app", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "dependent unreachable",
+        finished,
+    );
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    let snapshot = control.snapshot.as_ref().unwrap();
+    let status_of = |id| {
+        snapshot
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .unwrap()
+            .status
+            .clone()
+    };
+    assert_eq!(status_of(1), TaskStatus::Accepted);
+    assert_eq!(status_of(2), TaskStatus::Failed);
+    let (_, stopped) = autopilot.reentrant_run(&control).expect("unreachable stop");
+    assert_eq!(
+        stopped, 2,
+        "the stopped task is the failed dependent, not task 1"
+    );
+}
+
+#[test]
 fn repair_after_a_too_large_stop_does_not_resume_the_loop() {
     let fixture = Fixture::new();
     commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
