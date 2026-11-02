@@ -270,6 +270,78 @@ fn architect_draft_row_sits_above_the_tree_and_chats_below() {
     assert!(side_pane::any_working(&fixture.app, Some(&fixture.control)));
 }
 
+fn chat_seconds(app: &App) -> Vec<Option<String>> {
+    side_pane::project(app, None, Instant::now())
+        .work
+        .iter()
+        .filter(|row| matches!(row.key, RowKey::Chat(_)))
+        .map(|row| row.second.clone())
+        .collect()
+}
+
+#[test]
+fn chat_row_shows_the_first_user_message_as_its_second_line() {
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("why does login fail");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(1, Update::Token("because".into()));
+    app.sessions[0].apply(1, Update::Done);
+    app.sessions[0].insert("and a second question");
+    app.sessions[0].begin().unwrap();
+    assert_eq!(chat_seconds(&app), [Some("why does login fail".to_owned())]);
+}
+
+#[test]
+fn chat_row_without_a_user_message_stays_one_line() {
+    let mut app = App::new("fixture".into());
+    app.add_session();
+    app.sessions[1].insert("only a draft");
+    let projection = side_pane::project(&app, None, Instant::now());
+    let chats: Vec<_> = projection
+        .work
+        .iter()
+        .filter(|row| matches!(row.key, RowKey::Chat(_)))
+        .map(|row| (row.label.as_str(), row.second.as_deref()))
+        .collect();
+    assert_eq!(chats, [("chat 1", None), ("chat 2", None)]);
+}
+
+#[test]
+fn chat_preview_is_one_sanitized_line() {
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("fix\u{1b}[31m this\u{202e}\nnow\t\u{2028}  please\r\x07");
+    app.sessions[0].begin().unwrap();
+    let second = chat_seconds(&app)
+        .remove(0)
+        .expect("a chat with a user message has a preview");
+    assert!(
+        !second
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{202e}' | '\u{2028}')),
+        "{second:?}"
+    );
+    assert!(
+        second.starts_with("fix<U+001B>[31m this<U+202E> now"),
+        "{second:?}"
+    );
+    assert!(second.ends_with("please<U+000D><U+0007>"), "{second:?}");
+    assert!(!second.contains("  "), "{second:?}");
+}
+
+#[test]
+fn chat_preview_follows_the_turns_left_after_clear() {
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("why does login fail");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(1, Update::Done);
+    assert_eq!(chat_seconds(&app), [Some("why does login fail".to_owned())]);
+    app.sessions[0].clear_conversation(None).unwrap();
+    assert_eq!(chat_seconds(&app), [None]);
+    app.sessions[0].insert("write release notes");
+    app.sessions[0].begin().unwrap();
+    assert_eq!(chat_seconds(&app), [Some("write release notes".to_owned())]);
+}
+
 #[test]
 fn completed_group_collapses_by_default_while_another_group_is_active() {
     let mut fixture = fixture(
