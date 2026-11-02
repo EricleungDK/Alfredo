@@ -343,6 +343,26 @@ fn paused_refusal(run: &Status) -> String {
     )
 }
 
+/// How long the old `Failed` stop may wait for the queued retry to restart the run.
+const RETRY_RESTART_LIMIT: Duration = Duration::from_secs(60);
+
+/// What the wait for a queued `--resume` retry decides.
+#[derive(Debug, PartialEq, Eq)]
+enum RetryWait {
+    Hold,
+    Refused(String),
+    TimedOut,
+}
+
+/// A refused retry or one that outlasted `limit` ends the run; otherwise keep waiting.
+fn retry_wait(refused: Option<&str>, elapsed: Duration, limit: Duration) -> RetryWait {
+    match refused {
+        Some(reason) => RetryWait::Refused(reason.to_owned()),
+        None if elapsed > limit => RetryWait::TimedOut,
+        None => RetryWait::Hold,
+    }
+}
+
 /// Queue the owner's `/repair ID retry` for the task an unreachable model server
 /// stopped, exactly as typing it would: recorded in the conversation, then released
 /// through the saved-intent barrier. Autopilot re-enters its loop once the repair exists.
@@ -499,6 +519,11 @@ pub fn run(options: Options) -> Result<i32, String> {
             say(&warning);
         }
         let drained = work.tasks.workers.is_empty() && !work.tasks.writing;
+        // Only the old stop's window waits for the retry; once the run left `Failed` the
+        // retry is spent, so a later stop ends the run at once.
+        if status.state != RunState::Failed {
+            retry = None;
+        }
         let end = if let Some(since) = stopping {
             let timed_out = !drained && since.elapsed() > Duration::from_secs(30);
             let again = INTERRUPTED.load(Ordering::SeqCst) > 1;
@@ -510,9 +535,7 @@ pub fn run(options: Options) -> Result<i32, String> {
                 });
             }
             drained || timed_out || again
-        } else if let Some((origin, command, since)) =
-            retry.take_if(|_| status.state == RunState::Failed)
-        {
+        } else if let Some((origin, command, since)) = retry.take() {
             // The queued retry re-enters the loop on a later tick; until then the old
             // stop is not the end, unless the retry was refused or never took.
             let refused = work.app.sessions[origin]
@@ -522,12 +545,14 @@ pub fn run(options: Options) -> Result<i32, String> {
                     (CommandState::Refused { reason }, true) => Some(reason.clone()),
                     _ => None,
                 });
-            if let Some(reason) = refused {
-                fatal = Some(format!("--resume: the retry was refused: {reason}"));
-            } else if since.elapsed() > Duration::from_secs(60) {
-                fatal = Some("--resume: the retry did not restart the run within 60 s".into());
-            } else {
-                retry = Some((origin, command, since));
+            match retry_wait(refused.as_deref(), since.elapsed(), RETRY_RESTART_LIMIT) {
+                RetryWait::Hold => retry = Some((origin, command, since)),
+                RetryWait::Refused(reason) => {
+                    fatal = Some(format!("--resume: the retry was refused: {reason}"));
+                }
+                RetryWait::TimedOut => {
+                    fatal = Some("--resume: the retry did not restart the run within 60 s".into());
+                }
             }
             false
         } else if status.state.finished() {
@@ -1647,6 +1672,25 @@ mod tests {
         assert_eq!(
             Turn::default().json("m", Policy::Deny, &[])["usage"],
             serde_json::json!({"prompt_tokens": null, "completion_tokens": null, "model_seconds": null})
+        );
+    }
+
+    #[test]
+    fn retry_wait_holds_until_refused_or_past_the_limit() {
+        let limit = Duration::from_secs(60);
+        assert_eq!(retry_wait(None, Duration::ZERO, limit), RetryWait::Hold);
+        assert_eq!(retry_wait(None, limit, limit), RetryWait::Hold);
+        assert_eq!(
+            retry_wait(None, limit + Duration::from_millis(1), limit),
+            RetryWait::TimedOut
+        );
+        assert_eq!(
+            retry_wait(Some("no"), Duration::ZERO, limit),
+            RetryWait::Refused("no".into())
+        );
+        assert_eq!(
+            retry_wait(Some("no"), limit * 2, limit),
+            RetryWait::Refused("no".into())
         );
     }
 

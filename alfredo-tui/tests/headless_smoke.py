@@ -254,7 +254,10 @@ class HeadlessSmoke(unittest.TestCase):
         # repair run (--max-repairs 1 + 1), then the family stops for its budget.
         self.fixture.drop_worker = False
         self.fixture.prose_worker = True
+        started = time.monotonic()
         code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertLess(time.monotonic() - started, 30, 'a spent retry must not wait out its timeout')
+        self.assertNotIn('did not restart', err + out)
         self.assertEqual(code, 1, err)
         result = self.result(out)
         self.assertEqual((result['state'], result['repairs']), ('failed', 2))
@@ -264,7 +267,10 @@ class HeadlessSmoke(unittest.TestCase):
 
     def test_resume_headless_that_meets_the_unreachable_model_again_stops_again_with_the_next_step(self):
         self.unreachable_stop('--max-repairs', '1')
+        started = time.monotonic()
         code, out, err = self.run_headless('--resume', '--headless', goal=None)
+        self.assertLess(time.monotonic() - started, 30, 'a spent retry must not wait out its timeout')
+        self.assertNotIn('did not restart', err + out)
         self.assertEqual(code, 1, err)
         result = self.result(out)
         self.assertEqual(result['state'], 'failed')
