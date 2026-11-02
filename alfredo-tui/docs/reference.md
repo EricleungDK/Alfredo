@@ -1745,7 +1745,13 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   context. Matching ignores case and applies to every path component:
   `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`, `.azure` and `.password-store` directories
   (everything under them); `.config/gh` (everything under it); `.env*` and `*.env`
-  (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
+  (`.env`, `prod.env`); only for reads (`read_file`, `grep`, `list_files`, `git_diff`,
+  `@path` and planner context) the three exact file names `.env.example`, `.env.sample` and
+  `.env.template` in any directory are readable, as they hold no secrets (a directory of
+  that name exempts nothing under it, `.env.example.local` and `.envrc` stay refused, and
+  writes, edits, undo and commits still refuse all three; tracked status is not checked, so a
+  named untracked template is readable, while discovery still hides git-ignored files);
+  `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `.pypirc`,
   `.htpasswd`, `.vault-token`, `.s3cfg`, `.boto`, `.dockercfg`, `kubeconfig`,
   `kubeconfig.yaml`, `kubeconfig.yml` and `application_default_credentials.json`;
   `_netrc`, `.my.cnf`, `.terraformrc`, `terraform.rc`, `auth.json` (Composer),
@@ -2065,6 +2071,14 @@ credentials). Each call pauses for Approval like a file edit.
   config when it merges, switches or stages it. A `.gitmodules` that is not a small regular
   file is refused unopened. Repositories without the override, branch creation and
   commits of other files are unaffected.
+- **Initialised submodules (#539).** `git submodule add` and `update --init` write
+  `submodule.<name>.url` and `submodule.<name>.active=true` to the repository config, and
+  both are on the allowlist: `url` is read only by `git submodule update`, `sync` and
+  `add`, which no chat git tool runs, and `active` is accepted only as a git boolean
+  (`true`, `false`, `yes`, `no`, `on`, `off`, `1` or `0`, any case). Every other
+  `submodule.*` key stays refused, including `.update` (it can be `!command`), `.ignore`
+  (see above), `.branch`, `submodule.recurse` and `fetch.recurseSubmodules`. A name with
+  dots or odd characters is split at its last dot, like `remote.<name>` and `branch.<name>`.
 - **Push URL.** Push takes only `https://`, `ssh://` and scp-style `user@host:path`
   remotes. A local path, `file://`, `git://`, `http://` or `ext::` URL is refused before
   the card. The card shows the push URLs (`pushurl` included). A push sends only the
