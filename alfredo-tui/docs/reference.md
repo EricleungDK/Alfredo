@@ -1782,6 +1782,12 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `config.txt` by an approved `run_command` or by hand) is not detected. A copy search git cuts short past its
   rename limit is refused, not shown. git_diff reads the changed names and the patch in
   two git calls, so a file changed between them is not covered.
+  In a sandboxed `run_command` the same list is enforced by masking instead of refusing:
+  each workspace file it matches reads as empty and each matching directory appears empty, so
+  no approved command, including one an always-allow rule covers, returns a secret's contents
+  (issue #469). See **Sandboxed (default)** under `run_command` for the limits. The workspace's
+  root `.git` is not masked: `.git/config` and committed history stay visible to sandboxed
+  commands (a known limit).
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
   tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
   no external diff or textconv. `ref`, `base` and `target` must be plain ref names
@@ -2091,6 +2097,25 @@ default false), `timeout_seconds` (1–600, default 120).
   is removed when the last run holding it ends; if the process is killed mid-run, the
   marker file stays until the next sandboxed run in that workspace replaces it, and the git
   tools refuse it meanwhile.
+  Secret files are masked in every sandboxed run, including one an always-allow rule covers
+  (issue #469). Before the run the workspace is scanned with the secret list (see **Secret
+  files** above), git-ignored files included, without following symbolic links. Only the
+  workspace's root `.git` is skipped; a nested `.git` directory or file is masked like any
+  secret entry, so git inside a nested repository fails in the sandbox. Each matching file is
+  bound over with `/dev/null`: it reads as empty (`cat .env` prints nothing) and cannot be
+  written. Each matching directory is bound over with an empty read-only directory: `ls .ssh`
+  lists nothing, and a path inside it reports `No such file or directory`. The run is refused,
+  with `nothing ran` and the reason, rather than started unmasked, when the scan cannot finish:
+  more than 128 masks, more than 250,000 entries, nesting past 64 directories, an unreadable
+  directory, a name that is not UTF-8 and matches the list, or a symbolic link whose own name
+  matches the list (remove or rename it). A link to a masked file reads the mask. Not covered:
+  a file the command creates during the run; an `escalate: true` run, which is on the host and
+  unmasked (its card says it runs outside the sandbox); a non-secret name hard-linked to a
+  secret, which the read tools also allow; and the workspace's root `.git` directory, which
+  stays read-only and readable, so `.git/config` and committed history stay visible to
+  sandboxed commands, as before this change. `git show <rev>:.env` inside the sandbox can
+  print a secret that was committed and later removed, although the git read tools check the
+  paths they are given against the list. This is a known limit, open for the owner to decide.
   Every capability is dropped (`--cap-drop ALL`), so even as root the sandbox cannot remount
   a read-only bind and write `.git` or the host (#517).
   The card reads `? Approve run_command · run sh test.sh` with
@@ -2103,8 +2128,8 @@ default false), `timeout_seconds` (1–600, default 120).
   needs one (sudo password, ssh passphrase or host key, git credentials) fails with a
   note to use ssh-agent or a credential helper instead of drawing over the TUI. Escalated
   outcomes are logged with `"escalated": true` and show as `Chat run_command (HOST) …` in
-  F4. An always-allow rule covers an escalated card only when the rule is itself
-  escalated (see [always-allow rules](#chat-always-allow-rules)).
+  F4. `a` is never offered on an escalated card, so every HOST run asks (issue #311; see
+  [always-allow rules](#chat-always-allow-rules)).
 - **Result.** The model gets `exit code N · sandboxed|host · cwd …`, then `stdout:` and
   `stderr:`; each keeps its last 10 KiB / 5 KiB behind a `[cut: …]` marker (failures
   print last). Error results are capped at 16 KiB too. The cwd must resolve to the same
@@ -2145,20 +2170,27 @@ rule `a` would add.
   `git_merge`: every call of that tool. `run_command`: one command prefix, matched on whole
   whitespace-separated words (`cargo test` covers `cargo test --lib`, not `cargo testx`).
   A sandboxed rule allows ANY arguments after its words (`cargo test --config …`), so its
-  reach is bounded only by the Sandbox; the card says so. A host (escalated) rule matches
-  only its exact command. Rules ignore `cwd`.
+  reach is bounded only by the Sandbox; the card says so. Rules ignore `cwd`.
   A command containing any of `; & | ` `` ` `` `$ > < ( ) \` or a newline matches only a
   rule that is exactly that command (`cargo test; rm -rf ~` never matches `cargo test`).
 - **Never push.** `git_push` cards (Push tier, `Tier::allowlistable` false) offer no `a`,
-  and no rule matches them, including rules added by hand to the file. The same holds for
-  a `run_command` that invokes `git … push` (`git -C x push`, `git -c k=v push`, any
-  path to git): its card reads `push: asked every time`. Read tools and
-  `propose_plan` are never gated, so no rule applies to them.
-- **Escalated runs.** A rule records whether it is for host (`escalate: true`) runs. A
-  sandboxed rule never covers a host run and a host rule never covers a sandboxed one;
-  a host rule never matches extra arguments.
-  `a` on a red HOST card reads `a always allow on HOST (escalated rule) …` and adds a host
-  rule.
+  and no rule matches them, including rules added by hand to the file. A `run_command`
+  whose plain words invoke `git … push` (`git -C x push`, `git -c k=v push`, any path to
+  git) is detected: its card reads `push: asked every time` and offers no `a`. Detection
+  works on words, so a spelling that hides `push` (`g''it push`, `git pu''sh`,
+  `G=git; $G push`, `git -c alias.p=push p`) is not detected by that check. A HOST run
+  of such a command never gets `a` (issue #311), and a sandboxed run has no network, so
+  it cannot push to a remote outside the workspace. A sandboxed prefix rule can still
+  cover such a spelling, so it can push to a local remote inside the workspace (verified
+  by probe); that is a known gap. Read tools and `propose_plan` are never
+  gated, so no rule applies to them.
+- **HOST runs always ask (issue #311).** A red HOST card (`escalate: true`) is never
+  offered `a`: its key line reads `… · a not offered: HOST runs always ask`, and no rule
+  is added for it, whatever its command, cwd or spelling (`./build.sh` from `sub`, or
+  `g''it push origin main`, is asked every time). A sandboxed rule never covers a host
+  run. A rule with `"escalated": true` from before this change stays in
+  `chat-allow.json`, never matches, and `/allow` lists it as `inactive`; `/allow clear ID`
+  removes it.
 - **The hint shows the whole command (issue #409).** For `run_command` the key line shows
   the command exactly as the card's `$` lines draw it: a tab as `→` plus padding (stops
   counted from the start of the line, `$ ` included), a literal `→` or `↵` as
@@ -2168,7 +2200,8 @@ rule `a` would add.
   characters, holds a control character other than tab and newline (checked before
   trimming, so `ls` + carriage return is refused), or contains text that looks like a
   `<U+` escape; the key line then reads `… · a not offered: too long to always-allow …`
-  (or the matching reason). Answer `y` or `n`. Rules already in the file still match.
+  (or the matching reason). Answer `y` or `n`. Sandboxed rules already in the file still
+  match.
 - **Still checked.** A rule only replaces the keypress: refusals before asking still
   refuse, and the fingerprint (file content, repository state, cwd) is still checked at
   apply. The outcome goes to `chat-approvals.jsonl` with `"rule": ID`; F4 shows
@@ -2180,8 +2213,9 @@ rule `a` would add.
   `/allow clear` and `/allow clear ID` refuse to write, leaving the file as it is. The
   message gives the move-aside command (`mv FILE FILE.bad`). At most 200 rules.
 - **`/allow`** lists every rule in full, one wrapped row per rule under the transcript
-  (`#ID`, tool, the exact command / ANY arguments / every call, sandboxed or HOST) until
-  the next key; `/allow clear` removes all; `/allow clear ID` removes one.
+  (`#ID`, tool, the exact command / ANY arguments / every call, sandboxed, or a HOST rule
+  from before issue #311 marked `inactive`) until the next key; `/allow clear` removes
+  all; `/allow clear ID` removes one.
 - **Rule marker.** The `⚙` row of a call a rule approved reads `⚙ run_command (rule #N) …`;
   calls approved with `y` or `a` on a card have no marker. A rule-approved `run_command`
   shows `running run_command · Ns · Esc stops` while it runs. The marker is display
