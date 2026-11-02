@@ -24,6 +24,15 @@ fn executable(path: &Path) -> bool {
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
+/// The check-program rule the architect is told, from the same PATH and toolchain
+/// facts [`sandbox_program`] enforces, so the prompt and the lint cannot drift.
+pub fn check_program_rule() -> String {
+    format!(
+        "The check program must be a bare program name on {} or an absolute path. The owner's cargo toolchain (its cargo bin, mounted read-only, offline, no credentials) is also on the check PATH when installed, so a Rust repo's check may be [\"cargo\", \"test\", \"--offline\"].",
+        SANDBOX_PATH.join(":")
+    )
+}
+
 /// Whether the check sandbox can resolve `program`. Bare names resolve only on the
 /// sandbox PATH: the system directories, then the owner's mounted cargo `bin`. Absolute
 /// paths only under the bound system roots or the mounted toolchain entries. A path

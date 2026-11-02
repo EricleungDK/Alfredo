@@ -1524,7 +1524,8 @@ impl Toolchain {
         }
     }
 
-    /// Whether every bind is one of the listed entries of the recorded homes, once.
+    /// Whether the recorded homes are absolute paths of normal components (no `..`, `.`
+    /// or empty part) and every bind is one of their listed entries, once.
     pub(crate) fn well_formed(&self) -> bool {
         let entry = |home: &Option<String>, names: &[&str]| -> Vec<String> {
             home.iter()
@@ -1536,7 +1537,19 @@ impl Toolchain {
             .chain(entry(&self.rustup_home, &RUSTUP_ENTRIES))
             .collect();
         let unique: BTreeSet<&String> = self.binds.iter().collect();
-        unique.len() == self.binds.len() && self.binds.iter().all(|bind| allowed.contains(bind))
+        // Split the text itself: `Path::components` silently drops `.` and empty parts.
+        let plain = |home: &Option<String>| {
+            home.as_deref().is_none_or(|home| {
+                home.strip_prefix('/').is_some_and(|rest| {
+                    rest.split('/')
+                        .all(|part| !part.is_empty() && part != "." && part != "..")
+                })
+            })
+        };
+        plain(&self.cargo_home)
+            && plain(&self.rustup_home)
+            && unique.len() == self.binds.len()
+            && self.binds.iter().all(|bind| allowed.contains(bind))
     }
 }
 

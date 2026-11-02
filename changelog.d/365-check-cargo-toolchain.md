@@ -7,4 +7,5 @@
   `CARGO_HOME`, `RUSTUP_HOME` and `CARGO_NET_OFFLINE=true`; `credentials.toml`, other
   cargo files and token variables stay hidden and the network stays off. Programs outside
   `/usr/bin:/bin` and the toolchain are still refused with the same message. `--doctor`
-  notes the mounted roots (#365).
+  notes the mounted roots, the architect is told the toolchain is available, and a
+  recorded check refuses toolchain homes that are not absolute plain paths (#365).
