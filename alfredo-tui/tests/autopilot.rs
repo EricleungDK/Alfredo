@@ -1744,6 +1744,55 @@ fn repair_after_an_unreachable_stop_with_no_budget_runs_once_and_ends_failed_if_
 }
 
 #[test]
+fn reentrant_run_is_none_unless_the_run_is_failed_and_reentrant() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down.clone(), false);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = unreachable_two_task_run(&fixture, &server, &runtime, 2);
+    assert!(
+        autopilot.reentrant_run(&control).is_some(),
+        "the unreachable stop is re-entrant"
+    );
+    // The owner's retry resumes the run: it is no longer Failed.
+    assert_eq!(owner_repair(&mut control, &runtime, 1, "retry"), 3);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "resumed",
+        |autopilot, control| {
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state != RunState::Failed)
+        },
+    );
+    // Let the retry fail unreachable again without autopilot noticing yet: task 3 is
+    // the unreachable head, but the run is Running, so there is no re-entrant run.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        control.poll();
+        if control
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .tasks
+            .iter()
+            .any(|task| task.id == 3 && task.status == TaskStatus::Failed)
+        {
+            break;
+        }
+        if let Ok(Some(request)) = control.prepare_dispatch() {
+            let _ = control.dispatch_prepared(&runtime, &Intent::DispatchRun { request });
+        }
+        assert!(Instant::now() < deadline, "retry never failed");
+        thread::sleep(Duration::from_millis(3));
+    }
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Running);
+    assert!(autopilot.reentrant_run(&control).is_none());
+}
+
+#[test]
 fn repair_after_an_unreachable_stop_adds_one_beyond_max_repairs_and_stops_at_it() {
     let fixture = Fixture::new();
     let down = Arc::new(AtomicBool::new(true));
