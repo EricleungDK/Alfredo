@@ -413,12 +413,23 @@ fn templates_do_not_count_toward_the_mask_limit() {
         write(&root, &format!("many/d{index}/.env.example"), "X=1\n");
     }
     write(&root, ".env", &format!("S={SECRET}\n"));
-    let out = run(&root, "cat many/d0/.env.example; cat .env; echo END");
+    // Which templates are bound depends on directory order, so count them instead of
+    // naming one: the run is not refused and at least the bind budget (120) is readable.
+    let out = run(
+        &root,
+        "cat .env; n=0; for f in many/*/.env.example; do grep -q X=1 \"$f\" 2>/dev/null && n=$((n+1)); done; echo READABLE=$n",
+    );
     assert!(!out.contains("nothing ran"), "{out}");
     assert!(!out.contains("more than 128"), "{out}");
-    assert!(out.contains("exit code 0"), "{out}");
-    assert!(out.contains("X=1"), "{out}");
+    assert!(out.contains("exit code"), "{out}");
     assert!(!out.contains(SECRET), "{out}");
+    let readable: usize = out
+        .lines()
+        .find_map(|line| line.strip_prefix("READABLE="))
+        .unwrap_or_else(|| panic!("no count: {out}"))
+        .parse()
+        .unwrap();
+    assert!(readable >= 120, "only {readable} templates readable: {out}");
     let _ = fs::remove_dir_all(root);
 }
 

@@ -88,9 +88,9 @@ class FlagTests(unittest.TestCase):
 
     def test_env_templates_are_documented_as_read_only_in_the_sandbox(self):
         # Issue #598: the read tools' three template names are bound read-only, not masked.
-        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        reference = ' '.join((ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8').split())
         for text in ('`.env.example`, `.env.sample` and `.env.template`', 'read-only over its own path',
-                     'do not count toward the 128-mask limit', 'looks empty',
+                     'do not count toward the 128-mask limit', 'past 248 templates', 'looks empty',
                      'the usual `escalate: true` advice is left out'):
             self.assertIn(text, reference)
         self.assertNotIn('fail with Permission denied; they need the owner', reference)

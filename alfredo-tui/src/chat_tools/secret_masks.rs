@@ -28,7 +28,8 @@ use std::{
 pub(crate) const LIMIT: usize = 128;
 /// Most env templates one run binds read-only. They share the sandbox's 256-entry
 /// read-only binding cap with the masks ([`LIMIT`]) and the run's other binds, so a surplus
-/// template is masked like any secret rather than bound, and then counts toward [`LIMIT`].
+/// template is masked like any secret rather than bound, and then counts toward [`LIMIT`], so
+/// past `LIMIT + TEMPLATE_LIMIT` (248) templates the run is refused.
 pub(crate) const TEMPLATE_LIMIT: usize = 120;
 /// Entries one walk may visit before it refuses, so a huge tree cannot stall a run.
 const VISIT_LIMIT: usize = 250_000;
@@ -74,11 +75,17 @@ impl Masks {
         } else {
             Some(EmptyDir::create()?)
         };
+        // Templates first: a later bind wins, so no template bind can shadow a mask.
         let mut pairs: Vec<(String, String)> = self
-            .files
+            .templates
             .iter()
-            .map(|file| ("/dev/null".to_string(), file.clone()))
+            .map(|file| (file.clone(), file.clone()))
             .collect();
+        pairs.extend(
+            self.files
+                .iter()
+                .map(|file| ("/dev/null".to_string(), file.clone())),
+        );
         if let Some(empty) = &empty {
             pairs.extend(
                 self.dirs
@@ -86,11 +93,6 @@ impl Masks {
                     .map(|dir| (empty.path().to_string(), dir.clone())),
             );
         }
-        pairs.extend(
-            self.templates
-                .iter()
-                .map(|file| (file.clone(), file.clone())),
-        );
         Ok(Mounts {
             _empty: empty,
             pairs,
@@ -448,6 +450,13 @@ mod tests {
         let own = text(&root.join(".env.sample"));
         assert!(mounts.pairs.contains(&(own.clone(), own)));
         assert_eq!(mounts.pairs.len(), 6);
+        let first_mask = mounts.pairs.iter().position(|(s, d)| s != d).unwrap();
+        assert!(
+            mounts.pairs[..first_mask].iter().all(|(s, d)| s == d) && first_mask == 3,
+            "template binds come before every mask: {:?}",
+            mounts.pairs
+        );
+        assert!(mounts.pairs[first_mask..].iter().all(|(s, d)| s != d));
         let _ = fs::remove_dir_all(root);
     }
 
