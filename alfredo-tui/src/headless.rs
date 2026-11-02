@@ -532,8 +532,6 @@ pub fn run(options: Options) -> Result<i32, String> {
             false
         } else if status.state.finished() {
             drained
-        } else if status.state.finished() {
-            drained
         } else if status.state == RunState::Paused {
             // Autopilot halted itself (a refusal, contention): the notice says why.
             reason = work.autopilot.notice().to_owned();
