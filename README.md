@@ -198,7 +198,7 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | Ctrl+N | New conversation (max 8); `/clear` restarts the current one, `/compact` summarises its older turns |
 | Esc | Cancel the current model request (keeps partial reply); close pickers. You can then send a new prompt or switch `/model`. Esc (or Ctrl+Q, which also quits) stops a running chat `run_command`; `/stop` does too |
 | Ctrl+R | Retry a failed or cancelled turn, until you send a new prompt |
-| y / n / a (approval card) | Approve / deny / always allow (`a`, see `/allow`; not offered for pushes, over-long commands, or writes that create directories) a chat tool call: file edit, shell command, git write or push; Esc denies and ends the turn |
+| y / n / a (approval card) | Approve / deny / always allow (`a`, see `/allow`; not offered for pushes, HOST (escalated) runs, over-long commands, or writes that create directories) a chat tool call: file edit, shell command, git write or push; Esc denies and ends the turn |
 | Ctrl+A / Ctrl+E | Move to the start / end of the prompt |
 | Ctrl+Left / Ctrl+Right (Alt+B / Alt+F) | Move one word left / right |
 | Ctrl+K | Delete from the cursor to the end of the prompt |
@@ -241,6 +241,7 @@ to save; their diff is kept in the run's evidence. See
 | `--headless` | off | With `--go GOAL`: no terminal needed. One stderr line per autopilot state change, then one JSON object on stdout. Exit 0 all accepted, 1 partial/failed/interrupted, 2 setup or usage error (including Ollama unreachable or model missing); waits for and reports an `--on-finish` hook |
 | `--chat PROMPT` | – | With `--headless`: run one Chat Agent turn (tools, approvals) without a terminal and print one JSON result. Mutating calls are denied unless `--approve` allows them. PROMPT `-` reads the prompt from stdin to EOF (UTF-8, at most 256 KiB, nonempty; otherwise exit 2), e.g. `git diff \| alfredo-tui --chat - --headless` |
 | `--resume` | – | Only with `--headless`: continue the mission's paused run (as `/resume` does) with the same stderr lines, JSON and exit codes as `--go`; exit 2 when there is nothing to resume. `--go GOAL --headless` over a paused run exits 2 naming it and plans nothing; use `--conversation NAME` for a separate run |
+| `--output-format text\|stream-json` | `text` | Only with `--headless`: `stream-json` prints one JSON object per line on stdout (`{"v":1,"type":…}`: `task_started`, `repair`, `check` for `--go`/`--resume`; `tool` for `--chat`), ending with the usual final object as the `result` line. Stderr and exit codes are unchanged; any other value exits 2 |
 | `--approve workspace-edits` | deny all | Only with `--chat … --headless`: approve `edit_file`/`write_file` inside the repository, deny everything else (outcomes logged to `chat-approvals.jsonl`). Interactive chat always asks |
 | `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |
 | `--on-finish PROGRAM` | off (env `ALFREDO_ON_FINISH`) | Absolute path to your own executable, run when an autopilot run ends `done`, `partial` or `failed` (see [reference](alfredo-tui/docs/reference.md#completion-hook)) |

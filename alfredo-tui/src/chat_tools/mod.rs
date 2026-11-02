@@ -21,6 +21,7 @@ mod git_write;
 pub mod propose;
 pub(crate) mod read;
 mod run;
+mod secret_masks;
 mod shell;
 pub mod summary;
 pub mod undo;
