@@ -239,6 +239,8 @@ class DispatchSurvivesBusyStore(unittest.TestCase):
                             os.write(terminal.master, b'\x1b[1;1R')
                 header = terminal.screen().split('\n')[0]
                 self.assertIn('dispatch on', header, terminal.screen())
+                # Issue #587: a short hold leaves no "dispatch off" row in the chat view.
+                self.assertNotIn('dispatch off', terminal.screen(), terminal.screen())
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
             finally:
@@ -289,6 +291,46 @@ class DispatchStopsWhenBusyStoreStaysBusy(unittest.TestCase):
                             os.write(terminal.master, b'\x1b[1;1R')
                 header = terminal.screen().split('\n')[0]
                 self.assertNotIn('dispatch on', header, terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+
+
+class DispatchOffRowInChat(unittest.TestCase):
+    def test_chat_view_gets_one_row_when_dispatch_turns_itself_off(self):
+        # Issue #587: when the store stays busy past the transient limit, dispatch turns
+        # itself off; the reason used to show only on the F2 status line. The chat
+        # transcript now gets one row with the refusal and the way back.
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-offrow-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-offrow-repo-') as repo:
+            root = os.path.realpath(repo)
+            subprocess.run(['git', '-C', root, 'init', '-q', '--template='], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], root, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'/dispatch on\r')
+                terminal.wait_for('   dispatch on')
+                lock = next(Path(state).rglob('tasks.lock'))
+                with open(lock, 'rb') as held:
+                    fcntl.flock(held, fcntl.LOCK_EX)
+                    try:
+                        deadline = time.monotonic() + 4
+                        while time.monotonic() < deadline:
+                            if select.select([terminal.master], [], [], 0.05)[0]:
+                                chunk = os.read(terminal.master, 65536)
+                                terminal.output.extend(chunk)
+                                if b'\x1b[6n' in chunk:
+                                    os.write(terminal.master, b'\x1b[1;1R')
+                    finally:
+                        fcntl.flock(held, fcntl.LOCK_UN)
+                terminal.wait_for('dispatch off: Task store is busy; refresh and retry')
+                terminal.wait_for('/dispatch on to resume')
+                screen = terminal.screen()
+                self.assertEqual(screen.count('dispatch off: Task store is busy'), 1, screen)
+                self.assertNotIn('dispatch on', screen.split('\n')[0], screen)
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
             finally:

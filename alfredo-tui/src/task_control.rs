@@ -1444,6 +1444,11 @@ impl TaskControl {
         }
     }
 
+    /// Chat-transcript rows for dispatch turning itself off (issue #587).
+    pub fn take_dispatch_off_rows(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     pub fn take_control_events(&mut self) -> Vec<crate::control_command::Event> {
         std::mem::take(&mut self.control_events)
     }
@@ -2736,6 +2741,44 @@ mod refusal_notice_tests {
             control.notice,
             "Task refresh failed; dispatch off: disk unreadable"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_busy_turn_off_queues_one_chat_row_with_the_refusal_and_the_way_back() {
+        let (mut control, root) = dispatching();
+        for _ in 0..crate::dispatch::TRANSIENT_LIMIT {
+            fail(&mut control, Refusal::Busy);
+        }
+        assert!(control.take_dispatch_off_rows().is_empty());
+        fail(&mut control, Refusal::Busy);
+        // Later failing ticks while dispatch is already off add nothing.
+        fail(&mut control, Refusal::Busy);
+        let rows = control.take_dispatch_off_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("dispatch off: Task store is busy; refresh and retry"));
+        assert!(rows[0].contains("/dispatch on"));
+        assert!(control.take_dispatch_off_rows().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_non_transient_turn_off_queues_the_same_row_once() {
+        let (mut control, root) = dispatching();
+        fail(&mut control, Refusal::Denied("disk unreadable".into()));
+        fail(&mut control, Refusal::Denied("disk unreadable".into()));
+        let rows = control.take_dispatch_off_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("Task refresh failed; dispatch off: disk unreadable"));
+        assert!(rows[0].contains("/dispatch on"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_refresh_failure_with_dispatch_already_off_queues_no_row() {
+        let (mut control, root) = control();
+        fail(&mut control, Refusal::Denied("disk unreadable".into()));
+        assert!(control.take_dispatch_off_rows().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
