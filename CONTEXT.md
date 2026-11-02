@@ -16,7 +16,7 @@ The conversation's model acting as a tool-calling agent on the Coding Workspace 
 
 ### Approval
 
-The owner's per-call consent to a Chat Agent action, or a per-mission always-allow rule granting it ahead. Tiers: read auto; edit, shell, git write ask; push always asks and is never allowlistable. Shell runs in the Sandbox unless the owner approves a host escalation for that call. No skip-approval mode.
+The owner's per-call consent to a Chat Agent action, or a per-mission always-allow rule granting it ahead. Tiers: read auto; edit, shell, git write ask; push always asks and is never allowlistable; a HOST (escalated) run always asks too (issue #311). Shell runs in the Sandbox unless the owner approves a host escalation for that call. No skip-approval mode.
 
 ### State Directory
 

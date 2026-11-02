@@ -1141,21 +1141,6 @@ impl Planner {
     }
 }
 
-/// One check argv on one line; arguments with spaces or quotes are single-quoted.
-fn join_check(argv: &[String]) -> String {
-    argv.iter()
-        .map(|arg| {
-            if !arg.is_empty() && !arg.contains(|c: char| c.is_whitespace() || "'\"\\$".contains(c))
-            {
-                arg.clone()
-            } else {
-                format!("'{}'", arg.replace('\'', "'\\''"))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Reviewer-friendly task list: `#N Title · deps #a,#b`, files, check, criteria.
 fn readable_tasks(plan: &Plan) -> String {
     let mut out = format!("Tasks ({}) · Ctrl+O shows the raw JSON", plan.tasks.len());
@@ -1166,7 +1151,10 @@ fn readable_tasks(plan: &Plan) -> String {
             out.push_str(&format!(" · deps {}", deps.join(",")));
         }
         out.push_str(&format!("\n  files: {}", step.policy.files.join(", ")));
-        out.push_str(&format!("\n  check: {}", join_check(&step.policy.check)));
+        out.push_str(&format!(
+            "\n  check: {}",
+            crate::argv_display::check_line(&step.policy.check)
+        ));
         for (n, criterion) in step.acceptance.iter().enumerate() {
             out.push_str(&format!("\n  {}. {criterion}", n + 1));
         }
