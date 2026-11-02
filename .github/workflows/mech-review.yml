@@ -24,7 +24,7 @@ jobs:
         docs/agents/**
         alfredo-tui/scripts/agent-*
       agent-branch-prefix: claude/
-      mutation-budget: "10"
+      mutation-budget: "25"
       extra-apt-packages: bubblewrap util-linux
       # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces that bwrap needs.
       setup-command: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
