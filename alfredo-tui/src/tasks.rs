@@ -1193,6 +1193,13 @@ impl TaskStore {
         self.read_locked()
     }
 
+    /// `snapshot` keeping the refusal kind, so a caller can tell a busy store
+    /// (`Refusal::Busy`, transient) from a real read failure.
+    pub(crate) fn snapshot_checked(&self) -> std::result::Result<Snapshot, Refusal> {
+        let _lock = self.lock_checked()?;
+        self.read_locked().map_err(Refusal::from)
+    }
+
     /// Read-only storage admission before a branch effect. This neither reserves
     /// capacity nor proves Git state; the final transaction must still revalidate.
     pub(crate) fn preflight_branch(&self, request: Request) -> Result<()> {
