@@ -96,6 +96,44 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD'), head)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
+    def test_stream_json_prints_one_event_per_line_ending_with_the_result_object(self):
+        code, out, err = self.run_headless('--headless', '--output-format', 'stream-json')
+        self.assertEqual(code, 0, err)
+        events = [json.loads(line) for line in out.splitlines()]
+        self.assertGreater(len(events), 2, out)
+        for event in events:
+            self.assertEqual(event['v'], 1, event)
+            self.assertIsInstance(event['type'], str, event)
+        last = events[-1]
+        self.assertEqual(last['type'], 'result')
+        self.assertEqual([e['type'] for e in events].count('result'), 1)
+        content = {k: v for k, v in last.items() if k not in ('v', 'type')}
+        self.assertEqual(set(content), {'model', 'state', 'goal', 'branch', 'accepted', 'total', 'repairs', 'failed', 'usage'})
+        self.assertEqual((content['state'], content['goal'], content['accepted'], content['total'],
+                          content['repairs'], content['failed']), ('done', GOAL, 2, 2, 1, []))
+        started = [e['id'] for e in events if e['type'] == 'task_started']
+        self.assertEqual(started, [1, 2], events)
+        repairs = [e for e in events if e['type'] == 'repair']
+        self.assertEqual([(e['id'], e['cause']) for e in repairs], [(1, 'check failed')], events)
+        checks = [(e['id'], e['passed']) for e in events if e['type'] == 'check']
+        self.assertEqual(checks, [(1, True), (2, True)], events)
+        # Progress text stays on stderr exactly as without the flag.
+        self.assertIn('#1 check failed → repair #3', err.splitlines())
+
+    def test_text_output_format_is_the_default_one_json_object(self):
+        code, out, err = self.run_headless('--headless', '--output-format', 'text')
+        self.assertEqual(code, 0, err)
+        self.assertNotIn('type', self.result(out))
+
+    def test_unknown_output_format_is_a_usage_error_with_nothing_on_stdout(self):
+        for extra in (['--headless', '--output-format', 'xml'], ['--headless', '--output-format']):
+            code, out, err = self.run_headless(*extra)
+            self.assertEqual((code, out), (2, ''), err)
+            self.assertIn('--output-format needs text or stream-json', err)
+        code, out, err = self.run_headless('--output-format', 'stream-json')
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('--output-format applies only with --headless', err)
+
     def goal_with_state_spelling(self, state, cwd):
         # A state directory spelled with `.`, `..` or `//` names the same directory as its clean form.
         self.fixture.single_task = True

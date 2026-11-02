@@ -29,7 +29,7 @@ fn main() {
         let headless = std::env::args().any(|arg| {
             matches!(
                 arg.as_str(),
-                "--headless" | "--chat" | "--approve" | "--resume"
+                "--headless" | "--chat" | "--approve" | "--resume" | "--output-format"
             )
         });
         std::process::exit(if headless { 2 } else { 1 });
@@ -56,6 +56,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--select",
     "--go",
     "--headless",
+    "--output-format",
     "--resume",
     "--chat",
     "--approve",
@@ -139,6 +140,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut headless = false;
     let mut chat_prompt: Option<String> = None;
     let mut approve: Option<headless::Policy> = None;
+    let mut stream_json = false;
+    let mut output_format = false;
     let mut max_repairs = alfredo_tui::autopilot::DEFAULT_MAX_REPAIRS;
     let mut on_finish = std::env::var("ALFREDO_ON_FINISH")
         .ok()
@@ -166,6 +169,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 go_goal = Some(goal);
             }
             "--headless" => headless = true,
+            "--output-format" => {
+                stream_json = match args.next().as_deref() {
+                    Some("text") => false,
+                    Some("stream-json") => true,
+                    _ => return Err("--output-format needs text or stream-json".into()),
+                };
+                output_format = true;
+            }
             "--resume" => resume = true,
             "--chat" => {
                 // A known flag in the value slot means the PROMPT is missing.
@@ -310,6 +321,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if chat_prompt.is_some() && !headless {
         return Err("--chat needs --headless (interactive chat is the terminal)".into());
     }
+    if output_format && !headless {
+        return Err("--output-format applies only with --headless".into());
+    }
     if approve.is_some() && chat_prompt.is_none() {
         return Err("--approve applies only to --chat PROMPT --headless".into());
     }
@@ -426,6 +440,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let state_dir = state_dir.ok_or("Set --state-dir or ALFREDO_STATE_DIR")?;
+    headless::set_stream(stream_json);
     if let Some(mut prompt) = chat_prompt {
         if prompt == "-" {
             prompt = read_stdin_prompt(std::io::stdin().lock())?;
@@ -2543,6 +2558,7 @@ const HELP_LINES: &[&str] = &[
     "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
     "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals); PROMPT `-` reads the prompt from stdin to EOF (UTF-8, at most 256 KiB, nonempty; otherwise exit 2), as in `git diff | alfredo-tui --chat - --headless`: read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {model, state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
     "--resume --headless continues the mission's paused run (left by SIGINT/SIGTERM, /stop or a restart) with the same stderr lines, JSON result and exit codes as --go; exit 2 with nothing on stdout when there is no paused run. --go GOAL --headless over a paused run exits 2 naming the paused goal and progress and plans nothing; start a different goal with --conversation NAME (a new name has no paused run) or /go GOAL in the terminal.",
+    "--output-format text|stream-json (default text) with --headless (--go, --resume or --chat): stream-json prints one JSON object per line on stdout, each {\"v\":1,\"type\":…}: task_started {id}, repair {id,cause,head} and check {id,passed[,reason]} for --go/--resume, tool {tool,path,result[,detail]} for --chat, and last the usual final object with type \"result\" added. Nothing else reaches stdout; stderr keeps the same progress lines; exit codes are unchanged (a setup error still prints nothing on stdout). Any other value exits 2.",
     "--model NAME: in the terminal it is the model for new conversations (a restored conversation keeps its saved model). With --headless (--go or --chat) and --doctor an explicit --model is the model for that run even when the conversation has a saved one: it is checked against the installed list first (exit 2 names it), never saved, and echoed as \"model\" in the JSON and on one stderr line. Without --model (or with only ALFREDO_MODEL) the conversation's saved model applies.",
     "",
     "--doctor checks startup prerequisites without entering terminal mode or running inference.",
