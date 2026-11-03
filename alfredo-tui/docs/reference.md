@@ -81,7 +81,7 @@ plan`.
 
 Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any model
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
-executable check as `--doctor`). If the sandbox still fails to start during a run, that
+executable check as `--doctor`). A bwrap that exists but cannot create a sandbox (user-namespace restriction, e.g. Ubuntu 24.04 AppArmor) is refused the same way before any model call, quoting bwrap's stderr and a host-policy fix instead of the install hint: a no-op `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` runs once per process (5 s limit) for `/go`, `--go` and `/run`, and fresh in `--doctor` (`FAIL sandbox`). If the sandbox still fails to start during a run, that
 is an environment failure, not a code failure: autopilot stops without repairs (no
 `--max-repairs` spent, even with `--max-repairs 0`) and the Reason line quotes the cause
 and the fix. Classified as a sandbox failure: the provider refusing an untrusted bwrap, a
