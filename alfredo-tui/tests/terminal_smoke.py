@@ -1234,10 +1234,10 @@ class TerminalSmoke(unittest.TestCase):
         )
         output = bytearray()
 
-        def wait_for(text, timeout=30):
-            # `timeout` is patience, not a latency assertion: a loaded box may need far
-            # longer than a caller's hint, so never wait less than 30s (issue #611).
-            deadline = time.monotonic() + max(timeout, 30)
+        def wait_for(text, patience=30):
+            # `patience` is not a latency assertion: a loaded box may need far longer
+            # than a tight hint, so call sites state no timeout (issue #611).
+            deadline = time.monotonic() + patience
             while True:
                 # Check after every read, so output that arrives with the last chunk
                 # before the deadline is not discarded as a miss.
@@ -1523,7 +1523,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/approve 1\r')
             wait_for(b'revision 5')
             os.write(master, b'/run 1\r')
-            wait_for(b'needs review', timeout=15)
+            wait_for(b'needs review')
             os.write(master, b'/chat\r')
             wait_for(b'Task #1 started')
             wait_for(b'Task #1 check passed')
@@ -1547,7 +1547,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/approve 2\r')
             wait_for(b'revision 9')
             os.write(master, b'/run 2\r')
-            wait_for('◐ #2'.encode(), timeout=15)
+            wait_for('◐ #2'.encode())
             repair_requests = [r for r in model_requests if r['messages'][-1]['content'].startswith('Implement this task: Repair #1:')]
             self.assertEqual(len(repair_requests), 1)
             self.assertEqual([m['role'] for m in repair_requests[0]['messages']], ['user', 'assistant', 'user'])
@@ -1579,7 +1579,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/resolve-repair 2\r')
             wait_for(b'revision 16')
             os.write(master, b'/run 3\r')
-            wait_for('◐ #3'.encode(), timeout=15)
+            wait_for('◐ #3'.encode())
             os.write(master, b'/evidence 3\r')
             wait_for(b'Accepted dependency inputs: #1 via repair #2')
             result = json.loads(saved.read_text())
@@ -1601,7 +1601,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/activity #3\r')
             wait_for(b'Review branch recorded')
             os.write(master, b'/plan Extend calculation with integration checks\r')
-            wait_for(b'Review draft paths', timeout=10)
+            wait_for(b'Review draft paths')
             # Readable task list by default; Ctrl+O shows the raw JSON and back.
             wait_for(b'#1 Planned calculation')
             os.write(master, b'\x0f')
@@ -1610,7 +1610,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'#1 Planned calculation')
             self.assertEqual(len(json.loads(saved.read_text())['tasks']), 3)
             os.write(master, b'/plan-revise Add boundary coverage\r')
-            wait_for(b'Review revised draft paths', timeout=10)
+            wait_for(b'Review revised draft paths')
             self.assertEqual(len(json.loads(saved.read_text())['tasks']), 3)
             revision_request = model_requests[-1]
             self.assertTrue(any(m['content'].startswith('Previous unsaved task draft') for m in revision_request['messages']))
@@ -1669,7 +1669,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/approve 4\r')
             wait_for(b'revision 25')
             os.write(master, b'/run 4\r')
-            wait_for('◐ #4'.encode(), timeout=15)
+            wait_for('◐ #4'.encode())
             self.assertEqual(worker_models[-1], replacement)
             self.assertEqual(json.loads(saved.read_text())['tasks'][3]['model'], replacement)
             self.assertEqual(Path(workspace.name, 'answer.py').read_text(), 'VALUE = 0\n')
@@ -1694,16 +1694,16 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/dispatch on\r')
             wait_for(b'   dispatch on')  # header attention while on
             os.write(master, b'/chat\r')
-            wait_for(b'   2 running', timeout=15)
+            wait_for(b'   2 running')
             release_parallel.set()
-            wait_for(b'3 review', timeout=15)
+            wait_for(b'3 review')
             os.write(master, b'\x1bOQ')
             # Hierarchy rows can extend beyond the viewport; inspect both exact
             # results without changing the concurrent-dispatch authority checks.
             os.write(master, b'/tasks #6\r')
-            wait_for('◐ #6'.encode(), timeout=15)
+            wait_for('◐ #6'.encode())
             os.write(master, b'/tasks #7\r')
-            wait_for('◐ #7'.encode(), timeout=15)
+            wait_for('◐ #7'.encode())
             self.assertIsNone(json.loads(saved.read_text())['tasks'][4].get('run'))
             os.write(master, b'/evidence 4\r')
             wait_for(b'Acceptance criteria')
@@ -1725,7 +1725,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Approved with limitations')
             wait_for(b'Limitation:')
             self.assertTrue(any(r['request']['action'].get('decision') == decision for r in json.loads(saved.read_text())['receipts']))
-            wait_for('◐ #5'.encode(), timeout=15)
+            wait_for('◐ #5'.encode())
             os.write(master, b'/dispatch off\r')
             wait_for('✓ Dispatch off'.encode())
             wait_for_header_without(b'dispatch on')
@@ -1748,10 +1748,10 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/tasks #8\r')
             wait_for(b'Task filter applied')
             os.write(master, b'/run 8\r')
-            wait_for('◐ #8'.encode(), timeout=15)
+            wait_for('◐ #8'.encode())
             requests_before_architect = len(model_requests)
             os.write(master, ('/review 8 ' + json.dumps(architecture_review) + '\r').encode())
-            wait_for(b'Review draft paths', timeout=15)
+            wait_for(b'Review draft paths')
             os.write(master, b'\x1b[6~')
             wait_for(b'Architect corrected calculation')
             self.assertEqual(len(model_requests), requests_before_architect + 1)
@@ -1786,7 +1786,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/tasks #9\r')
             wait_for(b'Task filter applied')
             os.write(master, b'/run 9\r')
-            wait_for('◐ #9'.encode(), timeout=15)
+            wait_for('◐ #9'.encode())
             revised = json.loads(saved.read_text())
             self.assertEqual(revised['tasks'][8]['run']['baseline'], revised['tasks'][7]['run']['baseline'])
             self.assertEqual(revised['tasks'][8]['run']['inputs'], revised['tasks'][7]['run']['inputs'])
