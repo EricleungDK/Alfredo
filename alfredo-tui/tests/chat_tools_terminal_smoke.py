@@ -118,7 +118,7 @@ class Fixture:
                         {'function': {'name': 'read_file', 'arguments': {'path': 'README.md'}}}]},
                         'done': False}]
                 else:
-                    seen = bool(tool_results) and 'README_BODY_MARKER' in tool_results[-1]['content']
+                    seen = 'README_BODY_MARKER' in tool_results[-1]['content']
                     chunks = [{'message': {'content': 'SUMMARY_FROM_TOOL' if seen else 'NO_RESULT'},
                                'done': False}]
                 chunks.append({'message': {'content': ''}, 'done': True, 'prompt_eval_count': 50,
@@ -481,9 +481,9 @@ class ChatTools(unittest.TestCase):
         # Issue #610: the model sees the first 32 KiB of a longer @path file; say so.
         root = Path(os.path.realpath(self.repo.name))
         root.joinpath('big.txt').write_text(('x' * 69 + '\n') * 1000)
-        self.terminal.write(b'summarise @big.txt\r')
+        self.terminal.write(b'review @big.txt\r')
         self.terminal.wait_for('@big.txt: attached 32768 of 70000 bytes')
-        self.terminal.wait_for('NO_RESULT')
+        self.terminal.wait_for('SUMMARY_FROM_TOOL')
         message = [m for m in self.fixture.chats()[0]['messages'] if m['role'] == 'user'][-1]
         self.assertIn('[truncated: 32768 of 70000 bytes]', message['content'])
         self.assertNotIn('not attached', self.terminal.screen(),
