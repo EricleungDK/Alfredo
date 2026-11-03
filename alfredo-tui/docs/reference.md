@@ -79,6 +79,8 @@ stopped autopilot) is refused with the reason, and the draft and tasks are untou
 nor saved proposed tasks, bare `/go` answers `Usage: /go GOAL, or /go to run the open
 plan`.
 
+In the interactive TUI, the denied-sandbox refusal of `/go` and `/run` is shown as chat rows with the whole sentence (bwrap's stderr without a trailing period, then the host-policy fix and the README Troubleshooting pointer) and a footer that leads with the fix: `/go refused: allow bubblewrap user namespaces · see README Troubleshooting`.
+
 Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any model
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
 executable check as `--doctor`). A bwrap that exists but cannot create a sandbox (user-namespace restriction, e.g. Ubuntu 24.04 AppArmor) is refused the same way before any model call, quoting bwrap's stderr and a host-policy fix instead of the install hint: a no-op `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` runs once per process (5 s limit) for `/go`, `--go` and `/run`, and fresh in `--doctor` (`FAIL sandbox`). If the sandbox still fails to start during a run, that
