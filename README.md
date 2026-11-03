@@ -282,6 +282,7 @@ to save; their diff is kept in the run's evidence. See
   your distro restricts unprivileged user namespaces (Ubuntu 24.04+ AppArmor). Test
   with `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` and allow
   bwrap per your distro's policy.
+  `--doctor` and `/go` run this test for you (`FAIL sandbox`) and refuse before any model call.
 - **"Interactive terminal required"**: run in a real terminal, or use `--headless --go GOAL` for scripts.
 - **"Another alfredo-tui already owns conversation 'default' for this repo"**: another
   terminal owns that conversation set; close it or relaunch with
