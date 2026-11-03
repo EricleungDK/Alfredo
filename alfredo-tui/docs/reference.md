@@ -2127,9 +2127,8 @@ default false), `timeout_seconds` (1–600, default 120).
   written. Each matching directory is bound over with an empty read-only directory: `ls .ssh`
   lists nothing, and a path inside it reports `No such file or directory`. The run is refused,
   with `nothing ran` and the reason, rather than started unmasked, when the scan cannot finish:
-  more than 128 masks, more than 250,000 entries, nesting past 64 directories, an unreadable
-  directory, a name that is not UTF-8 and matches the list, or a symbolic link whose own name
-  matches the list (remove or rename it). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them` (a count only, never names). Not covered:
+  more than 128 masks, more than 1,000,000 entries (the refusal names the top-level directory with the most entries), nesting past 64 directories, a name that is not UTF-8 and matches the list, or a symbolic link whose own name
+  matches the list (remove or rename it). A non-secret directory the scan cannot list (permission denied) does not refuse: it is bound over with the empty read-only directory like a secret one, so it looks empty and counts toward the 128 masks (issue #581). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them` (a count only, never names). Not covered:
   a file the command creates during the run; an `escalate: true` run, which is on the host and
   unmasked (its card says it runs outside the sandbox); a non-secret name hard-linked to a
   secret, which the read tools also allow; and the workspace's root `.git` directory, which
