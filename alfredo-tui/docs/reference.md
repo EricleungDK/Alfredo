@@ -79,6 +79,8 @@ stopped autopilot) is refused with the reason, and the draft and tasks are untou
 nor saved proposed tasks, bare `/go` answers `Usage: /go GOAL, or /go to run the open
 plan`.
 
+In the interactive TUI, the denied-sandbox refusal of `/go` and `/run` is shown as chat rows with the whole sentence (bwrap's stderr without a trailing period, then the host-policy fix and the README Troubleshooting pointer) and a footer that leads with the fix: `/go refused: allow bubblewrap user namespaces · see README Troubleshooting`.
+
 Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any model
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
 executable check as `--doctor`). A bwrap that exists but cannot create a sandbox (user-namespace restriction, e.g. Ubuntu 24.04 AppArmor) is refused the same way before any model call, quoting bwrap's stderr and a host-policy fix instead of the install hint: a no-op `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` runs once per process (5 s limit) for `/go`, `--go` and `/run`, and fresh in `--doctor` (`FAIL sandbox`). If the sandbox still fails to start during a run, that
@@ -322,7 +324,8 @@ Approval gate, answered by a scripted policy instead of a card:
 `@path` mentions in the prompt are attached exactly as in interactive chat (working-tree
 content of regular files inside the repository; symlinks, ignored untracked files and
 excluded names are refused; at most 8 files and 32 KiB per prompt). Each mention that is not
-attached gets one stderr line (`@path: not attached (reason)`), and the JSON result gains
+attached gets one stderr line (`@path: not attached (reason)`), a file cut to the 32 KiB
+budget gets `@path: attached N of M bytes (...)`, and the JSON result gains
 `"attached": ["a.txt"]` only when something was attached.
 
 PROMPT `-` reads the prompt from stdin to EOF (`git diff | alfredo-tui --chat - --headless`).
@@ -2124,9 +2127,8 @@ default false), `timeout_seconds` (1–600, default 120).
   written. Each matching directory is bound over with an empty read-only directory: `ls .ssh`
   lists nothing, and a path inside it reports `No such file or directory`. The run is refused,
   with `nothing ran` and the reason, rather than started unmasked, when the scan cannot finish:
-  more than 128 masks, more than 250,000 entries, nesting past 64 directories, an unreadable
-  directory, a name that is not UTF-8 and matches the list, or a symbolic link whose own name
-  matches the list (remove or rename it). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them` (a count only, never names). Not covered:
+  more than 128 masks, more than 1,000,000 entries (the refusal names the top-level directory with the most entries), nesting past 64 directories, a name that is not UTF-8 and matches the list, or a symbolic link whose own name
+  matches the list (remove or rename it). A non-secret directory the scan cannot list (permission denied) does not refuse: it is bound over with the empty read-only directory like a secret one, so it looks empty and counts toward the 128 masks (issue #581). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them` (a count only, never names). Not covered:
   a file the command creates during the run; an `escalate: true` run, which is on the host and
   unmasked (its card says it runs outside the sandbox); a non-secret name hard-linked to a
   secret, which the read tools also allow; and the workspace's root `.git` directory, which
@@ -2292,7 +2294,9 @@ size limit, and it is kept in memory only (not restored after a restart).
   including a symlinked directory in the path and links that stay inside the repository;
   directories, binary and non-UTF-8 files; files over 256 KiB.
 - Bounds per prompt: at most 8 distinct mentions and 32 KiB of file text; a longer file
-  is cut with `[truncated: N of M bytes]`, and mentions past the budget are not attached.
+  is cut with `[truncated: N of M bytes]` and says so in one dim row (`@big.txt: attached
+  32768 of 66890 bytes (32 KiB per-prompt limit; the model sees the first part)`), and
+  mentions past the budget are not attached. A cut file is not counted in the footer.
 - Anything that looks like a path (contains `/` or `.`) but cannot be attached shows a
   notice naming it and the reason, for example `@calc.py: not attached (no such file or
   directory: calc.py)`. A bare `@word` that is not a readable file is left alone silently.

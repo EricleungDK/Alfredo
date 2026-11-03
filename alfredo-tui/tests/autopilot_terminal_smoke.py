@@ -9,6 +9,7 @@ to finish on one local integration branch while the source HEAD stays put.
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -616,6 +617,52 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertNotIn('Repair', screen)
         self.assertNotIn('repair budget', screen)
         self.assertEqual(self.fixture.markers(), [])
+        self.quit(terminal)
+
+    def denied_bwrap(self, stderr='bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.'):
+        script = self.workspace.parent / 'denied-bwrap'
+        script.write_text(f"#!/bin/sh\necho '{stderr}' >&2\nexit 1\n")
+        script.chmod(0o755)
+        return {'ALFREDO_TEST_BWRAP_PATH': str(script)}
+
+    def flat(self, terminal):
+        # Chat rows wrap and sit between pane borders; compare the words only.
+        return ' '.join(re.sub('[│┃┌┐└┘─]', ' ', terminal.screen()).split())
+
+    def assert_sandbox_refusal_rows(self, terminal, command, markers):
+        self.screen_has(terminal, 'README Troubleshooting')
+        time.sleep(0.5)
+        terminal.pump()
+        flat = self.flat(terminal)
+        self.assertIn('Coding workers cannot start a sandbox: bwrap: No permissions to create new namespace', flat)
+        self.assertIn('Allow bubblewrap to create user namespaces', flat)
+        self.assertIn('README Troubleshooting: Worker fails at sandbox start', flat)
+        self.assertNotIn('..', flat)
+        self.assertNotIn('likely…', flat)
+        footer = terminal.screen().rstrip().splitlines()[-1]
+        self.assertIn(f'{command} refused: allow bubblewrap user namespaces', footer)
+        self.assertIn('see README Troubleshooting', footer)
+        self.assertEqual(self.fixture.markers(), markers)
+
+    def test_go_with_a_denied_sandbox_shows_the_whole_fix_in_chat_rows_at_100_columns(self):
+        terminal = self.terminal(resume=False, height=30, width=100, env=self.denied_bwrap())
+        terminal.send('/go Make answer return 42\r')
+        self.assert_sandbox_refusal_rows(terminal, '/go', [])
+        self.quit(terminal)
+
+    def test_run_with_a_denied_sandbox_shows_the_whole_fix_in_chat_rows_at_100_columns(self):
+        self.fixture.release_app.set()
+        terminal = self.terminal(resume=False, height=30, width=100, env=self.denied_bwrap())
+        terminal.send('/plan add answer function\r')
+        self.screen_has(terminal, 'Not saved or approved', 60)
+        self.wait_until('draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
+        terminal.send('/plan-save\r')
+        self.screen_has(terminal, 'Plan saved', 30)
+        terminal.send('/approve 1\r')
+        self.wait_until('task 1 approved', lambda: self.statuses()[0][1] == 'approved')
+        terminal.send('/run 1\r')
+        self.assert_sandbox_refusal_rows(terminal, '/run', ['PLAN'])
+        self.assertEqual(self.statuses()[0][1], 'approved')
         self.quit(terminal)
 
     def assert_go_refused_config_shows_the_fix(self, width):

@@ -424,11 +424,41 @@ fn sandbox_probe_is_the_readme_no_op_run_and_cached_except_for_the_doctor() {
             Err("bwrap: denied now".to_owned())
         );
     }
-    assert_eq!(fs::read_to_string(&bad_log).unwrap().lines().count(), 1);
+    assert_eq!(
+        fs::read_to_string(&bad_log).unwrap().lines().count(),
+        2,
+        "a failed probe is not cached: each call spawns it again"
+    );
     // The cached preflight text carries the stderr and the host-policy fix.
     let message = alfredo_tui::doctor::sandbox_denied_message("bwrap: denied now");
     assert!(message.contains("bwrap: denied now"), "{message}");
     assert!(message.contains("user namespaces"), "{message}");
+}
+
+#[test]
+fn sandbox_probe_retries_a_failure_and_caches_only_the_success() {
+    let fixture = Fixture::new();
+    // Fails on its first run, succeeds afterwards; the log line count is the run count.
+    let (flaky, log) = recording_bwrap(
+        &fixture.root,
+        "flakybwrap",
+        "[ \"$(wc -l < \"$0.log\")\" -ge 2 ] && exit 0\necho 'bwrap: not yet' >&2; exit 1",
+    );
+    let flaky = flaky.to_str().unwrap();
+    let runs = || fs::read_to_string(&log).unwrap().lines().count();
+    assert_eq!(
+        alfredo_tui::doctor::sandbox_probe_at(flaky, true),
+        Err("bwrap: not yet".to_owned())
+    );
+    assert_eq!(runs(), 1);
+    assert_eq!(alfredo_tui::doctor::sandbox_probe_at(flaky, true), Ok(()));
+    assert_eq!(
+        runs(),
+        2,
+        "the failure was probed again, not served from cache"
+    );
+    assert_eq!(alfredo_tui::doctor::sandbox_probe_at(flaky, true), Ok(()));
+    assert_eq!(runs(), 2, "the success is cached: no third spawn");
 }
 
 #[test]
@@ -580,4 +610,89 @@ fn doctor_notes_the_context_window_setting() {
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.contains(expected), "{text}");
     }
+}
+
+#[test]
+fn sandbox_denied_message_has_no_doubled_period_after_stderr_ending_in_one() {
+    for stderr in [
+        "bwrap: denied.",
+        "bwrap: denied.\n",
+        "bwrap: denied",
+        "bwrap: denied..\n",
+    ] {
+        let message = alfredo_tui::doctor::sandbox_denied_message(stderr);
+        assert!(!message.contains(".."), "{stderr:?} -> {message}");
+        assert!(
+            message.starts_with(
+                "Coding workers cannot start a sandbox: bwrap: denied. Allow bubblewrap"
+            ),
+            "{stderr:?} -> {message}"
+        );
+    }
+}
+
+const FIX: &str = "Allow bubblewrap to create user namespaces per your distro policy (README Troubleshooting: Worker fails at sandbox start)";
+
+#[test]
+fn sandbox_refusal_view_leads_the_footer_with_the_fix_and_keeps_the_whole_sentence_in_rows() {
+    let message = alfredo_tui::doctor::sandbox_denied_message("bwrap: No permissions.\n");
+    for command in ["/go", "/run"] {
+        let (notice, rows) =
+            alfredo_tui::doctor::sandbox_refusal_view(&message, command).expect("sandbox refusal");
+        assert_eq!(
+            notice,
+            format!(
+                "{command} refused: allow bubblewrap user namespaces · see README Troubleshooting"
+            )
+        );
+        assert_eq!(
+            rows,
+            vec![
+                "✗ Not started · Coding workers cannot start a sandbox: bwrap: No permissions."
+                    .to_owned(),
+                format!("  {FIX}"),
+            ]
+        );
+    }
+}
+
+#[test]
+fn sandbox_refusal_view_ignores_every_other_message() {
+    let denied = alfredo_tui::doctor::sandbox_denied_message("bwrap: denied");
+    for message in [
+        "Unknown task 9".to_owned(),
+        alfredo_tui::doctor::BWRAP_FIX.to_owned(),
+        // Right start, but not the sandbox-denied sentence: nothing to lead with.
+        "Coding workers cannot start a sandbox: bwrap: denied. Fix it yourself".to_owned(),
+        // Right end, wrong start.
+        denied.replacen("Coding workers cannot", "Workers cannot", 1),
+    ] {
+        assert_eq!(
+            alfredo_tui::doctor::sandbox_refusal_view(&message, "/go"),
+            None,
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn refusal_view_serves_config_and_sandbox_refusals_and_nothing_else() {
+    let denied = alfredo_tui::doctor::sandbox_denied_message("bwrap: denied");
+    let (notice, rows) = alfredo_tui::worker::refusal_view(&denied, "/run").expect("sandbox");
+    assert!(
+        notice.starts_with("/run refused: allow bubblewrap"),
+        "{notice}"
+    );
+    assert_eq!(rows.len(), 2);
+    let config = "Alfredo will not run in this repository: its Git config sets \"core.excludesFile\", and Git can run a program. Remove it with: git config --local --unset core.excludesFile";
+    let (notice, rows) = alfredo_tui::worker::refusal_view(config, "/run").expect("config");
+    assert_eq!(
+        notice,
+        "/go refused: git config --local --unset core.excludesFile (see the chat rows above)"
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        alfredo_tui::worker::refusal_view("Unknown task 9", "/go"),
+        None
+    );
 }

@@ -461,6 +461,12 @@ pub fn config_refusal_view(message: &str) -> Option<(String, Vec<String>)> {
     ))
 }
 
+/// The chat rows and fix-first footer for a refusal the one-line footer would cut:
+/// a config refusal or a sandbox that cannot start, for the slash `command` typed (#608).
+pub fn refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
+    config_refusal_view(message).or_else(|| crate::doctor::sandbox_refusal_view(message, command))
+}
+
 /// Why `workspace` cannot run coding work because of its Git config, read the bounded,
 /// hardened way (`git config --list` through [`git_blocking`], never an unbounded git). `Ok`
 /// also when the config cannot be read: the worker launch check still refuses (#525).
