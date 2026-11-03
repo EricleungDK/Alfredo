@@ -1,5 +1,6 @@
 //! Issue #240: `--chat PROMPT --headless [--approve workspace-edits]` runs one Chat
 //! Agent turn without a terminal; scripted approvals answer the Approval gate.
+mod exec_stub;
 mod ollama_fixture;
 
 use ollama_fixture::{done, scripted_chat, tool_calls, Fixture, Reply};
@@ -1104,15 +1105,12 @@ fn headless_go_validates_the_explicit_model_even_when_the_conversation_has_one()
 
 #[test]
 fn go_refuses_before_planning_when_bubblewrap_cannot_start_a_sandbox() {
-    use std::os::unix::fs::PermissionsExt;
     let root = repository("go-denied");
     let bwrap = root.join("fakebwrap");
-    fs::write(
+    exec_stub::write_executable(
         &bwrap,
         "#!/bin/sh\necho \"bwrap: setting up uid map: Permission denied\" >&2\nexit 1\n",
-    )
-    .unwrap();
-    fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let fixture = two_models();
     let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
         .args(["--endpoint", &fixture.endpoint, "--connect-retries", "0"])
