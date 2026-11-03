@@ -489,6 +489,15 @@ class ChatTools(unittest.TestCase):
         self.assertNotIn('not attached', self.terminal.screen(),
                          'a cut file is attached, so the footer does not count it')
 
+    def test_a_cut_file_beside_a_refused_one_counts_only_the_refusal(self):
+        # Issue #610: the footer counts mentions not attached; a cut file is attached.
+        root = Path(os.path.realpath(self.repo.name))
+        root.joinpath('big.txt').write_text(('x' * 69 + '\n') * 1000)
+        self.terminal.write(b'review @big.txt @gone.rs\r')
+        self.terminal.wait_for('@big.txt: attached 32768 of 70000 bytes')
+        self.terminal.wait_for('1 @path mention(s) not attached')
+        self.assertIn('@gone.rs: not attached', self.terminal.screen())
+
     def test_a_proposal_prefills_the_prompt_and_starts_nothing(self):
         self.terminal.write(b'refactor everything\r')
         self.terminal.wait_for('press Enter to start')
