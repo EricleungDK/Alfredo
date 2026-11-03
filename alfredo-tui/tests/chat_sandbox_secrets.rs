@@ -275,6 +275,52 @@ fn a_workspace_over_the_old_entry_limit_runs_and_keeps_env_masked() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #581: an unreadable directory takes one of the 128 masks, so too many still refuse.
+#[test]
+fn unreadable_directories_count_toward_the_mask_cap() {
+    if is_root() {
+        eprintln!("skipped: root reads every directory");
+        return;
+    }
+    let root = workspace("unreadable-cap");
+    for index in 0..129 {
+        write(&root, &format!("d{index}/x"), "");
+        chmod(&root.join(format!("d{index}")), 0o000);
+    }
+    let out = run(&root, "touch ran");
+    for index in 0..129 {
+        chmod(&root.join(format!("d{index}")), 0o755);
+    }
+    assert!(out.contains("nothing ran"), "{out}");
+    assert!(!root.join("ran").exists(), "the command ran: {out}");
+    assert!(
+        out.contains("more than 128 secret files and directories"),
+        "{out}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #581: a directory that can be entered but not listed (mode 0111) is masked too, so
+/// a secret file inside it by a known name is not readable.
+#[test]
+fn a_search_only_directory_hides_a_secret_inside_it() {
+    if is_root() {
+        eprintln!("skipped: root reads every directory");
+        return;
+    }
+    let root = workspace("search-only");
+    write(&root, "vol/.env", &format!("VOL={SECRET}\n"));
+    chmod(&root.join("vol"), 0o111);
+    let out = run(&root, "cat vol/.env; echo END");
+    chmod(&root.join("vol"), 0o755);
+    assert!(out.contains("END"), "the run was refused: {out}");
+    assert!(
+        !out.contains(SECRET),
+        "a secret in an unlistable directory leaked: {out}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn too_many_secret_masks_refuse_the_run_and_run_nothing() {
     let root = workspace("cap");
