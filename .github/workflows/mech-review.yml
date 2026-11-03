@@ -1,6 +1,7 @@
 name: mech-review
 
 # Mechanical PR review: test-diff guard, red-first, determinism, mutation. See docs/agents/testing.md.
+# @v0 follows ek's releases (each vX.Y.Z tag moves v0 after ek's tests pass): no bump PR here per release.
 
 on:
   pull_request:
@@ -11,7 +12,7 @@ permissions:
 
 jobs:
   mech-review:
-    uses: EricleungDK/ek/.github/workflows/mech-review.yml@v0.2.4
+    uses: EricleungDK/ek/.github/workflows/mech-review.yml@v0
     with:
       stack: rust
       rust-toolchain: 1.96.0
@@ -23,6 +24,7 @@ jobs:
         AGENTS.md
         docs/agents/**
         alfredo-tui/scripts/agent-*
+        alfredo-tui/.cargo/**
       agent-branch-prefix: claude/
       mutation-budget: "25"
       extra-apt-packages: bubblewrap util-linux

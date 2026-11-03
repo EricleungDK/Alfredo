@@ -1,10 +1,10 @@
 # Testing and mechanical review
 
-The testing standard is [ek's](https://github.com/EricleungDK/ek/blob/v0.2.4/docs/testing-standard.md): what a good test is, the forbidden cheats, and what mech-review checks versus code review. Alfredo specifics:
+The testing standard is [ek's](https://github.com/EricleungDK/ek/blob/v0/docs/testing-standard.md): what a good test is, the forbidden cheats, and what mech-review checks versus code review. Alfredo specifics:
 
 - **Gates:** `alfredo-tui/scripts/agent-gates.sh` (see `automation-runbook.md`).
 - **Test paths:** `alfredo-tui/tests/**`.
-- **Protected paths:** `.github/**`, `AGENTS.md`, `docs/agents/**`, `alfredo-tui/scripts/agent-*`. A change there is a `needs-human` entry: a human decides.
+- **Protected paths:** `.github/**`, `AGENTS.md`, `docs/agents/**`, `alfredo-tui/scripts/agent-*`, `alfredo-tui/.cargo/**` (cargo and cargo-mutants config). A change there is a `needs-human` entry: a human decides.
 - **Red first:** on `claude/` branches that change production code, the first commit is `test(red): ...`, touches test paths only, and its new tests fail.
 
 ## Reading the result
