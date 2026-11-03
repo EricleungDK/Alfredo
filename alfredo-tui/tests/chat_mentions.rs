@@ -606,3 +606,40 @@ fn a_cut_file_in_a_real_repository_is_named_by_attach() {
         )]
     );
 }
+
+#[test]
+fn a_file_exactly_at_the_budget_attaches_whole_and_says_nothing() {
+    let out = assemble(
+        &[candidate("edge.txt")],
+        |_| Ok("y".repeat(MAX_BYTES)),
+        |_| false,
+    );
+    assert!(out.notices.is_empty(), "{:?}", out.notices);
+    assert_eq!(out.refused, 0);
+    assert!(!out.block.contains("[truncated"));
+    let under = assemble(&[candidate("a.txt")], |_| Ok("small\n".into()), |_| false);
+    assert!(under.notices.is_empty() && under.refused == 0);
+}
+
+#[test]
+fn a_cut_file_is_not_counted_as_a_refusal_but_a_refused_one_is() {
+    let dir = repo();
+    let out = attach(dir.path(), "see @big.txt @gone.rs");
+    assert_eq!(out.notices.len(), 2, "{:?}", out.notices);
+    assert!(out.notices[0].starts_with("@big.txt: attached "));
+    assert!(out.notices[1].starts_with("@gone.rs: not attached"));
+    assert_eq!(out.refused, 1);
+    let only_cut = attach(dir.path(), "see @big.txt");
+    assert_eq!((only_cut.notices.len(), only_cut.refused), (1, 0));
+}
+
+#[test]
+fn a_file_refused_for_the_spent_budget_is_a_refusal() {
+    let out = assemble(
+        &[candidate("a.txt"), candidate("b.txt")],
+        |_| Ok("y".repeat(MAX_BYTES)),
+        |_| false,
+    );
+    assert_eq!(out.notices.len(), 1);
+    assert_eq!(out.refused, 1);
+}
