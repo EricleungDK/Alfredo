@@ -822,22 +822,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     work.tasks.workspace(),
                                     &prompt,
                                 );
-                                // One transcript row per refusal; the footer only points at them.
-                                if !attachment.notices.is_empty() {
+                                // One transcript row per refusal or cut; the footer counts
+                                // only refusals.
+                                if let Some(notice) = alfredo_tui::chat_mentions::refusal_footer(
+                                    attachment.refused,
+                                    tools_back,
+                                ) {
                                     refusal_notice_set = true;
-                                    work.app.notice = if tools_back {
-                                        format!(
-                                            "{} @path mention(s) not attached · reasons are listed in the transcript",
-                                            attachment.notices.len()
-                                        )
-                                    } else {
-                                        // Tool-free turn: keep the tools-off notice visible too.
-                                        format!(
-                                            "{} @path mention(s) not attached · {}",
-                                            attachment.notices.len(),
-                                            alfredo_tui::wayfinder::TOOLS_OFF_NOTICE
-                                        )
-                                    };
+                                    work.app.notice = notice;
                                 }
                                 work.app.sessions[turn.session].show_mention_refusals(
                                     turn.user_message,
