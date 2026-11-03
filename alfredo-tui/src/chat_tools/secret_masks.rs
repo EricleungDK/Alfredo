@@ -64,16 +64,22 @@ pub struct Mounts {
 
 impl Masks {
     /// How many files and directories are masked, for the count in a run's result note.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.files.len() + self.dirs.len()
     }
 
     /// Whether nothing is masked (templates are not masks).
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Build the mounts for these masks, creating the empty directory when one is needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the empty directory for the directory masks could not be created.
     pub fn mounts(&self) -> Result<Mounts, String> {
         let empty = if self.dirs.is_empty() {
             None
@@ -106,11 +112,19 @@ impl Masks {
 }
 
 /// Walk `root` (canonical) and collect its masks, or say why they cannot be collected.
+///
+/// # Errors
+///
+/// Returns the reason the walk was refused: an unreadable entry, or a depth or entry limit.
 pub fn scan(root: &Path) -> Result<Masks, String> {
     scan_with(root, VISIT_LIMIT)
 }
 
 /// [`scan`] with its own entry limit, so a test can reach the limit with a small tree.
+///
+/// # Errors
+///
+/// As [`scan`], with `visit_limit` as the entry limit.
 pub fn scan_with(root: &Path, visit_limit: usize) -> Result<Masks, String> {
     let mut scan = Scan {
         masks: Masks::default(),

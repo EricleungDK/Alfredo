@@ -13,6 +13,7 @@ fn clean(text: &str) -> String {
 
 /// True when `path` is an executable regular file. The one probe behind the
 /// doctor's installed-tool checks and the runtime sandbox preflight.
+#[must_use]
 pub fn worker_tool_ready(path: &str) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| {
         #[cfg(unix)]
@@ -52,12 +53,14 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// The bubblewrap path the preflight inspects. `ALFREDO_TEST_BWRAP_PATH` redirects
 /// only this probe (a test seam for hosts that have bubblewrap); it never changes
 /// the executable workers run.
+#[must_use]
 pub fn probe_path() -> String {
     std::env::var("ALFREDO_TEST_BWRAP_PATH").unwrap_or_else(|_| BWRAP.to_owned())
 }
 
 /// The fix to quote for a sandbox-start failure: the install hint only when the
 /// file is missing, otherwise the host-policy hint.
+#[must_use]
 pub fn sandbox_start_hint(installed: bool) -> &'static str {
     if installed {
         BWRAP_DENIED_FIX
@@ -121,27 +124,37 @@ fn clean_line(text: &str) -> String {
         .collect()
 }
 
-/// Whether `path` can create a sandbox. `cached` shares one probe per path for the
-/// life of the process (`/go`); `--doctor` always probes fresh.
+/// Whether `path` can create a sandbox. `cached` shares one successful probe per path
+/// for the life of the process (`/go`); a failed probe is never cached, so it is retried
+/// on the next call. `--doctor` always probes fresh.
+///
+/// # Errors
+///
+/// Returns bwrap's own words (or why it could not start or finish) when the probe fails.
 pub fn sandbox_probe_at(path: &str, cached: bool) -> Result<(), String> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static SEEN: OnceLock<Mutex<HashMap<String, Result<(), String>>>> = OnceLock::new();
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     if !cached {
         return run_probe(path);
     }
     let seen = SEEN.get_or_init(Default::default);
-    if let Some(known) = seen.lock().unwrap().get(path) {
-        return known.clone();
+    if seen
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(path)
+    {
+        return Ok(());
     }
-    let outcome = run_probe(path);
+    run_probe(path)?;
     seen.lock()
-        .unwrap()
-        .insert(path.to_owned(), outcome.clone());
-    outcome
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(path.to_owned());
+    Ok(())
 }
 
 /// The refusal text for a bubblewrap that is installed but cannot start a sandbox.
+#[must_use]
 pub fn sandbox_denied_message(stderr: &str) -> String {
     format!(
         "{SANDBOX_REFUSAL_PREFIX} {}. {BWRAP_DENIED_FIX}",
@@ -155,6 +168,7 @@ const SANDBOX_REFUSAL_PREFIX: &str = "Coding workers cannot start a sandbox:";
 /// How the interactive TUI shows a [`sandbox_denied_message`] that the one-line footer
 /// would cut before its fix: the footer leads with the fix, and the chat rows carry the
 /// cause and the whole fix (#608). `None` for any other message.
+#[must_use]
 pub fn sandbox_refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
     let cause = message
         .strip_prefix(SANDBOX_REFUSAL_PREFIX)?
@@ -174,6 +188,7 @@ pub fn sandbox_refusal_view(message: &str, command: &str) -> Option<(String, Vec
 /// Why coding workers cannot start, or `None` when the sandbox is usable: bubblewrap
 /// is missing (install hint), or it exists but cannot create a sandbox (probed once
 /// per process; host-policy hint).
+#[must_use]
 pub fn sandbox_blocker() -> Option<String> {
     let path = probe_path();
     sandbox_blocker_at(&path).or_else(|| {
@@ -184,6 +199,7 @@ pub fn sandbox_blocker() -> Option<String> {
 }
 
 /// The installed-tool half of the preflight: only a missing or non-executable file.
+#[must_use]
 pub fn sandbox_blocker_at(path: &str) -> Option<String> {
     (!worker_tool_ready(path)).then(|| BWRAP_FIX.to_owned())
 }
@@ -205,6 +221,7 @@ pub async fn model_server_check(provider: &Ollama, model: &str) -> Result<(), Mo
 }
 
 /// One-line setup error for a failed [`model_server_check`] (headless).
+#[must_use]
 pub fn model_check_message(model: &str, failure: &ModelCheck) -> String {
     match failure {
         ModelCheck::Missing(models) => format!(
