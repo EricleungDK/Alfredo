@@ -605,3 +605,69 @@ fn sandbox_denied_message_has_no_doubled_period_after_stderr_ending_in_one() {
         );
     }
 }
+
+const FIX: &str = "Allow bubblewrap to create user namespaces per your distro policy (README Troubleshooting: Worker fails at sandbox start)";
+
+#[test]
+fn sandbox_refusal_view_leads_the_footer_with_the_fix_and_keeps_the_whole_sentence_in_rows() {
+    let message = alfredo_tui::doctor::sandbox_denied_message("bwrap: No permissions.\n");
+    for command in ["/go", "/run"] {
+        let (notice, rows) =
+            alfredo_tui::doctor::sandbox_refusal_view(&message, command).expect("sandbox refusal");
+        assert_eq!(
+            notice,
+            format!(
+                "{command} refused: allow bubblewrap user namespaces · see README Troubleshooting"
+            )
+        );
+        assert_eq!(
+            rows,
+            vec![
+                "✗ Not started · Coding workers cannot start a sandbox: bwrap: No permissions."
+                    .to_owned(),
+                format!("  {FIX}"),
+            ]
+        );
+    }
+}
+
+#[test]
+fn sandbox_refusal_view_ignores_every_other_message() {
+    let denied = alfredo_tui::doctor::sandbox_denied_message("bwrap: denied");
+    for message in [
+        "Unknown task 9".to_owned(),
+        alfredo_tui::doctor::BWRAP_FIX.to_owned(),
+        // Right start, but not the sandbox-denied sentence: nothing to lead with.
+        "Coding workers cannot start a sandbox: bwrap: denied. Fix it yourself".to_owned(),
+        // Right end, wrong start.
+        denied.replacen("Coding workers cannot", "Workers cannot", 1),
+    ] {
+        assert_eq!(
+            alfredo_tui::doctor::sandbox_refusal_view(&message, "/go"),
+            None,
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn refusal_view_serves_config_and_sandbox_refusals_and_nothing_else() {
+    let denied = alfredo_tui::doctor::sandbox_denied_message("bwrap: denied");
+    let (notice, rows) = alfredo_tui::worker::refusal_view(&denied, "/run").expect("sandbox");
+    assert!(
+        notice.starts_with("/run refused: allow bubblewrap"),
+        "{notice}"
+    );
+    assert_eq!(rows.len(), 2);
+    let config = "Alfredo will not run in this repository: its Git config sets \"core.excludesFile\", and Git can run a program. Remove it with: git config --local --unset core.excludesFile";
+    let (notice, rows) = alfredo_tui::worker::refusal_view(config, "/run").expect("config");
+    assert_eq!(
+        notice,
+        "/go refused: git config --local --unset core.excludesFile (see the chat rows above)"
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        alfredo_tui::worker::refusal_view("Unknown task 9", "/go"),
+        None
+    );
+}
