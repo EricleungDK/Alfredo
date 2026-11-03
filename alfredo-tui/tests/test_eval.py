@@ -790,6 +790,21 @@ class CodeHealthTests(unittest.TestCase):
         with self.assertRaises(code_health.CodeHealthError):
             code_health.parse_clippy('src/a.rs:1:1: warning: x\nwarning: `alfredo-tui` (lib) generated 5 warnings\n')
 
+    def test_clippy_summary_duplicates_are_subtracted_from_that_target(self):
+        one = ('src/a.rs:1:1: warning: first\nsrc/b.rs:2:3: warning: second\n'
+               'warning: `alfredo-tui` (lib) generated 3 warnings (1 duplicate)\n'
+               'src/main.rs:9:1: warning: third\n'
+               'warning: `alfredo-tui` (bin "alfredo-tui") generated 1 warning\n')
+        self.assertEqual({'pedantic_lib': 2, 'pedantic_bin': 1, 'pedantic': 3}, code_health.parse_clippy(one))
+        two = ('src/a.rs:1:1: warning: first\n'
+               'warning: `alfredo-tui` (lib) generated 3 warnings (2 duplicates)\n'
+               'src/main.rs:9:1: warning: third\n'
+               'warning: `alfredo-tui` (bin "alfredo-tui") generated 1 warning\n')
+        self.assertEqual({'pedantic_lib': 1, 'pedantic_bin': 1, 'pedantic': 2}, code_health.parse_clippy(two))
+        with self.assertRaises(code_health.CodeHealthError):
+            code_health.parse_clippy('src/a.rs:1:1: warning: x\n'
+                                     'warning: `alfredo-tui` (lib) generated 5 warnings (1 duplicate)\n')
+
     def test_cargo_test_list_counts_tests_and_ignored_tests(self):
         listing = 'a::t1: test\na::t2: test\nb::t3: test\n\n3 tests, 0 benchmarks\n'
         self.assertEqual(3, code_health.count_listed_tests(listing))

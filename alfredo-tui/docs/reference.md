@@ -81,7 +81,7 @@ plan`.
 
 Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any model
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
-executable check as `--doctor`). If the sandbox still fails to start during a run, that
+executable check as `--doctor`). A bwrap that exists but cannot create a sandbox (user-namespace restriction, e.g. Ubuntu 24.04 AppArmor) is refused the same way before any model call, quoting bwrap's stderr and a host-policy fix instead of the install hint: a no-op `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` runs once per process (5 s limit) for `/go`, `--go` and `/run`, and fresh in `--doctor` (`FAIL sandbox`). If the sandbox still fails to start during a run, that
 is an environment failure, not a code failure: autopilot stops without repairs (no
 `--max-repairs` spent, even with `--max-repairs 0`) and the Reason line quotes the cause
 and the fix. Classified as a sandbox failure: the provider refusing an untrusted bwrap, a
@@ -1795,7 +1795,8 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   no approved command, including one an always-allow rule covers, returns a secret's contents
   (issue #469). See **Sandboxed (default)** under `run_command` for the limits. The workspace's
   root `.git` is not masked: `.git/config` and committed history stay visible to sandboxed
-  commands (a known limit).
+  commands (a known limit). The three exact template names `.env.example`, `.env.sample` and
+  `.env.template` are the one exception: a sandboxed `run_command` can read them (issue #598).
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
   tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
   no external diff or textconv. `ref`, `base` and `target` must be plain ref names
@@ -2125,7 +2126,7 @@ default false), `timeout_seconds` (1–600, default 120).
   with `nothing ran` and the reason, rather than started unmasked, when the scan cannot finish:
   more than 128 masks, more than 250,000 entries, nesting past 64 directories, an unreadable
   directory, a name that is not UTF-8 and matches the list, or a symbolic link whose own name
-  matches the list (remove or rename it). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and fail with Permission denied; they need the owner, do not retry on the host to read them` (a count only, never names). Not covered:
+  matches the list (remove or rename it). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them` (a count only, never names). Not covered:
   a file the command creates during the run; an `escalate: true` run, which is on the host and
   unmasked (its card says it runs outside the sandbox); a non-secret name hard-linked to a
   secret, which the read tools also allow; and the workspace's root `.git` directory, which
@@ -2135,6 +2136,16 @@ default false), `timeout_seconds` (1–600, default 120).
   paths they are given against the list. This is a known limit, open for the owner to decide.
   Every capability is dropped (`--cap-drop ALL`), so even as root the sandbox cannot remount
   a read-only bind and write `.git` or the host (#517).
+  Env templates (issue #598): a regular file named exactly `.env.example`, `.env.sample` or
+  `.env.template`, the same names `read_file` opens, is bound read-only over its own path
+  instead of masked. `cat .env.example` and `cp .env.example .env` work; appending to,
+  overwriting, renaming or deleting it fails and the host file is unchanged. Templates do not
+  count toward the 128-mask limit. At most 120 are bound per run; a further one is masked and
+  counted, so past 248 templates the run is refused for the mask limit. `.env`,
+  `.env.example.local`, `.envrc`, anything under a directory named `.env.example`, and a
+  template that is a symbolic link stay masked or refuse the run as before.
+  On a failing run with at least one mask, the usual `escalate: true` advice is left out, so
+  the two notes never give opposite next steps; the run still states the sandbox limits.
   The card reads `? Approve run_command · run sh test.sh` with
   `cwd . · sandboxed · network off · …` and the exact command.
 - **Escalated.** `escalate: true` runs on the host with your environment and network
