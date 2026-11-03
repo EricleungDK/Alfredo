@@ -429,11 +429,41 @@ fn sandbox_probe_is_the_readme_no_op_run_and_cached_except_for_the_doctor() {
             Err("bwrap: denied now".to_owned())
         );
     }
-    assert_eq!(fs::read_to_string(&bad_log).unwrap().lines().count(), 1);
+    assert_eq!(
+        fs::read_to_string(&bad_log).unwrap().lines().count(),
+        2,
+        "a failed probe is not cached: each call spawns it again"
+    );
     // The cached preflight text carries the stderr and the host-policy fix.
     let message = alfredo_tui::doctor::sandbox_denied_message("bwrap: denied now");
     assert!(message.contains("bwrap: denied now"), "{message}");
     assert!(message.contains("user namespaces"), "{message}");
+}
+
+#[test]
+fn sandbox_probe_retries_a_failure_and_caches_only_the_success() {
+    let fixture = Fixture::new();
+    // Fails on its first run, succeeds afterwards; the log line count is the run count.
+    let (flaky, log) = recording_bwrap(
+        &fixture.root,
+        "flakybwrap",
+        "[ \"$(wc -l < \"$0.log\")\" -ge 2 ] && exit 0\necho 'bwrap: not yet' >&2; exit 1",
+    );
+    let flaky = flaky.to_str().unwrap();
+    let runs = || fs::read_to_string(&log).unwrap().lines().count();
+    assert_eq!(
+        alfredo_tui::doctor::sandbox_probe_at(flaky, true),
+        Err("bwrap: not yet".to_owned())
+    );
+    assert_eq!(runs(), 1);
+    assert_eq!(alfredo_tui::doctor::sandbox_probe_at(flaky, true), Ok(()));
+    assert_eq!(
+        runs(),
+        2,
+        "the failure was probed again, not served from cache"
+    );
+    assert_eq!(alfredo_tui::doctor::sandbox_probe_at(flaky, true), Ok(()));
+    assert_eq!(runs(), 2, "the success is cached: no third spawn");
 }
 
 #[test]
