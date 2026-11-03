@@ -208,6 +208,22 @@ pub fn assemble(
     out
 }
 
+/// Footer notice for a turn whose `@path` mentions were refused, or `None` when none were.
+/// Cuts are not counted: only refusals reach the footer (the transcript lists every row).
+/// A tool-free turn keeps the tools-off notice visible beside the count.
+pub fn refusal_footer(refused: usize, tools_back: bool) -> Option<String> {
+    if refused > 0 {
+        let tail = if tools_back {
+            "reasons are listed in the transcript"
+        } else {
+            crate::wayfinder::TOOLS_OFF_NOTICE
+        };
+        Some(format!("{refused} @path mention(s) not attached · {tail}"))
+    } else {
+        None
+    }
+}
+
 /// Read one mentioned file from the working tree, or say why it is refused.
 /// Refusals are at least as strict as `read_file`: the same `resolve` (absolute and
 /// `..` paths, excluded names, symlink escape) and `read::text` (regular file,

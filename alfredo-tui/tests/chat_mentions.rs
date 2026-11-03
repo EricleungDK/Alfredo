@@ -1,5 +1,5 @@
 use alfredo_tui::chat_mentions::{
-    assemble, attach, complete, complete_within, Candidate, MAX_BYTES,
+    assemble, attach, complete, complete_within, refusal_footer, Candidate, MAX_BYTES,
 };
 use std::{fs, path::Path, process::Command};
 
@@ -642,4 +642,31 @@ fn a_file_refused_for_the_spent_budget_is_a_refusal() {
     );
     assert_eq!(out.notices.len(), 1);
     assert_eq!(out.refused, 1);
+}
+
+#[test]
+fn refusal_footer_is_silent_without_refusals() {
+    assert_eq!(refusal_footer(0, true), None);
+    assert_eq!(refusal_footer(0, false), None);
+}
+
+#[test]
+fn refusal_footer_counts_refusals_and_names_the_tools_state() {
+    assert_eq!(
+        refusal_footer(1, true).as_deref(),
+        Some("1 @path mention(s) not attached · reasons are listed in the transcript")
+    );
+    assert_eq!(
+        refusal_footer(2, true).as_deref(),
+        Some("2 @path mention(s) not attached · reasons are listed in the transcript")
+    );
+    let tools_off = format!(
+        "1 @path mention(s) not attached · {}",
+        alfredo_tui::wayfinder::TOOLS_OFF_NOTICE
+    );
+    assert_eq!(
+        refusal_footer(1, false).as_deref(),
+        Some(tools_off.as_str())
+    );
+    assert!(refusal_footer(2, false).unwrap().starts_with("2 @path"));
 }
