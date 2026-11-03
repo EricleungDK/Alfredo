@@ -6,7 +6,7 @@
 //! `--chat PROMPT --headless` ([`run_chat`]) runs one Chat Agent turn the same way;
 //! its Approval gate is answered by a scripted [`Policy`], never by a skip mode.
 use alfredo_tui::{
-    autopilot::{RunState, Status, TaskOutcome},
+    autopilot::{name_stopped_task, RunState, Status, TaskOutcome},
     chat_tools::approval::{Card, CardKind, Decision, Gate, Log, Outcome, Record},
     chat_tools::{MAX_STEPS, STEP_CAP_NOTICE},
     command_intent::Intent,
@@ -298,20 +298,6 @@ fn result_json(
         "repairs": status.repairs,
         "failed": failed,
     })
-}
-
-/// The run-level `autopilot` entry of a model-unreachable stop carries the id of the
-/// task that stopped, the one `/repair ID retry` and `--resume --headless` retry.
-fn name_stopped_task(result: &mut serde_json::Value, id: u64) {
-    let Some(entries) = result["failed"].as_array_mut() else {
-        return;
-    };
-    if let Some(entry) = entries
-        .iter_mut()
-        .find(|entry| entry["id"].is_null() && entry["title"] == "autopilot")
-    {
-        entry["id"] = id.into();
-    }
 }
 
 /// The model this run uses: an explicit `--model` as given (the conversation's saved

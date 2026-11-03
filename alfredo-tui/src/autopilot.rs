@@ -2743,3 +2743,17 @@ async fn integration_branch(
     }
     Ok(commit)
 }
+
+/// The run-level `autopilot` entry of a model-unreachable stop carries the id of the
+/// task that stopped, the one `/repair ID retry` and `--resume --headless` retry.
+pub fn name_stopped_task(result: &mut serde_json::Value, id: u64) {
+    let Some(entries) = result["failed"].as_array_mut() else {
+        return;
+    };
+    if let Some(entry) = entries
+        .iter_mut()
+        .find(|entry| entry["id"].is_null() && entry["title"] == "autopilot")
+    {
+        entry["id"] = id.into();
+    }
+}
