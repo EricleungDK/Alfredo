@@ -1,3 +1,4 @@
+mod exec_stub;
 use alfredo_tui::{
     conversations::{ConversationStore, Snapshot},
     model::App,
@@ -359,14 +360,11 @@ fn sandbox_preflight_names_bubblewrap_and_the_fix_only_when_it_is_unusable() {
 
 /// An executable `bwrap` stand-in that exists but refuses to build a sandbox.
 fn denying_bwrap(dir: &std::path::Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join("fakebwrap");
-    fs::write(
+    exec_stub::write_executable(
         &path,
         "#!/bin/sh\necho \"bwrap: setting up uid map: Permission denied\" >&2\nexit 1\n",
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
@@ -390,15 +388,12 @@ fn doctor_fails_when_bubblewrap_cannot_start_a_sandbox() {
 }
 
 fn recording_bwrap(dir: &std::path::Path, name: &str, body: &str) -> (PathBuf, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let log = dir.join(format!("{name}.log"));
     let path = dir.join(name);
-    fs::write(
+    exec_stub::write_executable(
         &path,
-        format!("#!/bin/sh\necho \"$*\" >> '{}'\n{body}\n", log.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("#!/bin/sh\necho \"$*\" >> '{}'\n{body}\n", log.display()),
+    );
     (path, log)
 }
 
