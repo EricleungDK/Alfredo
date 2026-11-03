@@ -190,6 +190,40 @@ fn scattered_write_file_changes_get_a_minimal_card_and_are_applied() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Issue #485: nobody pages a headless card, so one over the unpaged 80 lines is denied
+/// and nothing is written; one of exactly 80 is approved as before.
+#[test]
+fn workspace_edits_denies_a_card_that_needs_paging() {
+    let root = repository("needs-paging");
+    // A new file's card is its `@@ line 1 @@` header plus one line per added line.
+    let body = |lines: usize| (1..=lines).map(|n| format!("+{n}\n")).collect::<String>();
+    for (lines, outcome, written) in [(79, "applied", true), (80, "denied", false)] {
+        let name = format!("new{lines}.txt");
+        let fixture = scripted_chat(vec![
+            tool_calls(&[("write_file", json!({"path": name, "content": body(lines)}))]),
+            done("done"),
+        ]);
+        let output = run(
+            &root,
+            &fixture,
+            &[
+                "--chat",
+                "write it",
+                "--headless",
+                "--approve",
+                "workspace-edits",
+            ],
+        );
+        let value = result(&output);
+        assert_eq!(
+            value["approvals"][0]["outcome"], outcome,
+            "{lines}: {value}"
+        );
+        assert_eq!(root.join("workspace").join(&name).exists(), written);
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn stream_json_chat_prints_tool_events_then_the_result_object() {
     let root = repository("stream");

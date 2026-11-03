@@ -1390,18 +1390,6 @@ mod tests {
             .contains("workspace-edits"));
     }
 
-    /// Issue #485: nobody pages a headless card, so one over the unpaged 80 lines is denied.
-    #[test]
-    fn workspace_edits_denies_a_card_that_needs_paging() {
-        let policy = Policy::WorkspaceEdits;
-        let mut card = card("write_file", CardKind::Edit, "new.txt");
-        card.preview = (0..80).map(|n| format!("+{n}\n")).collect();
-        assert_eq!(policy.decide(&card), Decision::Approve);
-        card.preview.push_str("+one more\n");
-        assert!(card.paged());
-        assert_eq!(policy.decide(&card), Decision::Deny);
-    }
-
     #[test]
     fn results_are_classified_ok_denied_malformed_or_tool_error() {
         use alfredo_tui::chat_tools::approval::DENIED;

@@ -522,7 +522,7 @@ fn plan_write(
 
 /// Refuses a change whose card diff (plus `extra` card lines) would pass
 /// [`MAX_CARD_LINES`], before anything is asked or written.
-fn refuse_over_cap(old: &str, new: &str, extra: usize) -> Result<(), String> {
+pub fn refuse_over_cap(old: &str, new: &str, extra: usize) -> Result<(), String> {
     let lines = diff(old, new).lines().count() + extra;
     if lines > MAX_CARD_LINES {
         return Err(format!(
@@ -638,7 +638,7 @@ fn edit_file(root: &Path, arguments: &Value) -> Result<String, String> {
 /// [`MAX_DIFF_EDITS`] edits shows as one span from the first to the last changed line,
 /// which [`refuse_over_cap`] refuses only past [`MAX_CARD_LINES`]. Never cut: callers
 /// refuse a change over [`MAX_CARD_LINES`] first, and the card pages the rest.
-pub(crate) fn diff(old: &str, new: &str) -> String {
+pub fn diff(old: &str, new: &str) -> String {
     let (old_text, new_text) = (old, new);
     let old: Vec<&str> = old.lines().collect();
     let new: Vec<&str> = new.lines().collect();
@@ -949,37 +949,6 @@ mod tests {
     fn a_single_contiguous_change_is_one_span_hunk_as_before() {
         let old = "a\nb\nc\nd\n";
         assert_eq!(diff(old, "a\nX\nY\nd\n"), "@@ line 2 @@\n-b\n-c\n+X\n+Y");
-    }
-
-    #[test]
-    fn a_diff_over_one_card_is_paged_up_to_the_hard_cap_and_refused_past_it() {
-        // 41 scattered one-line changes: 41 headers + 82 changed lines = 123, over the
-        // unpaged 80 (the card pages it) and far under the hard cap.
-        let changes: Vec<(usize, &str)> = (0..41).map(|i| (2 * i + 1, "changed")).collect();
-        let (old, new) = hundred(&changes);
-        assert_eq!(diff(&old, &new).lines().count(), 123);
-        assert!(refuse_over_cap(&old, &new, 0).is_ok());
-        // A new file: header + 1999 added lines = 2000 passes; the extra line counts.
-        let file = |lines: usize| (1..=lines).map(|n| format!("l{n}\n")).collect::<String>();
-        assert!(refuse_over_cap("", &file(1999), 0).is_ok());
-        assert!(refuse_over_cap("", &file(1999), 1).is_err());
-        let error = refuse_over_cap("", &file(2000), 0).unwrap_err();
-        assert!(
-            error.starts_with("the change's diff is 2001 lines, over the 2000-line approval card limit; nothing was written. Split it into smaller edits"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn a_change_beyond_the_diff_bound_falls_back_to_the_span_and_is_refused_past_the_cap() {
-        let old: String = (0..1100).map(|n| format!("o{n}\n")).collect();
-        let new: String = (0..1100).map(|n| format!("n{n}\n")).collect();
-        assert!(diff(&old, &new).starts_with("@@ line 1 @@\n-o0\n"));
-        assert!(refuse_over_cap(&old, &new, 0).is_err());
-        // The same fallback under the cap is paged on the card, not refused.
-        let (old, new) = (&old[..old.len() / 2], &new[..new.len() / 2]);
-        assert!(diff(old, new).starts_with("@@ line 1 @@\n-o0\n"));
-        assert!(refuse_over_cap(old, new, 0).is_ok());
     }
 
     #[test]

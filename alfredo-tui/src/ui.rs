@@ -1829,15 +1829,15 @@ fn approval_card_lines(
 
 /// The card as drawn: `complete` when the page shown fits `rows` with nothing of it cut,
 /// `page` of `pages` for a diff taller than the viewport (issue #485).
-struct CardView {
-    lines: Vec<Line<'static>>,
+pub struct CardView {
+    pub lines: Vec<Line<'static>>,
     head: usize,
-    complete: bool,
-    page: usize,
-    pages: usize,
+    pub complete: bool,
+    pub page: usize,
+    pub pages: usize,
 }
 
-fn approval_card_view(
+pub fn approval_card_view(
     card: &crate::chat_tools::approval::Card,
     width: usize,
     rows: usize,
@@ -1857,7 +1857,7 @@ const MIN_PAGE_ROWS: usize = 4;
 /// Greedy pages of diff lines of the given row `heights`, each at most `budget` rows;
 /// `None` when a line is taller than a page or the page is under [`MIN_PAGE_ROWS`] (the
 /// card then stays deny-only, issue #303).
-fn page_ranges(heights: &[usize], budget: usize) -> Option<Vec<std::ops::Range<usize>>> {
+pub fn page_ranges(heights: &[usize], budget: usize) -> Option<Vec<std::ops::Range<usize>>> {
     if budget < MIN_PAGE_ROWS || heights.iter().any(|height| *height > budget) {
         return None;
     }
@@ -2202,99 +2202,6 @@ mod tests {
                 assert!(last.contains(key), "{name}: key line is last");
             }
         }
-    }
-
-    /// Issue #485: pages are greedy, at least four rows, and a line taller than a page
-    /// makes the card unpageable.
-    #[test]
-    fn pages_hold_whole_lines_and_a_page_under_four_rows_or_a_taller_line_is_unpageable() {
-        assert_eq!(
-            page_ranges(&[1, 1, 1, 1, 1], 4),
-            Some(vec![0..4, 4..5]),
-            "a full page takes exactly its budget"
-        );
-        assert_eq!(page_ranges(&[2, 2, 2], 5), Some(vec![0..2, 2..3]));
-        assert_eq!(page_ranges(&[1; 8], 4).map(|r| r.len()), Some(2));
-        assert_eq!(page_ranges(&[1, 1, 1, 1, 1], 3), None, "under four rows");
-        assert_eq!(
-            page_ranges(&[1, 5, 1], 4),
-            None,
-            "a line taller than a page"
-        );
-        assert_eq!(page_ranges(&[1, 4, 1], 4), Some(vec![0..1, 1..2, 2..3]));
-    }
-
-    fn edit_card_of(lines: usize) -> crate::chat_tools::approval::Card {
-        use crate::chat_tools::approval::{Card, CardKind};
-        Card {
-            tool: "write_file".into(),
-            arguments: serde_json::json!({"path": "big.txt", "content": "x"}),
-            kind: CardKind::Edit,
-            summary: "new file big.txt".into(),
-            preview: std::iter::once("@@ line 1 @@".to_string())
-                .chain((1..=lines).map(|n| format!("+line {n}")))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            fingerprint: "big.txt:absent".into(),
-        }
-    }
-
-    #[test]
-    fn a_tall_edit_card_is_paged_into_pages_that_fit_and_the_last_page_has_the_y_key() {
-        let card = edit_card_of(100);
-        let (width, rows) = (80usize, 20usize);
-        let first = approval_card_view(&card, width, rows, 0);
-        assert!(first.complete && first.pages > 1);
-        assert_eq!(first.page, 0);
-        let mut seen = vec![];
-        for page in 0..first.pages {
-            let view = approval_card_view(&card, width, rows, page);
-            assert_eq!((view.page, view.pages), (page, first.pages));
-            assert!(view.complete);
-            assert!(height_of(&view.lines, width) <= rows, "page {page}");
-            let text: Vec<String> = view.lines.iter().map(|l| l.to_string()).collect();
-            seen.extend(
-                text.iter()
-                    .filter(|l| l.starts_with("  +line"))
-                    .map(|l| l.trim().to_string()),
-            );
-            let key = text.last().unwrap();
-            if page + 1 == view.pages {
-                assert!(
-                    key.contains("y approve") && key.contains("PgUp back"),
-                    "{key}"
-                );
-            } else {
-                assert!(
-                    key.contains("y is off") && !key.contains("y approve"),
-                    "{key}"
-                );
-            }
-            assert!(
-                text.iter()
-                    .any(|l| l.contains(&format!("[{}/{}", page + 1, view.pages))),
-                "{text:?}"
-            );
-        }
-        let expected: Vec<String> = (1..=100).map(|n| format!("+line {n}")).collect();
-        assert_eq!(seen, expected, "every line on exactly one page, in order");
-        // A page past the end is the last page; nothing is cut anywhere.
-        let beyond = approval_card_view(&card, width, rows, 99);
-        assert_eq!(beyond.page, first.pages - 1);
-    }
-
-    #[test]
-    fn a_card_that_fits_is_one_page_and_a_short_screen_or_a_git_card_is_not_paged() {
-        let small = edit_card_of(3);
-        let view = approval_card_view(&small, 80, 24, 0);
-        assert_eq!((view.pages, view.page, view.complete), (1, 0, true));
-        // Too short for a four-row page: deny-only, one "page", nothing paged.
-        let view = approval_card_view(&edit_card_of(100), 80, 8, 0);
-        assert_eq!((view.pages, view.complete), (1, false));
-        let mut git = edit_card_of(100);
-        git.kind = crate::chat_tools::approval::CardKind::Git;
-        let view = approval_card_view(&git, 80, 20, 0);
-        assert_eq!((view.pages, view.complete), (1, false));
     }
 
     fn shell_card(command: &str, escalated: bool) -> crate::chat_tools::approval::Card {

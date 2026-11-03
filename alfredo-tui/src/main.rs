@@ -1508,20 +1508,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         let _ = request.reply.send(decision);
                                     }
                                 }
-                                None if answer != 'n'
-                                    && !work.app.sessions[index].approval_whole()
-                                    && work.app.sessions[index].approval_pages() > 1 =>
-                                {
-                                    work.app.notice = "Page the card to its last page first (PgDn): y and a stay off until every page was shown, or press n".into();
-                                }
-                                None if answer != 'n'
-                                    && !work.app.sessions[index].approval_whole() =>
-                                {
-                                    work.app.notice = "The whole card is not on screen, so y and a are off: enlarge the terminal or press n".into();
-                                }
                                 None => {
-                                    work.app.notice =
-                                        "Read the approval card first; press y or n again (a always allows, not for push)".into();
+                                    let session = &work.app.sessions[index];
+                                    work.app.notice = match alfredo_tui::model::arm_notice(
+                                        answer,
+                                        session.approval_whole(),
+                                        session.approval_pages(),
+                                    ) {
+                                        alfredo_tui::model::ArmNotice::PageFirst => "Page the card to its last page first (PgDn): y and a stay off until every page was shown, or press n",
+                                        alfredo_tui::model::ArmNotice::EnlargeTerminal => "The whole card is not on screen, so y and a are off: enlarge the terminal or press n",
+                                        alfredo_tui::model::ArmNotice::ReadFirst => "Read the approval card first; press y or n again (a always allows, not for push)",
+                                    }
+                                    .into();
                                 }
                             }
                         }
@@ -2378,33 +2376,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::PageDown if work.tasks.agent_shown().is_some() => {
                             work.tasks.agent_shown().unwrap().scroll_rows(10);
                         }
-                        KeyCode::PageUp => {
-                            if work.app.models_visible {
-                                work.app.models_scroll = work.app.models_scroll.saturating_sub(10);
-                                continue;
-                            }
-                            if work.tasks.visible {
-                                work.tasks.page_details(false);
-                                continue;
-                            }
-                            // A card taller than the screen is paged first (issue #485).
-                            if !work.app.sessions[index].page_approval(false) {
-                                work.app.sessions[index].scroll_rows(-10);
-                            }
-                        }
-                        KeyCode::PageDown => {
-                            if work.app.models_visible {
-                                work.app.models_scroll = work.app.models_scroll.saturating_add(10);
-                                continue;
-                            }
-                            if work.tasks.visible {
-                                work.tasks.page_details(true);
-                                continue;
-                            }
-                            if !work.app.sessions[index].page_approval(true) {
-                                work.app.sessions[index].scroll_rows(10);
-                            }
-                        }
                         KeyCode::Char(ch)
                             if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
                         {
@@ -2417,7 +2388,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 work.tasks.workspace(),
                             );
                         }
-                        _ => {}
+                        // PgUp/PgDn (issue #485): the models list, the task details, or the
+                        // chat, where a card taller than the screen is paged first.
+                        code => {
+                            if let Some(forward) = alfredo_tui::model::page_direction(code) {
+                                match alfredo_tui::model::page_key_target(
+                                    work.app.models_visible,
+                                    work.tasks.visible,
+                                ) {
+                                    alfredo_tui::model::PageKeyTarget::Models => {
+                                        work.app.models_scroll =
+                                            alfredo_tui::model::models_scroll_step(
+                                                work.app.models_scroll,
+                                                forward,
+                                            );
+                                        continue;
+                                    }
+                                    alfredo_tui::model::PageKeyTarget::Details => {
+                                        work.tasks.page_details(forward);
+                                        continue;
+                                    }
+                                    alfredo_tui::model::PageKeyTarget::Chat => {
+                                        work.app.sessions[index].page_key(forward);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Event::Paste(_) if work.app.pane.focus.is_some() => {}

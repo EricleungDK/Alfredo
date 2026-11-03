@@ -410,6 +410,83 @@ pub struct ApprovalPaging {
     size: (u16, usize),
 }
 
+/// The page after PgUp/PgDn from `page` of `pages` (at least 2), clamped at both ends.
+pub fn page_step(page: usize, pages: usize, forward: bool) -> usize {
+    if forward {
+        (page + 1).min(pages - 1)
+    } else {
+        page.saturating_sub(1)
+    }
+}
+
+/// Rows PgUp (negative) and PgDn (positive) scroll the transcript.
+pub fn page_scroll_rows(forward: bool) -> i32 {
+    if forward {
+        10
+    } else {
+        -10
+    }
+}
+
+/// Rows PgUp/PgDn move the models list.
+pub fn models_scroll_step(scroll: u16, forward: bool) -> u16 {
+    if forward {
+        scroll.saturating_add(10)
+    } else {
+        scroll.saturating_sub(10)
+    }
+}
+
+/// The paging direction a key stands for: `Some(true)` PgDn, `Some(false)` PgUp.
+pub fn page_direction(code: crossterm::event::KeyCode) -> Option<bool> {
+    match code {
+        crossterm::event::KeyCode::PageDown => Some(true),
+        crossterm::event::KeyCode::PageUp => Some(false),
+        _ => None,
+    }
+}
+
+/// What PgUp/PgDn move: the models list, the task details, or the chat (card or transcript).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageKeyTarget {
+    Models,
+    Details,
+    Chat,
+}
+
+pub fn page_key_target(models_visible: bool, details_visible: bool) -> PageKeyTarget {
+    if models_visible {
+        PageKeyTarget::Models
+    } else if details_visible {
+        PageKeyTarget::Details
+    } else {
+        PageKeyTarget::Chat
+    }
+}
+
+/// Why `y` or `a` did not answer a card although the key was otherwise accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArmNotice {
+    /// A paged card: page to the last page first (PgDn).
+    PageFirst,
+    /// The whole card is not on screen.
+    EnlargeTerminal,
+    /// Not armed yet (or `n`): read the card first.
+    ReadFirst,
+}
+
+/// The notice for an answer `key` that decided nothing, given whether the last draw
+/// showed the whole card and how many pages it has.
+pub fn arm_notice(key: char, whole: bool, pages: usize) -> ArmNotice {
+    if key != 'n' && !whole && pages > 1 {
+        ArmNotice::PageFirst
+    } else if key != 'n' && !whole {
+        ArmNotice::EnlargeTerminal
+    } else {
+        ArmNotice::ReadFirst
+    }
+}
+
 impl Session {
     pub fn new(model: String) -> Self {
         Self {
@@ -1372,13 +1449,17 @@ impl Session {
         if self.pending_approval().is_none() || paging.pages < 2 {
             return false;
         }
-        paging.page = if forward {
-            (paging.page + 1).min(paging.pages - 1)
-        } else {
-            paging.page.saturating_sub(1)
-        };
+        paging.page = page_step(paging.page, paging.pages, forward);
         self.approval_paging.set(paging);
         true
+    }
+
+    /// PgUp/PgDn on the transcript: a paged card takes the key, otherwise it scrolls the
+    /// transcript by [`page_scroll_rows`] (issue #485).
+    pub fn page_key(&self, forward: bool) {
+        if !self.page_approval(forward) {
+            self.scroll_rows(page_scroll_rows(forward));
+        }
     }
 
     /// Pages of the pending card as last drawn (1 when it is not paged).
