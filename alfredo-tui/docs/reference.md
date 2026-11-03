@@ -324,7 +324,8 @@ Approval gate, answered by a scripted policy instead of a card:
 `@path` mentions in the prompt are attached exactly as in interactive chat (working-tree
 content of regular files inside the repository; symlinks, ignored untracked files and
 excluded names are refused; at most 8 files and 32 KiB per prompt). Each mention that is not
-attached gets one stderr line (`@path: not attached (reason)`), and the JSON result gains
+attached gets one stderr line (`@path: not attached (reason)`), a file cut to the 32 KiB
+budget gets `@path: attached N of M bytes (...)`, and the JSON result gains
 `"attached": ["a.txt"]` only when something was attached.
 
 PROMPT `-` reads the prompt from stdin to EOF (`git diff | alfredo-tui --chat - --headless`).
@@ -2293,7 +2294,9 @@ size limit, and it is kept in memory only (not restored after a restart).
   including a symlinked directory in the path and links that stay inside the repository;
   directories, binary and non-UTF-8 files; files over 256 KiB.
 - Bounds per prompt: at most 8 distinct mentions and 32 KiB of file text; a longer file
-  is cut with `[truncated: N of M bytes]`, and mentions past the budget are not attached.
+  is cut with `[truncated: N of M bytes]` and says so in one dim row (`@big.txt: attached
+  32768 of 66890 bytes (32 KiB per-prompt limit; the model sees the first part)`), and
+  mentions past the budget are not attached. A cut file is not counted in the footer.
 - Anything that looks like a path (contains `/` or `.`) but cannot be attached shows a
   notice naming it and the reason, for example `@calc.py: not attached (no such file or
   directory: calc.py)`. A bare `@word` that is not a readable file is left alone silently.

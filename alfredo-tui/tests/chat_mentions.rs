@@ -1,4 +1,6 @@
-use alfredo_tui::chat_mentions::{attach, complete, complete_within};
+use alfredo_tui::chat_mentions::{
+    assemble, attach, complete, complete_within, refusal_footer, Candidate, MAX_BYTES,
+};
 use std::{fs, path::Path, process::Command};
 
 fn git(root: &Path, args: &[&str]) {
@@ -531,4 +533,140 @@ fn no_head_commit_gives_one_notice() {
     let out = attach(dir.path(), "@calc.py");
     assert!(out.block.is_empty());
     assert_eq!(out.notices.len(), 1);
+}
+
+fn candidate(path: &str) -> Candidate {
+    Candidate {
+        path: path.into(),
+        strict: true,
+        quoted: false,
+    }
+}
+
+const CUT_SUFFIX: &str = "(32 KiB per-prompt limit; the model sees the first part)";
+
+#[test]
+fn a_file_longer_than_the_budget_gets_one_cut_notice() {
+    let out = assemble(
+        &[candidate("big.txt")],
+        |_| Ok("y".repeat(MAX_BYTES + 1)),
+        |_| false,
+    );
+    assert_eq!(
+        out.notices,
+        [format!(
+            "@big.txt: attached {MAX_BYTES} of {} bytes {CUT_SUFFIX}",
+            MAX_BYTES + 1
+        )]
+    );
+    assert!(out.block.contains("FILE big.txt"));
+    assert_eq!(out.files, ["big.txt"]);
+}
+
+#[test]
+fn the_cut_notice_counts_whole_characters_not_the_budget() {
+    let out = assemble(
+        &[candidate("big.txt")],
+        |_| Ok("\u{20ac}".repeat(20_000)),
+        |_| false,
+    );
+    assert_eq!(
+        out.notices,
+        [format!(
+            "@big.txt: attached 32766 of 60000 bytes {CUT_SUFFIX}"
+        )]
+    );
+}
+
+#[test]
+fn the_notice_reports_what_the_second_file_got_of_the_remaining_budget() {
+    let out = assemble(
+        &[candidate("a.txt"), candidate("b.txt")],
+        |_| Ok("y".repeat(MAX_BYTES / 2 + 10)),
+        |_| false,
+    );
+    assert_eq!(
+        out.notices,
+        [format!(
+            "@b.txt: attached {} of {} bytes {CUT_SUFFIX}",
+            MAX_BYTES / 2 - 10,
+            MAX_BYTES / 2 + 10
+        )]
+    );
+}
+
+#[test]
+fn a_cut_file_in_a_real_repository_is_named_by_attach() {
+    let dir = repo();
+    let out = attach(dir.path(), "review @big.txt");
+    assert_eq!(
+        out.notices,
+        [format!(
+            "@big.txt: attached {MAX_BYTES} of 102400 bytes {CUT_SUFFIX}"
+        )]
+    );
+}
+
+#[test]
+fn a_file_exactly_at_the_budget_attaches_whole_and_says_nothing() {
+    let out = assemble(
+        &[candidate("edge.txt")],
+        |_| Ok("y".repeat(MAX_BYTES)),
+        |_| false,
+    );
+    assert!(out.notices.is_empty(), "{:?}", out.notices);
+    assert_eq!(out.refused, 0);
+    assert!(!out.block.contains("[truncated"));
+    let under = assemble(&[candidate("a.txt")], |_| Ok("small\n".into()), |_| false);
+    assert!(under.notices.is_empty() && under.refused == 0);
+}
+
+#[test]
+fn a_cut_file_is_not_counted_as_a_refusal_but_a_refused_one_is() {
+    let dir = repo();
+    let out = attach(dir.path(), "see @big.txt @gone.rs");
+    assert_eq!(out.notices.len(), 2, "{:?}", out.notices);
+    assert!(out.notices[0].starts_with("@big.txt: attached "));
+    assert!(out.notices[1].starts_with("@gone.rs: not attached"));
+    assert_eq!(out.refused, 1);
+    let only_cut = attach(dir.path(), "see @big.txt");
+    assert_eq!((only_cut.notices.len(), only_cut.refused), (1, 0));
+}
+
+#[test]
+fn a_file_refused_for_the_spent_budget_is_a_refusal() {
+    let out = assemble(
+        &[candidate("a.txt"), candidate("b.txt")],
+        |_| Ok("y".repeat(MAX_BYTES)),
+        |_| false,
+    );
+    assert_eq!(out.notices.len(), 1);
+    assert_eq!(out.refused, 1);
+}
+
+#[test]
+fn refusal_footer_is_silent_without_refusals() {
+    assert_eq!(refusal_footer(0, true), None);
+    assert_eq!(refusal_footer(0, false), None);
+}
+
+#[test]
+fn refusal_footer_counts_refusals_and_names_the_tools_state() {
+    assert_eq!(
+        refusal_footer(1, true).as_deref(),
+        Some("1 @path mention(s) not attached · reasons are listed in the transcript")
+    );
+    assert_eq!(
+        refusal_footer(2, true).as_deref(),
+        Some("2 @path mention(s) not attached · reasons are listed in the transcript")
+    );
+    let tools_off = format!(
+        "1 @path mention(s) not attached · {}",
+        alfredo_tui::wayfinder::TOOLS_OFF_NOTICE
+    );
+    assert_eq!(
+        refusal_footer(1, false).as_deref(),
+        Some(tools_off.as_str())
+    );
+    assert!(refusal_footer(2, false).unwrap().starts_with("2 @path"));
 }
