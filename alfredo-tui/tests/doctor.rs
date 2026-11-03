@@ -586,3 +586,22 @@ fn doctor_notes_the_context_window_setting() {
         assert!(text.contains(expected), "{text}");
     }
 }
+
+#[test]
+fn sandbox_denied_message_has_no_doubled_period_after_stderr_ending_in_one() {
+    for stderr in [
+        "bwrap: denied.",
+        "bwrap: denied.\n",
+        "bwrap: denied",
+        "bwrap: denied..\n",
+    ] {
+        let message = alfredo_tui::doctor::sandbox_denied_message(stderr);
+        assert!(!message.contains(".."), "{stderr:?} -> {message}");
+        assert!(
+            message.starts_with(
+                "Coding workers cannot start a sandbox: bwrap: denied. Allow bubblewrap"
+            ),
+            "{stderr:?} -> {message}"
+        );
+    }
+}
