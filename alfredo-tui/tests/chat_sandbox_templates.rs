@@ -103,3 +103,23 @@ fn templates_past_the_bind_budget_are_masked_and_then_count() {
     assert_eq!(masks.len(), 2);
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn masks_are_empty_only_when_nothing_is_masked() {
+    let root = scratch("is-empty");
+    assert!(scan(&root).unwrap().is_empty());
+    fs::write(root.join(".env.example"), "A=1").unwrap();
+    let templates_only = scan(&root).unwrap();
+    assert_eq!(templates_only.templates.len(), 1);
+    assert!(templates_only.is_empty(), "templates are not masks");
+    fs::write(root.join(".env"), "x").unwrap();
+    let with_file = scan(&root).unwrap();
+    assert!(!with_file.is_empty());
+    assert_eq!(with_file.len(), 1);
+    fs::remove_file(root.join(".env")).unwrap();
+    fs::create_dir_all(root.join(".ssh")).unwrap();
+    let with_dir = scan(&root).unwrap();
+    assert!(!with_dir.is_empty());
+    assert_eq!(with_dir.len(), 1);
+    let _ = fs::remove_dir_all(root);
+}
