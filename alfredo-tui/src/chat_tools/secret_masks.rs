@@ -110,7 +110,8 @@ pub fn scan(root: &Path) -> Result<Masks, String> {
     scan_with(root, VISIT_LIMIT)
 }
 
-fn scan_with(root: &Path, visit_limit: usize) -> Result<Masks, String> {
+/// [`scan`] with its own entry limit, so a test can reach the limit with a small tree.
+pub fn scan_with(root: &Path, visit_limit: usize) -> Result<Masks, String> {
     let mut scan = Scan {
         masks: Masks::default(),
         visits: 0,
@@ -397,26 +398,6 @@ mod tests {
         let error = scan_with(&root, 5).unwrap_err();
         assert!(error.contains("more than 5 entries"), "{error}");
         assert!(scan_with(&root, 10).is_ok());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn the_entry_limit_refusal_names_the_top_level_directory_with_the_most_entries() {
-        let root = scratch("biggest");
-        fs::create_dir_all(root.join("small")).unwrap();
-        fs::write(root.join("small/f0"), "").unwrap();
-        for index in 0..8 {
-            fs::create_dir_all(root.join("big/inner")).unwrap();
-            fs::write(root.join(format!("big/inner/f{index}")), "").unwrap();
-        }
-        let error = scan_with(&root, 5).unwrap_err();
-        assert!(error.contains("more than 5 entries"), "{error}");
-        assert!(
-            error.contains("big (") && !error.contains("small ("),
-            "{error}"
-        );
-        assert!(!error.contains("escalate"), "{error}");
-        assert!(scan_with(&root, 100).is_ok());
         let _ = fs::remove_dir_all(root);
     }
 
