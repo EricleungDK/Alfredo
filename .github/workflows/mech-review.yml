@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   mech-review:
-    uses: EricleungDK/ek/.github/workflows/mech-review.yml@v0
+    uses: EricleungDK/ek/.github/workflows/mech-review.yml@test/all-fixes
     with:
       stack: rust
       rust-toolchain: 1.96.0
