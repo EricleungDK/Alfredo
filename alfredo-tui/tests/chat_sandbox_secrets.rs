@@ -218,6 +218,63 @@ fn a_symlink_into_a_secret_directory_reads_the_mask() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Whether this process is root, which reads any directory and so cannot test an
+/// unreadable one.
+fn is_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
+        .unwrap_or(false)
+}
+
+/// Restore the mode of `path` so the workspace can be removed after the test.
+fn chmod(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Issue #581: a non-secret directory the scan cannot list is bound over with the empty
+/// read-only directory instead of refusing every run.
+#[test]
+fn an_unreadable_non_secret_directory_runs_and_looks_empty() {
+    if is_root() {
+        eprintln!("skipped: root reads every directory");
+        return;
+    }
+    let root = workspace("unreadable");
+    write(&root, "a.txt", "x");
+    write(&root, "data/pg/x", "");
+    chmod(&root.join("data/pg"), 0o000);
+    let out = run(&root, "true");
+    let listed = run(&root, "ls -A data/pg | wc -l; echo END");
+    chmod(&root.join("data/pg"), 0o755);
+    assert!(out.contains("exit code 0"), "the run was refused: {out}");
+    assert!(!out.contains("nothing ran"), "{out}");
+    assert!(listed.contains("0\nEND"), "data/pg is not empty: {listed}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #581: more than 250,000 entries no longer refuses, and a secret in the tree stays
+/// masked.
+#[test]
+fn a_workspace_over_the_old_entry_limit_runs_and_keeps_env_masked() {
+    let root = workspace("big");
+    write(&root, ".env", &format!("BIG={SECRET}\n"));
+    for dir in 0..300 {
+        let base = root.join(format!("bulk/d{dir}"));
+        fs::create_dir_all(&base).unwrap();
+        for file in 0..1000 {
+            fs::File::create(base.join(format!("f{file}"))).unwrap();
+        }
+    }
+    let out = run(&root, "cat .env; echo END");
+    assert!(out.contains("END"), "the run was refused: {out}");
+    assert!(!out.contains("nothing ran"), "{out}");
+    assert!(!out.contains(SECRET), "the mask leaked: {out}");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn too_many_secret_masks_refuse_the_run_and_run_nothing() {
     let root = workspace("cap");
