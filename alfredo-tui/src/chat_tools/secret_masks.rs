@@ -3,6 +3,9 @@
 //! the read tools refuse. Before each sandboxed run, every workspace entry the secret
 //! predicate ([`crate::planning_context::secret`]) matches is hidden: a secret file is
 //! bound over with `/dev/null`, and a secret directory with an empty read-only directory.
+//! The one exception is the three exact env template file names the read tools open
+//! ([`crate::planning_context::read_secret`], issue #598): a regular file of that name is
+//! bound read-only over itself instead, so the sandbox can read it but never change it.
 //!
 //! The walk is bounded and does not follow symbolic links. It includes git-ignored files,
 //! which are exactly the ones a `.gitignore` leaves out of Git. Only the workspace's own
@@ -22,7 +25,12 @@ use std::{
 /// Most masks (files and directories together) one run may carry. The masks are read-only
 /// binds declared with the sandbox's other read-only bindings, which the execution
 /// validator caps at 256 entries; the rest of the run takes a handful of those.
-pub(crate) const LIMIT: usize = 128;
+pub const LIMIT: usize = 128;
+/// Most env templates one run binds read-only. They share the sandbox's 256-entry
+/// read-only binding cap with the masks ([`LIMIT`]) and the run's other binds, so a surplus
+/// template is masked like any secret rather than bound, and then counts toward [`LIMIT`], so
+/// past `LIMIT + TEMPLATE_LIMIT` (248) templates the run is refused.
+pub const TEMPLATE_LIMIT: usize = 120;
 /// Entries one walk may visit before it refuses, so a huge tree cannot stall a run.
 const VISIT_LIMIT: usize = 250_000;
 /// Directory depth one walk may descend before it refuses.
@@ -31,44 +39,58 @@ const DEPTH_LIMIT: usize = 64;
 /// The workspace entries the sandbox must not see. Paths are absolute and canonical, so
 /// they match the mount destinations the sandbox is built with.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct Masks {
+pub struct Masks {
     /// Every non-directory entry that matches the secret list: regular files, and also
     /// FIFOs, sockets and other special files. Each is bound over with `/dev/null`.
-    pub(crate) files: Vec<String>,
+    pub files: Vec<String>,
     /// Secret directories, each bound over with the empty read-only directory of the run.
-    pub(crate) dirs: Vec<String>,
+    pub dirs: Vec<String>,
+    /// Regular files with an env template name, each bound read-only over itself. Not
+    /// masks: they do not count toward [`LIMIT`] (up to [`TEMPLATE_LIMIT`] of them).
+    pub templates: Vec<String>,
 }
 
 /// The mounts one sandboxed run binds over its masks, and the host directory the directory
 /// masks use. The directory is removed when this value is dropped, so it lives exactly as
 /// long as the run.
-pub(crate) struct Mounts {
+pub struct Mounts {
     /// Present only when a directory is masked. Held for its drop, never read.
     _empty: Option<EmptyDir>,
     /// `(source, destination)` read-only bindings: `/dev/null` for each file, the empty
-    /// directory for each directory. The sandbox binds these and declares them to the
+    /// directory for each directory, and each template over itself. The sandbox binds these and declares them to the
     /// validator, so both come from this one list and cannot drift apart.
-    pub(crate) pairs: Vec<(String, String)>,
+    pub pairs: Vec<(String, String)>,
 }
 
 impl Masks {
     /// How many files and directories are masked, for the count in a run's result note.
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.files.len() + self.dirs.len()
     }
 
+    /// Whether nothing is masked (templates are not masks).
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Build the mounts for these masks, creating the empty directory when one is needed.
-    pub(crate) fn mounts(&self) -> Result<Mounts, String> {
+    pub fn mounts(&self) -> Result<Mounts, String> {
         let empty = if self.dirs.is_empty() {
             None
         } else {
             Some(EmptyDir::create()?)
         };
+        // Templates first: a later bind wins, so no template bind can shadow a mask.
         let mut pairs: Vec<(String, String)> = self
-            .files
+            .templates
             .iter()
-            .map(|file| ("/dev/null".to_string(), file.clone()))
+            .map(|file| (file.clone(), file.clone()))
             .collect();
+        pairs.extend(
+            self.files
+                .iter()
+                .map(|file| ("/dev/null".to_string(), file.clone())),
+        );
         if let Some(empty) = &empty {
             pairs.extend(
                 self.dirs
@@ -84,7 +106,7 @@ impl Masks {
 }
 
 /// Walk `root` (canonical) and collect its masks, or say why they cannot be collected.
-pub(crate) fn scan(root: &Path) -> Result<Masks, String> {
+pub fn scan(root: &Path) -> Result<Masks, String> {
     scan_with(root, VISIT_LIMIT)
 }
 
@@ -148,6 +170,17 @@ impl Scan {
                         "{child} is a symbolic link named like a secret file, and a link cannot be masked safely; remove it or rename it"
                     ));
                 }
+                continue;
+            }
+            if secret
+                && file_type.is_file()
+                && !planning_context::read_secret(&child)
+                && self.masks.templates.len() < TEMPLATE_LIMIT
+            {
+                let text = entry.path().into_os_string().into_string().map_err(|_| {
+                    format!("{child} is not valid UTF-8 and matches a secret file name")
+                })?;
+                self.masks.templates.push(text);
                 continue;
             }
             if secret {
