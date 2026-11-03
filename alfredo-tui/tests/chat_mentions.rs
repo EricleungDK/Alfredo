@@ -1,4 +1,6 @@
-use alfredo_tui::chat_mentions::{attach, complete, complete_within};
+use alfredo_tui::chat_mentions::{
+    assemble, attach, complete, complete_within, Candidate, MAX_BYTES,
+};
 use std::{fs, path::Path, process::Command};
 
 fn git(root: &Path, args: &[&str]) {
@@ -531,4 +533,76 @@ fn no_head_commit_gives_one_notice() {
     let out = attach(dir.path(), "@calc.py");
     assert!(out.block.is_empty());
     assert_eq!(out.notices.len(), 1);
+}
+
+fn candidate(path: &str) -> Candidate {
+    Candidate {
+        path: path.into(),
+        strict: true,
+        quoted: false,
+    }
+}
+
+const CUT_SUFFIX: &str = "(32 KiB per-prompt limit; the model sees the first part)";
+
+#[test]
+fn a_file_longer_than_the_budget_gets_one_cut_notice() {
+    let out = assemble(
+        &[candidate("big.txt")],
+        |_| Ok("y".repeat(MAX_BYTES + 1)),
+        |_| false,
+    );
+    assert_eq!(
+        out.notices,
+        [format!(
+            "@big.txt: attached {MAX_BYTES} of {} bytes {CUT_SUFFIX}",
+            MAX_BYTES + 1
+        )]
+    );
+    assert!(out.block.contains("FILE big.txt"));
+    assert_eq!(out.files, ["big.txt"]);
+}
+
+#[test]
+fn the_cut_notice_counts_whole_characters_not_the_budget() {
+    let out = assemble(
+        &[candidate("big.txt")],
+        |_| Ok("\u{20ac}".repeat(20_000)),
+        |_| false,
+    );
+    assert_eq!(
+        out.notices,
+        [format!(
+            "@big.txt: attached 32766 of 60000 bytes {CUT_SUFFIX}"
+        )]
+    );
+}
+
+#[test]
+fn the_notice_reports_what_the_second_file_got_of_the_remaining_budget() {
+    let out = assemble(
+        &[candidate("a.txt"), candidate("b.txt")],
+        |_| Ok("y".repeat(MAX_BYTES / 2 + 10)),
+        |_| false,
+    );
+    assert_eq!(
+        out.notices,
+        [format!(
+            "@b.txt: attached {} of {} bytes {CUT_SUFFIX}",
+            MAX_BYTES / 2 - 10,
+            MAX_BYTES / 2 + 10
+        )]
+    );
+}
+
+#[test]
+fn a_cut_file_in_a_real_repository_is_named_by_attach() {
+    let dir = repo();
+    let out = attach(dir.path(), "review @big.txt");
+    assert_eq!(
+        out.notices,
+        [format!(
+            "@big.txt: attached {MAX_BYTES} of 102400 bytes {CUT_SUFFIX}"
+        )]
+    );
 }

@@ -550,6 +550,28 @@ fn at_mentions_attach_files_like_interactive_chat_and_refusals_go_to_stderr() {
 }
 
 #[test]
+fn a_cut_at_mention_file_says_so_on_stderr() {
+    let root = repository("mention-cut");
+    let workspace = root.join("workspace");
+    fs::write(workspace.join("big.txt"), "x".repeat(40_000)).unwrap();
+    let fixture = scripted_chat(vec![done("ok")]);
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "summarise @big.txt", "--headless"],
+    );
+    let value = result(&output);
+    assert_eq!(value["attached"], json!(["big.txt"]), "{value}");
+    let err = stderr(&output);
+    assert!(
+        err.lines().any(|line| line
+            == "@big.txt: attached 32768 of 40000 bytes (32 KiB per-prompt limit; the model sees the first part)"),
+        "{err}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn at_mention_notices_are_single_safe_stderr_lines() {
     let root = repository("mention-safe");
     let fixture = scripted_chat(vec![done("ok")]);

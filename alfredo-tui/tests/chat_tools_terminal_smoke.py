@@ -118,7 +118,7 @@ class Fixture:
                         {'function': {'name': 'read_file', 'arguments': {'path': 'README.md'}}}]},
                         'done': False}]
                 else:
-                    seen = 'README_BODY_MARKER' in tool_results[-1]['content']
+                    seen = bool(tool_results) and 'README_BODY_MARKER' in tool_results[-1]['content']
                     chunks = [{'message': {'content': 'SUMMARY_FROM_TOOL' if seen else 'NO_RESULT'},
                                'done': False}]
                 chunks.append({'message': {'content': ''}, 'done': True, 'prompt_eval_count': 50,
@@ -476,6 +476,18 @@ class ChatTools(unittest.TestCase):
         chats = self.fixture.chats()
         self.assertIn('read_file', self.tool_names(chats[-1]))
         self.assertIn('propose_plan', self.tool_names(chats[-1]))
+
+    def test_a_file_cut_to_the_prompt_budget_gets_one_dim_row(self):
+        # Issue #610: the model sees the first 32 KiB of a longer @path file; say so.
+        root = Path(os.path.realpath(self.repo.name))
+        root.joinpath('big.txt').write_text(('x' * 69 + '\n') * 1000)
+        self.terminal.write(b'summarise @big.txt\r')
+        self.terminal.wait_for('@big.txt: attached 32768 of 70000 bytes')
+        self.terminal.wait_for('NO_RESULT')
+        message = [m for m in self.fixture.chats()[0]['messages'] if m['role'] == 'user'][-1]
+        self.assertIn('[truncated: 32768 of 70000 bytes]', message['content'])
+        self.assertNotIn('not attached', self.terminal.screen(),
+                         'a cut file is attached, so the footer does not count it')
 
     def test_a_proposal_prefills_the_prompt_and_starts_nothing(self):
         self.terminal.write(b'refactor everything\r')
