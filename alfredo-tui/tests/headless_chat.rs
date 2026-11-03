@@ -1081,6 +1081,45 @@ fn headless_go_validates_the_explicit_model_even_when_the_conversation_has_one()
 }
 
 #[test]
+fn go_refuses_before_planning_when_bubblewrap_cannot_start_a_sandbox() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = repository("go-denied");
+    let bwrap = root.join("fakebwrap");
+    fs::write(
+        &bwrap,
+        "#!/bin/sh\necho \"bwrap: setting up uid map: Permission denied\" >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&bwrap, fs::Permissions::from_mode(0o755)).unwrap();
+    let fixture = two_models();
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--endpoint", &fixture.endpoint, "--connect-retries", "0"])
+        .args(["--model", "fixture", "--go", "x", "--headless"])
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .env("ALFREDO_TEST_BWRAP_PATH", &bwrap)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = stderr(&output);
+    assert_ne!(output.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains("bwrap: setting up uid map: Permission denied"),
+        "{text}"
+    );
+    assert!(text.contains("user namespaces"), "{text}");
+    assert!(!text.contains("apt install"), "{text}");
+    assert!(
+        chat_models(&fixture).is_empty(),
+        "no model request before the refusal: {:?}",
+        fixture.paths()
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn headless_go_names_the_explicit_model_in_its_json() {
     let root = repository("go-json");
     let fixture = two_models();
