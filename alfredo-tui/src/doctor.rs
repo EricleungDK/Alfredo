@@ -144,9 +144,31 @@ pub fn sandbox_probe_at(path: &str, cached: bool) -> Result<(), String> {
 /// The refusal text for a bubblewrap that is installed but cannot start a sandbox.
 pub fn sandbox_denied_message(stderr: &str) -> String {
     format!(
-        "Coding workers cannot start a sandbox: {stderr}. {}",
-        sandbox_start_hint(true)
+        "{SANDBOX_REFUSAL_PREFIX} {}. {BWRAP_DENIED_FIX}",
+        stderr.trim_end_matches(['.', '\n'])
     )
+}
+
+/// Start of every [`sandbox_denied_message`].
+const SANDBOX_REFUSAL_PREFIX: &str = "Coding workers cannot start a sandbox:";
+
+/// How the interactive TUI shows a [`sandbox_denied_message`] that the one-line footer
+/// would cut before its fix: the footer leads with the fix, and the chat rows carry the
+/// cause and the whole fix (#608). `None` for any other message.
+pub fn sandbox_refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
+    let cause = message
+        .strip_prefix(SANDBOX_REFUSAL_PREFIX)?
+        .strip_suffix(BWRAP_DENIED_FIX)?;
+    Some((
+        format!("{command} refused: allow bubblewrap user namespaces · see README Troubleshooting"),
+        vec![
+            format!(
+                "✗ Not started · {SANDBOX_REFUSAL_PREFIX}{}",
+                cause.trim_end()
+            ),
+            format!("  {BWRAP_DENIED_FIX}"),
+        ],
+    ))
 }
 
 /// Why coding workers cannot start, or `None` when the sandbox is usable: bubblewrap
