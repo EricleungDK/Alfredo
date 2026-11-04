@@ -392,6 +392,11 @@ fn each_dispatch_off_row_widens_the_saved_reading_bound_by_three_lines() {
         last
     };
     let none = bound(0);
+    // Pin the absolute bound too, not only the per-row step: two messages (3 + 6 lines), the
+    // mention-refusal line and the trailing line make 11 lines, so line 10 is the last kept.
+    // Relative steps alone cannot tell the one-line mention term `+ 1` from a mutated `* 3 * n`
+    // that swallows it: both shift every bound by the same constant.
+    assert_eq!(none, 10);
     assert_eq!(bound(1), none + 3);
     assert_eq!(bound(2), none + 6);
     assert_eq!(bound(4), none + 12);
