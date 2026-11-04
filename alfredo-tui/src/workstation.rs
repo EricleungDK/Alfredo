@@ -64,7 +64,40 @@ impl ChatView {
         Ok(Self { tasks, saved_model })
     }
 }
+/// Whether `now` is still short of `deadline`: at the deadline itself the wait is over.
+pub fn before(now: std::time::Instant, deadline: std::time::Instant) -> bool {
+    now < deadline
+}
+
 impl Workstation {
+    /// Queue the owner's `/repair ID retry` for the task an unreachable model server
+    /// stopped, exactly as typing it would: recorded in the conversation, then released
+    /// through the saved-intent barrier. Autopilot re-enters its loop once the repair
+    /// exists. The startup refresh gets up to `patience` to land first: a command waits
+    /// for it.
+    pub fn queue_retry(
+        &mut self,
+        id: u64,
+        model: &str,
+        patience: std::time::Duration,
+    ) -> Result<(usize, String), String> {
+        let deadline = std::time::Instant::now() + patience;
+        while self.tasks.pending && before(std::time::Instant::now(), deadline) {
+            self.tasks.poll();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let text = format!("/repair {id} retry");
+        let intent = self
+            .tasks
+            .prepare_command(&text, model)
+            .map_err(|error| format!("--resume: the retry was refused: {error}"))?
+            .ok_or("--resume: the retry is not a task command")?;
+        let origin = self.app.selected;
+        let command = self.app.sessions[origin]
+            .submit_command(text, intent)
+            .map_err(|error| format!("--resume: the retry was not recorded: {error}"))?;
+        Ok((origin, command))
+    }
     /// A scope operation or task write whose receipt a quit should wait for.
     pub fn save_in_flight(&self) -> bool {
         self.tasks.writing || self.wayfinder.active()

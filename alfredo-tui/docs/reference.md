@@ -109,7 +109,7 @@ start Ollama, then `/repair ID retry` (a failed task re-enters through `/repair`
 `/requeue` is only for cancelled runs). That `/repair` resumes the stopped run: the repair is
 approved and run, held dependents follow, and the run ends on one `alfredo/go-*` branch; the
 repair is one more than `--max-repairs` allows the stopped task's family, and sandbox and file-too-large stops stay finished. A manual `/run` shows the same text, and headless
-`--go` prints the Reason on stderr and exits 1. Bad `FILE` blocks and failing checks stay
+`--go` prints the Reason on stderr and exits 1. It also prints `next: start the model server, then --resume --headless retries #ID without planning again`, and the `failed` entry for the run names the stopped task (`"id": ID`, not null); `--resume --headless` queues the same `/repair ID retry` (see Paused runs below). Bad `FILE` blocks and failing checks stay
 repairable. Auto-pause and resume on reconnect are not part of this.
 
 Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
@@ -285,7 +285,7 @@ default mission's paused run exactly as `/resume` does (same approvals, task pol
 checks; a finished plan is not replanned, but a run paused mid-planning plans again, as `/resume` does) and prints `resuming “GOAL” (1/2 accepted)` on stderr,
 then the usual progress lines, the same JSON object (`goal` is the paused run's goal)
 and the same exit codes. With no paused run (none, or one that already finished) it
-exits 2 with `--resume: nothing to resume` on stderr and nothing on stdout. `--resume`
+exits 2 with `--resume: nothing to resume` on stderr and nothing on stdout. The one exception is a run that stopped because the model server was unreachable (the `model-unreachable` stop): `--resume --headless` then queues the same owner retry as `/repair ID retry` for the stopped task, prints `retrying #ID of “GOAL” (0/2 accepted)` on stderr, and continues the loop without planning again; the family gets one repair beyond `--max-repairs`, and a retry that meets the unreachable server again stops with the same `next:` line naming the new task. Runs that failed for any other cause (repair budget, sandbox, file too large) still exit 2. `--resume`
 takes no `--go`, `--chat`, `--model` or `--max-repairs` (the run keeps its own model and repair budget) and needs `--headless`. A paused Wayfinder goal is refused (exit 2); `/resume` it in the terminal.
 
 `--go GOAL --headless` over a paused run no longer plans a second task family beside

@@ -1761,6 +1761,55 @@ fn repair_after_an_unreachable_stop_with_no_budget_runs_once_and_ends_failed_if_
 }
 
 #[test]
+fn reentrant_run_is_none_unless_the_run_is_failed_and_reentrant() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down.clone(), false);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = unreachable_two_task_run(&fixture, &server, &runtime, 2);
+    assert!(
+        autopilot.reentrant_run(&control).is_some(),
+        "the unreachable stop is re-entrant"
+    );
+    // The owner's retry resumes the run: it is no longer Failed.
+    assert_eq!(owner_repair(&mut control, &runtime, 1, "retry"), 3);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "resumed",
+        |autopilot, control| {
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state != RunState::Failed)
+        },
+    );
+    // Let the retry fail unreachable again without autopilot noticing yet: task 3 is
+    // the unreachable head, but the run is Running, so there is no re-entrant run.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        control.poll();
+        if control
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .tasks
+            .iter()
+            .any(|task| task.id == 3 && task.status == TaskStatus::Failed)
+        {
+            break;
+        }
+        if let Ok(Some(request)) = control.prepare_dispatch() {
+            let _ = control.dispatch_prepared(&runtime, &Intent::DispatchRun { request });
+        }
+        assert!(Instant::now() < deadline, "retry never failed");
+        thread::sleep(Duration::from_millis(3));
+    }
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Running);
+    assert!(autopilot.reentrant_run(&control).is_none());
+}
+
+#[test]
 fn repair_after_an_unreachable_stop_adds_one_beyond_max_repairs_and_stops_at_it() {
     let fixture = Fixture::new();
     let down = Arc::new(AtomicBool::new(true));
@@ -1869,6 +1918,89 @@ fn repair_after_an_unreachable_stop_that_is_unreachable_again_stops_again_and_st
         },
     );
     assert_eq!(autopilot.status(&control).unwrap().done, 2);
+}
+
+#[test]
+fn reentrant_run_names_the_stopped_task_only_after_an_unreachable_stop() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down.clone(), false);
+    let runtime = Runtime::new().unwrap();
+    let (autopilot, first) = unreachable_two_task_run(&fixture, &server, &runtime, 2);
+    let (status, stopped) = autopilot.reentrant_run(&first).expect("unreachable stop");
+    assert_eq!((status.state, stopped), (RunState::Failed, 1));
+    assert!(autopilot.paused_run(&first).is_none());
+
+    // Any other failed run is finished for good: nothing to retry.
+    let other = Fixture::new();
+    commit_files(&other, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let big = Server::new(|request, _| {
+        if planner(request) {
+            return files_plan(&["a.py", "b.py"]);
+        }
+        good_calc()
+    });
+    let mut control = control(&other, &big, &runtime);
+    let mut autopilot = Autopilot::open(&other.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "too-large",
+        finished,
+    );
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    assert!(autopilot.reentrant_run(&control).is_none());
+}
+
+#[test]
+fn reentrant_run_names_the_dependent_task_when_it_is_the_one_that_stopped() {
+    let fixture = Fixture::new();
+    // Task 1 succeeds; only task 2 (`Add app`) meets the dropped connection.
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return two_task_plan();
+        }
+        if worker_prompt(request).starts_with("Implement this task: Add app") {
+            DROP_CONNECTION.into()
+        } else {
+            good_calc()
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make answer return 42 and add app", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "dependent unreachable",
+        finished,
+    );
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    let snapshot = control.snapshot.as_ref().unwrap();
+    let status_of = |id| {
+        snapshot
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .unwrap()
+            .status
+            .clone()
+    };
+    assert_eq!(status_of(1), TaskStatus::Accepted);
+    assert_eq!(status_of(2), TaskStatus::Failed);
+    let (_, stopped) = autopilot.reentrant_run(&control).expect("unreachable stop");
+    assert_eq!(
+        stopped, 2,
+        "the stopped task is the failed dependent, not task 1"
+    );
 }
 
 #[test]

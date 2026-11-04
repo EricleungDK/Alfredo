@@ -1304,6 +1304,25 @@ impl Autopilot {
         self.status(tasks)
     }
 
+    /// The run an unreachable model server stopped (`Failed` with `reentrant`), and the
+    /// id of the stopped task: what `/repair ID retry` re-enters and `--resume
+    /// --headless` continues. Every other `Failed` run is none.
+    pub fn reentrant_run(&self, tasks: &TaskControl) -> Option<(Status, u64)> {
+        let saved = self
+            .saved
+            .as_ref()
+            .filter(|saved| saved.phase == Phase::Failed && saved.reentrant)?;
+        let snapshot = tasks.snapshot.as_ref()?;
+        let stopped = families(snapshot, saved, tasks)
+            .iter()
+            .filter(|family| !held_or_done(family, tasks))
+            .find_map(|family| {
+                let head = snapshot.tasks.iter().find(|task| task.id == family.head)?;
+                unreachable_failure(tasks, head).map(|_| head.id)
+            })?;
+        Some((self.status(tasks)?, stopped))
+    }
+
     pub fn status(&self, tasks: &TaskControl) -> Option<Status> {
         let saved = self.saved.as_ref()?;
         let mut state = match saved.phase {
@@ -2727,4 +2746,41 @@ async fn integration_branch(
         }
     }
     Ok(commit)
+}
+
+/// The run-level `autopilot` entry of a model-unreachable stop carries the id of the
+/// task that stopped, the one `/repair ID retry` and `--resume --headless` retry.
+pub fn name_stopped_task(result: &mut serde_json::Value, id: u64) {
+    let Some(entries) = result["failed"].as_array_mut() else {
+        return;
+    };
+    if let Some(entry) = entries
+        .iter_mut()
+        .find(|entry| entry["id"].is_null() && entry["title"] == "autopilot")
+    {
+        entry["id"] = id.into();
+    }
+}
+
+/// How long the old `Failed` stop may wait for the queued retry to restart the run.
+pub const RETRY_RESTART_LIMIT: Duration = Duration::from_secs(60);
+
+/// How long a queued retry waits for the startup task refresh to land.
+pub const REFRESH_PATIENCE: Duration = Duration::from_secs(10);
+
+/// What the wait for a queued `--resume` retry decides.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RetryWait {
+    Hold,
+    Refused(String),
+    TimedOut,
+}
+
+/// A refused retry or one that outlasted `limit` ends the run; otherwise keep waiting.
+pub fn retry_wait(refused: Option<&str>, elapsed: Duration, limit: Duration) -> RetryWait {
+    match refused {
+        Some(reason) => RetryWait::Refused(reason.to_owned()),
+        None if elapsed > limit => RetryWait::TimedOut,
+        None => RetryWait::Hold,
+    }
 }
