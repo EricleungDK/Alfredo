@@ -760,6 +760,8 @@ counts original tasks done; repairs are counted in the autopilot row. A recorded
 run without a current observation is shown with a static `▶`, not a spinner: it
 is not presented as a live worker. The architect appears above the tree while it
 plans or holds a draft; chats appear below it.
+A chat row with a user message in its conversation has a dim second line with the first one,
+sanitized to one line and cut to the pane width with an ellipsis; a chat without one stays one line.
 
 The **missions** section lists the current mission first, then the other missions
 of this repository discovered in the state directory. Their progress is
