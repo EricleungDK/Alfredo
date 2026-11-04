@@ -270,6 +270,99 @@ fn architect_draft_row_sits_above_the_tree_and_chats_below() {
     assert!(side_pane::any_working(&fixture.app, Some(&fixture.control)));
 }
 
+fn chat_seconds(app: &App) -> Vec<Option<String>> {
+    side_pane::project(app, None, Instant::now())
+        .work
+        .iter()
+        .filter(|row| matches!(row.key, RowKey::Chat(_)))
+        .map(|row| row.second.clone())
+        .collect()
+}
+
+#[test]
+fn chat_row_shows_the_first_user_message_as_its_second_line() {
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("why does login fail");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(1, Update::Token("because".into()));
+    app.sessions[0].apply(1, Update::Done);
+    app.sessions[0].insert("and a second question");
+    app.sessions[0].begin().unwrap();
+    assert_eq!(chat_seconds(&app), [Some("why does login fail".to_owned())]);
+}
+
+#[test]
+fn chat_rows_without_a_usable_user_message_stay_one_line_beside_one_with_a_preview() {
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("why does login fail");
+    app.sessions[0].begin().unwrap();
+    app.add_session();
+    app.sessions[1].insert("only a draft");
+    app.add_session();
+    app.sessions[2].messages.push(alfredo_tui::model::Message {
+        role: "user".into(),
+        content: " \t\n\u{a0} ".into(),
+    });
+    app.add_session();
+    app.sessions[3].messages.push(alfredo_tui::model::Message {
+        role: "user".into(),
+        content: "a".repeat(300),
+    });
+    let projection = side_pane::project(&app, None, Instant::now());
+    let chats: Vec<_> = projection
+        .work
+        .iter()
+        .filter(|row| matches!(row.key, RowKey::Chat(_)))
+        .map(|row| (row.label.as_str(), row.second.as_deref()))
+        .collect();
+    // A draft or a whitespace-only first message gives no preview; a long one is bounded.
+    assert_eq!(
+        chats,
+        [
+            ("chat 1", Some("why does login fail")),
+            ("chat 2", None),
+            ("chat 3", None),
+            ("chat 4", Some("a".repeat(256).as_str())),
+        ]
+    );
+}
+
+#[test]
+fn chat_preview_is_one_sanitized_line() {
+    // The draft editor filters some characters, but a saved conversation can hold any.
+    let mut app = App::new("fixture".into());
+    app.sessions[0].messages.push(alfredo_tui::model::Message {
+        role: "user".into(),
+        content: "fix\u{1b}[31m this\u{202e}\nnow\t\u{2028}  please\r\x07".into(),
+    });
+    let second = chat_seconds(&app)
+        .remove(0)
+        .expect("a chat with a user message has a preview");
+    assert!(
+        !second
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{202e}' | '\u{2028}')),
+        "{second:?}"
+    );
+    assert!(second.starts_with("fix[31m this<U+202E> now"), "{second:?}");
+    assert!(second.ends_with("please"), "{second:?}");
+    assert!(!second.contains("  "), "{second:?}");
+}
+
+#[test]
+fn chat_preview_follows_the_turns_left_after_clear() {
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("why does login fail");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(1, Update::Done);
+    assert_eq!(chat_seconds(&app), [Some("why does login fail".to_owned())]);
+    app.sessions[0].clear_conversation(None).unwrap();
+    assert_eq!(chat_seconds(&app), [None]);
+    app.sessions[0].insert("write release notes");
+    app.sessions[0].begin().unwrap();
+    assert_eq!(chat_seconds(&app), [Some("write release notes".to_owned())]);
+}
+
 #[test]
 fn completed_group_collapses_by_default_while_another_group_is_active() {
     let mut fixture = fixture(
