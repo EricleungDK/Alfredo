@@ -405,6 +405,9 @@ impl Session {
             Some(index) => (index, std::mem::take(&mut self.mention_refusals.1)),
             None => (0, Vec::new()),
         };
+        for (after, _) in &mut self.dispatch_off_rows {
+            *after = after.saturating_sub(cut);
+        }
         self.interrupted = self
             .interrupted
             .iter()
