@@ -1893,7 +1893,11 @@ impl Autopilot {
         // repair budget is zero or spent: stop with the root cause quoted.
         for family in families.iter().filter(|f| !held_or_done(f, tasks)) {
             if let Some(cause) = find(family.head).and_then(|head| sandbox_failure(tasks, head)) {
-                self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
+                let installed = crate::doctor::worker_tool_ready(&crate::doctor::probe_path());
+                self.fail(
+                    tasks,
+                    format!("{cause}. {}", crate::doctor::sandbox_start_hint(installed)),
+                );
                 return Ok(None);
             }
             if let Some(cause) = find(family.head).and_then(|head| unreachable_failure(tasks, head))

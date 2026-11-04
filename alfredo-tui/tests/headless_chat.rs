@@ -1,5 +1,6 @@
 //! Issue #240: `--chat PROMPT --headless [--approve workspace-edits]` runs one Chat
 //! Agent turn without a terminal; scripted approvals answer the Approval gate.
+mod exec_stub;
 mod ollama_fixture;
 
 use ollama_fixture::{done, scripted_chat, tool_calls, Fixture, Reply};
@@ -550,6 +551,28 @@ fn at_mentions_attach_files_like_interactive_chat_and_refusals_go_to_stderr() {
 }
 
 #[test]
+fn a_cut_at_mention_file_says_so_on_stderr() {
+    let root = repository("mention-cut");
+    let workspace = root.join("workspace");
+    fs::write(workspace.join("big.txt"), "x".repeat(40_000)).unwrap();
+    let fixture = scripted_chat(vec![done("ok")]);
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "summarise @big.txt", "--headless"],
+    );
+    let value = result(&output);
+    assert_eq!(value["attached"], json!(["big.txt"]), "{value}");
+    let err = stderr(&output);
+    assert!(
+        err.lines().any(|line| line
+            == "@big.txt: attached 32768 of 40000 bytes (32 KiB per-prompt limit; the model sees the first part)"),
+        "{err}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn at_mention_notices_are_single_safe_stderr_lines() {
     let root = repository("mention-safe");
     let fixture = scripted_chat(vec![done("ok")]);
@@ -1078,6 +1101,42 @@ fn headless_go_validates_the_explicit_model_even_when_the_conversation_has_one()
     assert!(!stderr(&plain).contains("typo"));
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&fresh);
+}
+
+#[test]
+fn go_refuses_before_planning_when_bubblewrap_cannot_start_a_sandbox() {
+    let root = repository("go-denied");
+    let bwrap = root.join("fakebwrap");
+    exec_stub::write_executable(
+        &bwrap,
+        "#!/bin/sh\necho \"bwrap: setting up uid map: Permission denied\" >&2\nexit 1\n",
+    );
+    let fixture = two_models();
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--endpoint", &fixture.endpoint, "--connect-retries", "0"])
+        .args(["--model", "fixture", "--go", "x", "--headless"])
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .env("ALFREDO_TEST_BWRAP_PATH", &bwrap)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = stderr(&output);
+    assert_ne!(output.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains("bwrap: setting up uid map: Permission denied"),
+        "{text}"
+    );
+    assert!(text.contains("user namespaces"), "{text}");
+    assert!(!text.contains("apt install"), "{text}");
+    assert!(
+        chat_models(&fixture).is_empty(),
+        "no model request before the refusal: {:?}",
+        fixture.paths()
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

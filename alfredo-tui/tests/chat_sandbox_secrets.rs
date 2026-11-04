@@ -218,6 +218,109 @@ fn a_symlink_into_a_secret_directory_reads_the_mask() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Whether this process is root, which reads any directory and so cannot test an
+/// unreadable one.
+fn is_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "0")
+        .unwrap_or(false)
+}
+
+/// Restore the mode of `path` so the workspace can be removed after the test.
+fn chmod(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Issue #581: a non-secret directory the scan cannot list is bound over with the empty
+/// read-only directory instead of refusing every run.
+#[test]
+fn an_unreadable_non_secret_directory_runs_and_looks_empty() {
+    if is_root() {
+        eprintln!("skipped: root reads every directory");
+        return;
+    }
+    let root = workspace("unreadable");
+    write(&root, "a.txt", "x");
+    write(&root, "data/pg/x", "");
+    chmod(&root.join("data/pg"), 0o000);
+    let out = run(&root, "true");
+    let listed = run(&root, "ls -A data/pg | wc -l; echo END");
+    chmod(&root.join("data/pg"), 0o755);
+    assert!(out.contains("exit code 0"), "the run was refused: {out}");
+    assert!(!out.contains("nothing ran"), "{out}");
+    assert!(listed.contains("0\nEND"), "data/pg is not empty: {listed}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #581: more than 250,000 entries no longer refuses, and a secret in the tree stays
+/// masked.
+#[test]
+fn a_workspace_over_the_old_entry_limit_runs_and_keeps_env_masked() {
+    let root = workspace("big");
+    write(&root, ".env", &format!("BIG={SECRET}\n"));
+    for dir in 0..300 {
+        let base = root.join(format!("bulk/d{dir}"));
+        fs::create_dir_all(&base).unwrap();
+        for file in 0..1000 {
+            fs::File::create(base.join(format!("f{file}"))).unwrap();
+        }
+    }
+    let out = run(&root, "cat .env; echo END");
+    assert!(out.contains("END"), "the run was refused: {out}");
+    assert!(!out.contains("nothing ran"), "{out}");
+    assert!(!out.contains(SECRET), "the mask leaked: {out}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #581: an unreadable directory takes one of the 128 masks, so too many still refuse.
+#[test]
+fn unreadable_directories_count_toward_the_mask_cap() {
+    if is_root() {
+        eprintln!("skipped: root reads every directory");
+        return;
+    }
+    let root = workspace("unreadable-cap");
+    for index in 0..129 {
+        write(&root, &format!("d{index}/x"), "");
+        chmod(&root.join(format!("d{index}")), 0o000);
+    }
+    let out = run(&root, "touch ran");
+    for index in 0..129 {
+        chmod(&root.join(format!("d{index}")), 0o755);
+    }
+    assert!(out.contains("nothing ran"), "{out}");
+    assert!(!root.join("ran").exists(), "the command ran: {out}");
+    assert!(
+        out.contains("more than 128 secret files and directories"),
+        "{out}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #581: a directory that can be entered but not listed (mode 0111) is masked too, so
+/// a secret file inside it by a known name is not readable.
+#[test]
+fn a_search_only_directory_hides_a_secret_inside_it() {
+    if is_root() {
+        eprintln!("skipped: root reads every directory");
+        return;
+    }
+    let root = workspace("search-only");
+    write(&root, "vol/.env", &format!("VOL={SECRET}\n"));
+    chmod(&root.join("vol"), 0o111);
+    let out = run(&root, "cat vol/.env; echo END");
+    chmod(&root.join("vol"), 0o755);
+    assert!(out.contains("END"), "the run was refused: {out}");
+    assert!(
+        !out.contains(SECRET),
+        "a secret in an unlistable directory leaked: {out}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn too_many_secret_masks_refuse_the_run_and_run_nothing() {
     let root = workspace("cap");
@@ -255,7 +358,7 @@ fn a_masked_npmrc_read_explains_the_hidden_file_with_a_count_only() {
     let note = note_line(&out).unwrap();
     assert_eq!(
         note,
-        "note: 1 secret file(s)/directory(ies) are hidden in this sandbox and fail with Permission denied; they need the owner, do not retry on the host to read them"
+        "note: 1 secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them"
     );
     assert!(!note.contains("npmrc"), "the note names the file: {note}");
     assert!(!out.contains("registry=x"), "contents leaked: {out}");
@@ -285,6 +388,172 @@ fn no_hidden_note_when_there_are_no_secret_files() {
     assert!(out.contains("exit code 1"), "{out}");
     assert!(out.contains("Permission denied"), "{out}");
     assert!(!out.contains("hidden in this sandbox"), "{out}");
+    let _ = fs::remove_dir_all(root);
+}
+
+const TEMPLATES: [&str; 3] = [".env.example", ".env.sample", ".env.template"];
+
+#[test]
+fn sandboxed_env_templates_are_readable() {
+    let root = workspace("tpl-read");
+    for name in TEMPLATES {
+        write(&root, name, &format!("ROOT_{name}=1\n"));
+        write(
+            &root,
+            &format!("sub/deeper/{name}"),
+            &format!("DEEP_{name}=1\n"),
+        );
+    }
+    write(&root, ".env", &format!("S={SECRET}\n"));
+    let mut command = String::new();
+    for name in TEMPLATES {
+        command.push_str(&format!("cat {name} sub/deeper/{name}; "));
+    }
+    let out = run(&root, &command);
+    assert!(out.contains("exit code 0"), "{out}");
+    for name in TEMPLATES {
+        assert!(out.contains(&format!("ROOT_{name}=1")), "{out}");
+        assert!(out.contains(&format!("DEEP_{name}=1")), "{out}");
+    }
+    assert!(!out.contains(SECRET), "{out}");
+    let copy = run(&root, "cp .env.example copy.txt && cat copy.txt");
+    assert!(copy.contains("exit code 0"), "{copy}");
+    assert!(copy.contains("ROOT_.env.example=1"), "{copy}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn sandboxed_env_templates_are_read_only() {
+    let root = workspace("tpl-ro");
+    for name in TEMPLATES {
+        write(&root, name, "A=1\n");
+        write(&root, &format!("sub/{name}"), "A=1\n");
+    }
+    // Readable but not writable: a template that is merely hidden would also fail the
+    // writes below, so the read comes first.
+    let seen = run(&root, "cat .env.example sub/.env.template");
+    assert!(seen.contains("exit code 0"), "{seen}");
+    for name in TEMPLATES {
+        for path in [name.to_string(), format!("sub/{name}")] {
+            for command in [
+                format!("echo x >> {path}"),
+                format!("echo x > {path}"),
+                format!("rm {path}"),
+                format!("mv {path} moved.txt"),
+            ] {
+                let out = run(&root, &command);
+                assert!(!out.contains("exit code 0"), "{command}: {out}");
+                assert!(out.contains("exit code"), "{command}: {out}");
+                assert_eq!(
+                    fs::read_to_string(root.join(&path)).unwrap(),
+                    "A=1\n",
+                    "{command}"
+                );
+                assert!(!root.join("moved.txt").exists(), "{command}");
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn non_template_env_files_stay_masked() {
+    let root = workspace("tpl-masked");
+    write(&root, ".env.example", "TEMPLATE=1\n");
+    write(&root, ".env", &format!("A={SECRET}\n"));
+    write(&root, ".env.example.local", &format!("B={SECRET}\n"));
+    write(&root, ".envrc", &format!("C={SECRET}\n"));
+    write(&root, "sub/.env.sample/inner.txt", &format!("E={SECRET}\n"));
+    let out = run(
+        &root,
+        "cat .env.example; cat .env; cat .env.example.local; cat .envrc; cat sub/.env.sample/inner.txt; echo END",
+    );
+    assert!(out.contains("END"), "the command did not run: {out}");
+    assert!(!out.contains(SECRET), "a secret leaked: {out}");
+    assert!(out.contains("Permission denied"), "{out}");
+    assert!(
+        out.contains("TEMPLATE=1"),
+        "the template next to them is readable: {out}"
+    );
+    let _ = fs::remove_dir_all(root);
+
+    // A directory named like a template exempts nothing inside it.
+    let root = workspace("tpl-dir");
+    write(&root, ".env.example/inner.txt", &format!("D={SECRET}\n"));
+    let out = run(
+        &root,
+        "cat .env.example/inner.txt; ls .env.example; echo END",
+    );
+    assert!(out.contains("END"), "the command did not run: {out}");
+    assert!(!out.contains(SECRET), "a secret leaked: {out}");
+    assert!(out.contains("No such file or directory"), "{out}");
+    let _ = fs::remove_dir_all(root);
+
+    // A template that is a symbolic link is still refused, never bound or followed.
+    let root = workspace("tpl-link");
+    write(&root, ".env", &format!("A={SECRET}\n"));
+    std::os::unix::fs::symlink(".env", root.join(".env.example")).unwrap();
+    let out = run(&root, "cat .env.example");
+    assert!(out.contains("nothing ran"), "{out}");
+    assert!(!out.contains(SECRET), "{out}");
+    let _ = fs::remove_dir_all(root);
+
+    let root = workspace("tpl-link-out");
+    let outside = workspace("tpl-link-target");
+    write(&outside, "secret.txt", &format!("F={SECRET}\n"));
+    std::os::unix::fs::symlink(outside.join("secret.txt"), root.join(".env.template")).unwrap();
+    let out = run(&root, "cat .env.template");
+    assert!(out.contains("nothing ran"), "{out}");
+    assert!(!out.contains(SECRET), "{out}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(outside);
+}
+
+#[test]
+fn templates_do_not_count_toward_the_mask_limit() {
+    let root = workspace("tpl-cap");
+    for index in 0..128 {
+        write(&root, &format!("many/d{index}/.env.example"), "X=1\n");
+    }
+    write(&root, ".env", &format!("S={SECRET}\n"));
+    // Which templates are bound depends on directory order, so count them instead of
+    // naming one: the run is not refused and at least the bind budget (120) is readable.
+    let out = run(
+        &root,
+        "cat .env; n=0; for f in many/*/.env.example; do grep -q X=1 \"$f\" 2>/dev/null && n=$((n+1)); done; echo READABLE=$n",
+    );
+    assert!(!out.contains("nothing ran"), "{out}");
+    assert!(!out.contains("more than 128"), "{out}");
+    assert!(out.contains("exit code"), "{out}");
+    assert!(!out.contains(SECRET), "{out}");
+    let readable: usize = out
+        .lines()
+        .find_map(|line| line.strip_prefix("READABLE="))
+        .unwrap_or_else(|| panic!("no count: {out}"))
+        .parse()
+        .unwrap();
+    assert!(readable >= 120, "only {readable} templates readable: {out}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn hidden_note_and_escalate_hint_do_not_contradict() {
+    let root = workspace("tpl-hints");
+    write(&root, ".npmrc", "registry=x\n");
+    write(&root, ".ssh/id_rsa", "k\n");
+    let out = run(&root, "cat .npmrc .ssh/id_rsa");
+    assert!(out.contains("exit code 1"), "{out}");
+    let note = note_line(&out).unwrap();
+    assert!(note.contains("2 secret file(s)/directory(ies)"), "{note}");
+    assert!(note.contains("No such file or directory"), "{note}");
+    assert!(note.contains("looks empty"), "{note}");
+    assert!(
+        !note.contains("npmrc") && !note.contains("id_rsa"),
+        "{note}"
+    );
+    let escalates = out.contains("escalate: true");
+    let forbids = out.contains("do not retry on the host");
+    assert!(!(escalates && forbids), "contradictory hints: {out}");
     let _ = fs::remove_dir_all(root);
 }
 
