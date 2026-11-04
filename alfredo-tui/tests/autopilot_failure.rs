@@ -3,11 +3,11 @@
 use alfredo_tui::{
     autopilot::{
         failure::{
-            failure_detail, interrupted_reason, last_failure_line, sandbox_failure,
+            failure_detail, held_or_done, interrupted_reason, last_failure_line, sandbox_failure,
             title_failure_line, too_large_failure, unreachable_failure, BUDGET_EXHAUSTED,
             INTERRUPTED,
         },
-        state_path, Autopilot,
+        state_path, Autopilot, Family, Settled,
     },
     execution::SANDBOX_UNAVAILABLE,
     metrics::{Metrics, Usage},
@@ -451,4 +451,45 @@ fn run_usage_adds_only_this_runs_acknowledged_task_metrics() {
             model_ns: Some(5),
         }
     );
+}
+
+fn family(root: u64, settled: Settled) -> Family {
+    Family {
+        root,
+        head: root,
+        settled,
+        repairs: 0,
+    }
+}
+
+/// A control whose owner holds an active instruction on `held_root`, if any.
+fn owner_holding(fixture: &Fixture, held_root: Option<u64>) -> TaskControl {
+    let mut tasks = TaskControl::new(fixture.store.clone());
+    if let Some(held) = held_root {
+        let item = json!({
+            "id": 1, "root": held, "task": held, "note": "n", "effect": "repair",
+            "status": "queued", "done": false,
+        });
+        let state = json!({"version": 1, "next": 2, "instructions": [item]});
+        fs::write(
+            alfredo_tui::instruct::state_path(&fixture.root, "c"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        tasks.owner = alfredo_tui::instruct::Instructions::open(&fixture.root, "c").unwrap();
+    }
+    tasks
+}
+
+#[test]
+fn a_family_is_held_or_done_when_it_succeeded_or_the_owner_holds_it() {
+    let fixture = Fixture::new();
+    let free = owner_holding(&fixture, None);
+    let held = owner_holding(&fixture, Some(4));
+    assert!(held_or_done(&family(4, Settled::Active), &held));
+    assert!(!held_or_done(&family(5, Settled::Active), &held));
+    assert!(held_or_done(&family(4, Settled::Success(9)), &free));
+    assert!(!held_or_done(&family(4, Settled::Active), &free));
+    assert!(!held_or_done(&family(4, Settled::Stuck("x".into())), &free));
+    assert!(!held_or_done(&family(4, Settled::Cancelled), &free));
 }

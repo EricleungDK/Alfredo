@@ -387,8 +387,9 @@ pub fn is_command(text: &str) -> bool {
         || matches!(text, "/pause" | "/resume" | "/stop" | "/autopilot")
 }
 
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Settled {
+pub enum Settled {
     Active,
     Success(u64),
     Stuck(String),
@@ -396,11 +397,12 @@ enum Settled {
     Cancelled,
 }
 
-struct Family {
-    root: u64,
-    head: u64,
-    settled: Settled,
-    repairs: u32,
+#[doc(hidden)]
+pub struct Family {
+    pub root: u64,
+    pub head: u64,
+    pub settled: Settled,
+    pub repairs: u32,
 }
 
 /// The autopilot state file of one conversation set in a mission directory.

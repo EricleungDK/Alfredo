@@ -101,7 +101,7 @@ pub fn interrupted_reason(tasks: &TaskControl, head: u64) -> String {
     }
 }
 
-pub(super) fn held_or_done(family: &Family, tasks: &TaskControl) -> bool {
+pub fn held_or_done(family: &Family, tasks: &TaskControl) -> bool {
     matches!(family.settled, Settled::Success(_)) || tasks.owner.held().contains(&family.root)
 }
 
@@ -194,53 +194,4 @@ pub fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
         .map(|run| clean(&run.detail, 1780))
         .filter(|detail| !detail.trim_end_matches(':').trim().is_empty())
         .unwrap_or_else(|| "worker failed; no detail recorded".into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tasks::TaskStore;
-
-    fn control(name: &str, held_root: Option<u64>) -> TaskControl {
-        let root = std::env::temp_dir().join(format!("alfredo-held-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("workspace")).unwrap();
-        let store = TaskStore::new(&root.join("state"), &root.join("workspace"), "test").unwrap();
-        let mut tasks = TaskControl::new(store);
-        if let Some(held) = held_root {
-            let item = serde_json::json!({
-                "id": 1, "root": held, "task": held, "note": "n", "effect": "repair",
-                "status": "queued", "done": false,
-            });
-            let state = serde_json::json!({"version": 1, "next": 2, "instructions": [item]});
-            std::fs::write(
-                crate::instruct::state_path(&root, "c"),
-                serde_json::to_vec(&state).unwrap(),
-            )
-            .unwrap();
-            tasks.owner = crate::instruct::Instructions::open(&root, "c").unwrap();
-        }
-        tasks
-    }
-
-    fn family(root: u64, settled: Settled) -> Family {
-        Family {
-            root,
-            head: root,
-            settled,
-            repairs: 0,
-        }
-    }
-
-    #[test]
-    fn a_family_is_held_or_done_when_it_succeeded_or_the_owner_holds_it() {
-        let free = control("free", None);
-        let held = control("held", Some(4));
-        assert!(held_or_done(&family(4, Settled::Active), &held));
-        assert!(!held_or_done(&family(5, Settled::Active), &held));
-        assert!(held_or_done(&family(4, Settled::Success(9)), &free));
-        assert!(!held_or_done(&family(4, Settled::Active), &free));
-        assert!(!held_or_done(&family(4, Settled::Stuck("x".into())), &free));
-        assert!(!held_or_done(&family(4, Settled::Cancelled), &free));
-    }
 }
