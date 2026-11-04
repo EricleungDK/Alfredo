@@ -805,6 +805,26 @@ fn session_list_uses_short_status_words() {
 }
 
 #[test]
+fn chat_preview_is_cut_to_the_pane_width_with_an_ellipsis() {
+    let mut app = App::new("fixture".into());
+    let message = format!("why does login fail {}", "and then some more ".repeat(8));
+    app.sessions[0].insert(&message);
+    app.sessions[0].begin().unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let screen = rows(&buffer);
+    let at = screen
+        .iter()
+        .position(|row| row.contains(" chat 1 "))
+        .unwrap_or_else(|| panic!("{}", text(&buffer)));
+    let pane = region(&buffer, 0, at as u16 + 1, 28, 1);
+    assert!(pane.contains("why does login fail"), "{}", text(&buffer));
+    assert!(pane.contains('…'), "{}", text(&buffer));
+    assert!(!pane.contains("then some more"), "{}", text(&buffer));
+}
+
+#[test]
 fn f1_help_is_grouped_with_go_first_and_fits_80_by_24() {
     let mut app = App::new("fixture".into());
     app.completion = Some(alfredo_tui::commands::Completion::all());

@@ -549,13 +549,29 @@ pub fn project(app: &App, tasks: Option<&TaskControl>, now: Instant) -> Projecti
             depth: 0,
             label: format!("chat {}", index + 1),
             right: session.short_status(),
-            second: None,
+            second: chat_preview(session),
             expanded: false,
             current: chat_current && index == app.selected,
             target: OpenTarget::Chat(index),
         });
     }
     projection
+}
+
+/// Longest owner text read for a chat preview; the row cuts it to the pane width.
+const PREVIEW_CHARS: usize = 256;
+
+/// Dim second line of a chat row (issue #568): the first user turn still in the
+/// conversation, shown one sanitized line (control, ANSI, bidi and line-break
+/// characters made visible, whitespace collapsed). Derived from stored turns.
+fn chat_preview(session: &crate::model::Session) -> Option<String> {
+    let first = session.messages.iter().find(|m| m.role == "user")?;
+    let head: String = first.content.chars().take(PREVIEW_CHARS).collect();
+    let line = crate::dashboard::single_line_visible(&head)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!line.is_empty()).then_some(line)
 }
 
 /// Other missions of this workspace with their saved autopilot phase. Reads

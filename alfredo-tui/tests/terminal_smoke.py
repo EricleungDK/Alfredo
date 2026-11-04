@@ -625,6 +625,74 @@ class ChatHarnessContext(unittest.TestCase):
             finally:
                 terminal.close()
 
+    def test_work_list_chat_rows_show_the_first_user_message_and_survive_a_restart(self):
+        # Issue #568: each chat row has a dim second line with the conversation's first
+        # user message, rebuilt from the saved turns after a restart.
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps({'models': [{'name': 'fixture'}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                body = (b'{"done":true,"done_reason":"load"}\n' if self.path == '/api/generate'
+                        else b'{"message":{"content":"PREVIEW_REPLY"},"done":true}\n')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-ndjson')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        def preview_below(terminal, label):
+            lines = terminal.screen().split('\n')
+            row = next(index for index, line in enumerate(lines) if label in line and line.startswith('│'))
+            return lines[row + 1]
+
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory(prefix='alfredo-preview-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-preview-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            args = [str(binary), '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}']
+            terminal = Pty(self, args, repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'refactor the parser module\r')
+                terminal.wait_for('PREVIEW_REPLY')
+                terminal.write(b'\x0e')  # Ctrl+N: second chat
+                terminal.wait_for('chat 2')
+                terminal.write(b'why does login fail\r')
+                terminal.wait_for('PREVIEW_REPLY')
+                terminal.wait_for('refactor the parser')
+                self.assertIn('refactor the parser', preview_below(terminal, 'chat 1'), terminal.screen())
+                self.assertIn('why does login fail', preview_below(terminal, 'chat 2'), terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+            terminal = Pty(self, args, repo, env)
+            try:
+                terminal.wait_for('Conversations restored')
+                terminal.wait_for('why does login fail')
+                self.assertIn('refactor the parser', preview_below(terminal, 'chat 1'), terminal.screen())
+                self.assertIn('why does login fail', preview_below(terminal, 'chat 2'), terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+                server.shutdown()
+
 
 class ChatFileMentions(unittest.TestCase):
     def test_at_path_attaches_working_tree_file_and_missing_file_notices(self):
