@@ -217,6 +217,63 @@ pub fn expand(dir: &Path, text: &str) -> Option<Result<String, String>> {
     }))
 }
 
+/// Rescans `dir` for the type-ahead and F1; the notice names every refusal.
+pub fn reload(dir: &Path) -> Option<String> {
+    let found = scan(dir);
+    publish(&found);
+    found.notice()
+}
+
+/// Whether Enter on `draft` belongs to a user command: no agent view is open and the first
+/// word names a command file in `dir`.
+pub fn claims(agent_shown: bool, dir: &Path, draft: &str) -> bool {
+    !agent_shown && expand(dir, draft).is_some()
+}
+
+/// A claimed draft after a fresh read: the trimmed text, its command word, and the prompt
+/// or the notice to show when the command can no longer run.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Resolved {
+    pub typed: String,
+    pub name: String,
+    pub prompt: Result<String, String>,
+}
+
+/// Re-reads the command for `draft` (the file may have changed since `claims`).
+pub fn resolve(dir: &Path, draft: &str) -> Resolved {
+    let typed = draft.trim().to_owned();
+    let name = typed.split_whitespace().next().unwrap_or("").to_owned();
+    let prompt = match expand(dir, &typed) {
+        Some(Ok(prompt)) => Ok(prompt),
+        Some(Err(error)) => Err(error),
+        None => Err(format!("{name} is no longer available")),
+    };
+    Resolved {
+        typed,
+        name,
+        prompt,
+    }
+}
+
+/// A command or scope receipt is pending, so a user command must wait.
+pub fn is_blocked(wayfinder_active: bool, command_pending: bool) -> bool {
+    wayfinder_active || command_pending
+}
+
+/// Summarises the staged draft first when the conversation is near its limit: `spawn`
+/// runs only when `due`, and its success means the send waits for the summary.
+pub fn summarise_first(due: bool, spawn: impl FnOnce() -> bool) -> bool {
+    due && spawn()
+}
+
+/// The notice after sending a staged command.
+pub fn sent_notice(name: &str, sent: &Result<Vec<Message>, &'static str>) -> String {
+    match sent {
+        Ok(_) => format!("{name} sent as your message"),
+        Err(error) => (*error).into(),
+    }
+}
+
 /// Puts the expanded `prompt` of `typed` (`name` args) into `session`'s draft so it can be
 /// sent as an ordinary chat message. Refuses, leaving the typed command in the draft, while
 /// a command or scope receipt is pending (`blocked`), while a reply runs, or when the

@@ -108,13 +108,6 @@ fn read_stdin_prompt(reader: impl std::io::Read) -> Result<String, String> {
     Ok(prompt)
 }
 
-/// Rescans the user command directory for the type-ahead and F1; the notice names refusals.
-fn reload_user_commands(dir: &std::path::Path) -> Option<String> {
-    let found = alfredo_tui::user_commands::scan(dir);
-    alfredo_tui::user_commands::publish(&found);
-    found.notice()
-}
-
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let starting = std::env::current_dir()?;
     let mut workspace = None;
@@ -541,7 +534,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     work.tasks.refresh(&runtime);
     // Issue #486: user commands come from the State Directory only, never the workspace.
     let commands_dir = alfredo_tui::user_commands::directory(&state_dir);
-    if let Some(refused) = reload_user_commands(&commands_dir) {
+    if let Some(refused) = alfredo_tui::user_commands::reload(&commands_dir) {
         work.app.notice = refused;
     }
     if let Some(goal) = &go_goal {
@@ -1605,7 +1598,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             work.app.sessions[index].toggle_tool_results();
                         }
                         KeyCode::F(1) if work.app.sessions[index].draft.is_empty() => {
-                            if let Some(refused) = reload_user_commands(&commands_dir) {
+                            if let Some(refused) = alfredo_tui::user_commands::reload(&commands_dir)
+                            {
                                 work.app.notice = refused;
                             }
                             work.app.completion = Some(alfredo_tui::commands::Completion::all());
@@ -2032,8 +2026,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Enter if work.app.sessions[index].draft.trim() == "/help" => {
                             work.app.sessions[index].remember_submission();
                             work.app.sessions[index].clear_draft();
-                            work.app.notice =
-                                reload_user_commands(&commands_dir).unwrap_or_default();
+                            work.app.notice = alfredo_tui::user_commands::reload(&commands_dir)
+                                .unwrap_or_default();
                             work.app.completion = Some(alfredo_tui::commands::Completion::all());
                         }
                         KeyCode::Enter
@@ -2081,63 +2075,72 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // Issue #486: `/NAME args` for a user command sends its body as the
                         // owner's chat prompt (never parsed as a command); tools still ask.
                         KeyCode::Enter
-                            if work.tasks.agent_shown().is_none()
-                                && alfredo_tui::user_commands::expand(
-                                    &commands_dir,
-                                    &work.app.sessions[index].draft,
-                                )
-                                .is_some() =>
+                            if alfredo_tui::user_commands::claims(
+                                work.tasks.agent_shown().is_some(),
+                                &commands_dir,
+                                &work.app.sessions[index].draft,
+                            ) =>
                         {
-                            let typed = work.app.sessions[index].draft.trim().to_owned();
-                            let name = typed.split_whitespace().next().unwrap_or("").to_owned();
-                            let expanded =
-                                alfredo_tui::user_commands::expand(&commands_dir, &typed);
-                            let blocked = work.wayfinder.active() || pending_command.is_some();
-                            if let Some(Ok(prompt)) = expanded {
-                                match alfredo_tui::user_commands::stage(
-                                    &mut work.app.sessions[index],
-                                    &name,
-                                    &typed,
-                                    &prompt,
-                                    blocked,
-                                ) {
-                                    Err(error) => work.app.notice = error,
-                                    Ok(()) => {
-                                        work.app.models_visible = false;
-                                        work.tasks.set_visible(false);
-                                        if work.app.sessions[index]
-                                            .compaction_due(provider.num_ctx())
-                                            && command_staging::spawn_compaction(
-                                                &runtime,
-                                                &provider,
-                                                &compact_sender,
-                                                &mut jobs[index],
-                                                &mut work.app.sessions[index],
-                                                index,
-                                                true,
-                                            )
-                                            .is_ok()
-                                        {
-                                            work.app.notice = "Conversation is near its size limit; summarising earlier turns…".into();
-                                        } else {
-                                            let sent = alfredo_tui::user_commands::send(
-                                                &mut work.app.sessions[index],
-                                                &typed,
-                                            );
-                                            work.app.notice = match &sent {
-                                                Ok(_) => format!("{name} sent as your message"),
-                                                Err(error) => (*error).into(),
-                                            };
-                                            request = Some(sent);
+                            let alfredo_tui::user_commands::Resolved {
+                                typed,
+                                name,
+                                prompt,
+                            } = alfredo_tui::user_commands::resolve(
+                                &commands_dir,
+                                &work.app.sessions[index].draft,
+                            );
+                            let blocked = alfredo_tui::user_commands::is_blocked(
+                                work.wayfinder.active(),
+                                pending_command.is_some(),
+                            );
+                            match prompt {
+                                Ok(prompt) => {
+                                    match alfredo_tui::user_commands::stage(
+                                        &mut work.app.sessions[index],
+                                        &name,
+                                        &typed,
+                                        &prompt,
+                                        blocked,
+                                    ) {
+                                        Err(error) => work.app.notice = error,
+                                        Ok(()) => {
+                                            work.app.models_visible = false;
+                                            work.tasks.set_visible(false);
+                                            if alfredo_tui::user_commands::summarise_first(
+                                                work.app.sessions[index]
+                                                    .compaction_due(provider.num_ctx()),
+                                                || {
+                                                    command_staging::spawn_compaction(
+                                                        &runtime,
+                                                        &provider,
+                                                        &compact_sender,
+                                                        &mut jobs[index],
+                                                        &mut work.app.sessions[index],
+                                                        index,
+                                                        true,
+                                                    )
+                                                    .is_ok()
+                                                },
+                                            ) {
+                                                work.app.notice = "Conversation is near its size limit; summarising earlier turns…".into();
+                                            } else {
+                                                let sent = alfredo_tui::user_commands::send(
+                                                    &mut work.app.sessions[index],
+                                                    &typed,
+                                                );
+                                                work.app.notice =
+                                                    alfredo_tui::user_commands::sent_notice(
+                                                        &name, &sent,
+                                                    );
+                                                request = Some(sent);
+                                            }
                                         }
                                     }
                                 }
-                            } else {
-                                work.app.notice = match expanded {
-                                    Some(Err(error)) => error,
-                                    _ => format!("{name} is no longer available"),
-                                };
-                                work.app.sessions[index].reject_draft();
+                                Err(notice) => {
+                                    work.app.notice = notice;
+                                    work.app.sessions[index].reject_draft();
+                                }
                             }
                         }
                         KeyCode::Enter

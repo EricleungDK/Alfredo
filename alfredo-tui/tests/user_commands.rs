@@ -2,7 +2,10 @@
 use alfredo_tui::{
     commands::Completion,
     model::{Session, Status, MAX_DRAFT},
-    user_commands::{directory, expand, publish, scan, send, stage, MAX_BYTES},
+    user_commands::{
+        claims, directory, expand, is_blocked, listed, publish, reload, resolve, scan, send,
+        sent_notice, stage, summarise_first, Resolved, MAX_BYTES,
+    },
 };
 use std::{
     fs,
@@ -285,5 +288,129 @@ fn f1_and_the_type_ahead_list_user_commands_marked_as_such() {
     assert!(
         Completion::typeahead("/shi").is_none(),
         "a removed command is unlisted"
+    );
+}
+
+#[test]
+fn the_size_cap_is_exactly_65536_bytes() {
+    assert_eq!(MAX_BYTES, 65_536);
+    let root = Temp::new();
+    let dir = commands_in(root.path());
+    fs::write(dir.join("full.md"), vec![b'a'; 65_536]).unwrap();
+    fs::write(dir.join("over.md"), vec![b'a'; 65_537]).unwrap();
+    let found = scan(&dir);
+    assert_eq!(found.names, ["/full"]);
+    assert_eq!(
+        found.refused,
+        [("/over".to_string(), "over 64 KiB".to_string())]
+    );
+    assert_eq!(expand(&dir, "/full").unwrap().unwrap().len(), 65_536);
+    assert_eq!(
+        expand(&dir, "/over").unwrap().unwrap_err(),
+        "/over refused: over 64 KiB"
+    );
+}
+
+#[test]
+fn reload_publishes_the_listing_and_returns_the_refusal_notice() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let root = Temp::new();
+    let dir = commands_in(root.path());
+    fs::write(dir.join("ok.md"), "hello").unwrap();
+    assert_eq!(reload(&dir), None);
+    assert_eq!(listed(), ["/ok"]);
+    fs::write(dir.join("help.md"), "x").unwrap();
+    fs::write(dir.join("empty.md"), "").unwrap();
+    let notice = reload(&dir).unwrap();
+    assert_eq!(
+        notice,
+        "Refused user commands: /empty (empty), /help (clashes with a built-in command)"
+    );
+    assert_eq!(listed(), ["/ok"]);
+    publish(&scan(&root.path().join("missing")));
+}
+
+#[test]
+fn claims_needs_no_agent_view_and_an_existing_command_file() {
+    let root = Temp::new();
+    let dir = commands_in(root.path());
+    fs::write(dir.join("fix.md"), "Fix $ARGUMENTS").unwrap();
+    assert!(claims(false, &dir, "/fix it"));
+    assert!(!claims(true, &dir, "/fix it"), "an open agent view wins");
+    assert!(!claims(false, &dir, "/nothere"));
+    assert!(!claims(true, &dir, "/nothere"));
+    assert!(!claims(false, &dir, "plain text"));
+    assert!(!claims(false, &dir, "/model"), "built-ins are not claimed");
+    // A refused file is still claimed so the owner sees the reason.
+    fs::write(dir.join("big.md"), vec![b'a'; 65_537]).unwrap();
+    assert!(claims(false, &dir, "/big"));
+}
+
+#[test]
+fn resolve_returns_the_prompt_the_refusal_or_no_longer_available() {
+    let root = Temp::new();
+    let dir = commands_in(root.path());
+    fs::write(dir.join("fix.md"), "Fix $ARGUMENTS").unwrap();
+    fs::write(dir.join("big.md"), vec![b'a'; 65_537]).unwrap();
+    assert_eq!(
+        resolve(&dir, "  /fix the bug \n"),
+        Resolved {
+            typed: "/fix the bug".into(),
+            name: "/fix".into(),
+            prompt: Ok("Fix the bug".into()),
+        }
+    );
+    assert_eq!(
+        resolve(&dir, "/big").prompt,
+        Err("/big refused: over 64 KiB".into())
+    );
+    // Deleted between the claim and the resolve.
+    assert_eq!(
+        resolve(&dir, "/gone x"),
+        Resolved {
+            typed: "/gone x".into(),
+            name: "/gone".into(),
+            prompt: Err("/gone is no longer available".into()),
+        }
+    );
+}
+
+#[test]
+fn a_pending_command_or_active_scope_blocks_a_user_command() {
+    assert!(!is_blocked(false, false));
+    assert!(is_blocked(true, false));
+    assert!(is_blocked(false, true));
+    assert!(is_blocked(true, true));
+}
+
+#[test]
+fn summarising_runs_only_when_due_and_the_send_waits_only_if_it_started() {
+    let mut calls = 0;
+    assert!(!summarise_first(false, || {
+        calls += 1;
+        true
+    }));
+    assert_eq!(calls, 0, "not due: nothing is spawned");
+    assert!(summarise_first(true, || {
+        calls += 1;
+        true
+    }));
+    assert_eq!(calls, 1);
+    assert!(!summarise_first(true, || {
+        calls += 1;
+        false
+    }));
+    assert_eq!(calls, 2, "a failed spawn sends straight away");
+}
+
+#[test]
+fn the_sent_notice_names_the_command_or_the_refusal() {
+    assert_eq!(
+        sent_notice("/fix", &Ok(Vec::new())),
+        "/fix sent as your message"
+    );
+    assert_eq!(
+        sent_notice("/fix", &Err("Nothing to send")),
+        "Nothing to send"
     );
 }
