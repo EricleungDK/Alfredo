@@ -283,6 +283,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/console_log.rs` | Console command history on `Session` (child of `model`): sequences, admission, budget eviction, task receipts |
 | `src/side_pane.rs`, `src/theme.rs` | Side pane projection and keys; icons, status glyphs, palette, spinner |
 | `src/autopilot.rs` | `/go` loop, auto-review, bounded repair, integration branch |
+| `src/autopilot_failure.rs` | Autopilot failure and usage text (child of `autopilot`): run usage, sandbox/too-large/unreachable failures, interrupted and budget reasons, failure-line trimming |
 | `src/tasks.rs`, `src/task_control.rs`, `src/task_control/commands.rs`, `src/dispatch.rs` | Durable task store, commands (`prepare_command`, `dispatch_prepared`, `command`, `parse`), dispatch |
 | `src/worker.rs`, `src/run_boundary.rs` | Isolated worktree workers and bubblewrap sandbox |
 | `src/worker/answer.rs` | Worker FILE/EDIT answer-block parser, resolver and live display |
