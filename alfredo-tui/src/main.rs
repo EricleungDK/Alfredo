@@ -2085,115 +2085,117 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         // Issue #486: `/NAME args` for a user command sends its body as the
                         // owner's chat prompt (never parsed as a command); tools still ask.
-                        KeyCode::Enter
-                            if alfredo_tui::user_commands::claims(
-                                work.tasks.agent_shown().is_some(),
-                                &commands_dir,
-                                &work.app.sessions[index].draft,
-                            ) =>
-                        {
-                            let alfredo_tui::user_commands::Resolved {
-                                typed,
-                                name,
-                                prompt,
-                            } = alfredo_tui::user_commands::resolve(
-                                &commands_dir,
-                                &work.app.sessions[index].draft,
-                            );
-                            let blocked = alfredo_tui::user_commands::is_blocked(
-                                work.wayfinder.active(),
-                                pending_command.is_some(),
-                            );
-                            match prompt {
-                                Ok(prompt) => {
-                                    match alfredo_tui::user_commands::stage(
-                                        &mut work.app.sessions[index],
-                                        &name,
-                                        &typed,
-                                        &prompt,
-                                        blocked,
-                                    ) {
-                                        Err(error) => work.app.notice = error,
-                                        Ok(()) => {
-                                            work.app.models_visible = false;
-                                            work.tasks.set_visible(false);
-                                            if alfredo_tui::user_commands::summarise_first(
-                                                work.app.sessions[index]
-                                                    .compaction_due(provider.num_ctx()),
-                                                || {
-                                                    command_staging::spawn_compaction(
-                                                        &runtime,
-                                                        &provider,
-                                                        &compact_sender,
-                                                        &mut jobs[index],
+                        KeyCode::Enter => match alfredo_tui::user_commands::route(
+                            work.tasks.agent_shown().is_some(),
+                            &commands_dir,
+                            &work.app.sessions[index].draft,
+                        ) {
+                            alfredo_tui::user_commands::Route::Run(resolved) => {
+                                let alfredo_tui::user_commands::Resolved {
+                                    typed,
+                                    name,
+                                    prompt,
+                                } = resolved;
+                                let blocked = alfredo_tui::user_commands::is_blocked(
+                                    work.wayfinder.active(),
+                                    pending_command.is_some(),
+                                );
+                                match prompt {
+                                    Ok(prompt) => {
+                                        match alfredo_tui::user_commands::stage(
+                                            &mut work.app.sessions[index],
+                                            &name,
+                                            &typed,
+                                            &prompt,
+                                            blocked,
+                                        ) {
+                                            Err(error) => work.app.notice = error,
+                                            Ok(()) => {
+                                                work.app.models_visible = false;
+                                                work.tasks.set_visible(false);
+                                                if alfredo_tui::user_commands::summarise_first(
+                                                    work.app.sessions[index]
+                                                        .compaction_due(provider.num_ctx()),
+                                                    || {
+                                                        command_staging::spawn_compaction(
+                                                            &runtime,
+                                                            &provider,
+                                                            &compact_sender,
+                                                            &mut jobs[index],
+                                                            &mut work.app.sessions[index],
+                                                            index,
+                                                            true,
+                                                        )
+                                                        .is_ok()
+                                                    },
+                                                ) {
+                                                    work.app.notice = "Conversation is near its size limit; summarising earlier turns…".into();
+                                                } else {
+                                                    let sent = alfredo_tui::user_commands::send(
                                                         &mut work.app.sessions[index],
-                                                        index,
-                                                        true,
-                                                    )
-                                                    .is_ok()
-                                                },
-                                            ) {
-                                                work.app.notice = "Conversation is near its size limit; summarising earlier turns…".into();
-                                            } else {
-                                                let sent = alfredo_tui::user_commands::send(
-                                                    &mut work.app.sessions[index],
-                                                    &typed,
-                                                );
-                                                work.app.notice =
-                                                    alfredo_tui::user_commands::sent_notice(
-                                                        &name, &sent,
+                                                        &typed,
                                                     );
-                                                request = Some(sent);
+                                                    work.app.notice =
+                                                        alfredo_tui::user_commands::sent_notice(
+                                                            &name, &sent,
+                                                        );
+                                                    request = Some(sent);
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                Err(notice) => {
-                                    work.app.notice = notice;
-                                    work.app.sessions[index].reject_draft();
+                                    Err(notice) => {
+                                        work.app.notice = notice;
+                                        work.app.sessions[index].reject_draft();
+                                    }
                                 }
                             }
-                        }
-                        KeyCode::Enter
-                            if work.app.sessions[index].draft.trim_start().starts_with('/') =>
-                        {
-                            work.app.models_visible = false;
-                            let session = &mut work.app.sessions[index];
-                            let text = session.draft.trim();
-                            let verb = text.split_whitespace().next().unwrap_or("");
-                            if work.wayfinder.active()
-                                && !(matches!(text, "/scope" | "/dispatch off" | "/plan-cancel")
-                                    || matches!(
-                                        verb,
-                                        "/tasks"
-                                            | "/activity"
-                                            | "/chat"
-                                            | "/refresh"
-                                            | "/evidence"
-                                            | "/recover"
-                                            | "/review"
-                                            | "/accept"
-                                            | "/reject"
-                                            | "/cancel-task"
-                                    ))
-                            {
-                                work.app.notice =
+                            alfredo_tui::user_commands::Route::Pass => match key.code {
+                                KeyCode::Enter
+                                    if work.app.sessions[index]
+                                        .draft
+                                        .trim_start()
+                                        .starts_with('/') =>
+                                {
+                                    work.app.models_visible = false;
+                                    let session = &mut work.app.sessions[index];
+                                    let text = session.draft.trim();
+                                    let verb = text.split_whitespace().next().unwrap_or("");
+                                    if work.wayfinder.active()
+                                        && !(matches!(
+                                            text,
+                                            "/scope" | "/dispatch off" | "/plan-cancel"
+                                        ) || matches!(
+                                            verb,
+                                            "/tasks"
+                                                | "/activity"
+                                                | "/chat"
+                                                | "/refresh"
+                                                | "/evidence"
+                                                | "/recover"
+                                                | "/review"
+                                                | "/accept"
+                                                | "/reject"
+                                                | "/cancel-task"
+                                        ))
+                                    {
+                                        work.app.notice =
                                     "Wait for the Wayfinder scope receipt before starting new work"
                                         .into();
-                                continue;
-                            }
-                            let text = session.draft.trim().to_owned();
-                            let model = session.model.clone();
-                            work.autopilot.observe_manual(&text, &mut work.tasks);
-                            if text == "/dispatch off" {
-                                if let Some((origin, id)) = pending_command.as_ref() {
-                                    let command = work.app.sessions[*origin]
-                                        .commands()
-                                        .iter()
-                                        .find(|command| command.id == *id)
-                                        .cloned();
-                                    if let Some(command) = command {
-                                        if let alfredo_tui::command_intent::Intent::DispatchRun {
+                                        continue;
+                                    }
+                                    let text = session.draft.trim().to_owned();
+                                    let model = session.model.clone();
+                                    work.autopilot.observe_manual(&text, &mut work.tasks);
+                                    if text == "/dispatch off" {
+                                        if let Some((origin, id)) = pending_command.as_ref() {
+                                            let command = work.app.sessions[*origin]
+                                                .commands()
+                                                .iter()
+                                                .find(|command| command.id == *id)
+                                                .cloned();
+                                            if let Some(command) = command {
+                                                if let alfredo_tui::command_intent::Intent::DispatchRun {
                                             request,
                                         } = &command.intent
                                         {
@@ -2203,82 +2205,82 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             work.app.sessions[*origin].set_command_state(&command.id, alfredo_tui::console_command::CommandState::Refused { reason: reason.into() });
                                             pending_command = None;
                                         }
+                                            }
+                                        }
                                     }
-                                }
-                            }
-                            if text == "/plan-cancel"
-                                && command_staging::withdraw_pending_architect(
-                                    &mut work.app,
-                                    &mut pending_command,
-                                )
-                                && !work.tasks.planner.active()
-                                && work.tasks.planner.checkpoint().is_none()
-                            {
-                                work.app.sessions[index].remember_submission();
-                                work.app.sessions[index].clear_draft();
-                                work.app.notice =
-                                    "Automatic Architect draft cancelled before generation".into();
-                                continue;
-                            }
-                            if pending_command.is_some() {
-                                work.app.notice =
-                                    "Wait for the pending command intent; your draft is retained"
-                                        .into();
-                                continue;
-                            }
-                            if text == "/scope-clear" {
-                                work.app.notice = match work
-                                    .tasks
-                                    .store()
-                                    .understanding()
-                                    .clear_flow()
-                                {
-                                    Ok(state) => {
-                                        work.tasks.observe_scope(state);
+                                    if text == "/plan-cancel"
+                                        && command_staging::withdraw_pending_architect(
+                                            &mut work.app,
+                                            &mut pending_command,
+                                        )
+                                        && !work.tasks.planner.active()
+                                        && work.tasks.planner.checkpoint().is_none()
+                                    {
                                         work.app.sessions[index].remember_submission();
                                         work.app.sessions[index].clear_draft();
-                                        "Left Wayfinder: chat tools are back; scope receipts are kept (/scope)".into()
+                                        work.app.notice =
+                                            "Automatic Architect draft cancelled before generation"
+                                                .into();
+                                        continue;
                                     }
-                                    Err(error) => format!("/scope-clear: {error}"),
-                                };
-                                continue;
-                            }
-                            let prepared = if let Some(selector) =
-                                text.strip_prefix("/retry-command ")
-                            {
-                                (|| -> Result<_, String> {
-                                    let (origin, sequence) = selector
-                                        .trim()
-                                        .split_once(':')
-                                        .ok_or("Usage: /retry-command SESSION:COMMAND")?;
-                                    let origin = origin
-                                        .parse::<usize>()
-                                        .ok()
-                                        .and_then(|n| n.checked_sub(1))
-                                        .ok_or("Invalid session number")?;
-                                    let sequence = sequence
-                                        .parse::<u64>()
-                                        .map_err(|_| "Invalid command number")?;
-                                    let command = work
-                                        .app
-                                        .sessions
-                                        .get(origin)
-                                        .and_then(|session| {
-                                            session
-                                                .commands()
-                                                .iter()
-                                                .find(|command| command.sequence == sequence)
-                                        })
-                                        .ok_or("Saved command not found")?;
-                                    if command.intent.selection_request().is_some() {
-                                        return Err("Selection is not replayed; use /workspace to explicitly Open or Resume".into());
+                                    if pending_command.is_some() {
+                                        work.app.notice =
+                                    "Wait for the pending command intent; your draft is retained"
+                                        .into();
+                                        continue;
                                     }
-                                    Ok(Some(command.intent.clone()))
-                                })()
-                            } else {
-                                let prepared = work.tasks.prepare_command(&text, &model);
-                                if prepared.is_err() && text == "/retry-task" {
-                                    work.app.sessions[index]
+                                    if text == "/scope-clear" {
+                                        work.app.notice = match work
+                                            .tasks
+                                            .store()
+                                            .understanding()
+                                            .clear_flow()
+                                        {
+                                            Ok(state) => {
+                                                work.tasks.observe_scope(state);
+                                                work.app.sessions[index].remember_submission();
+                                                work.app.sessions[index].clear_draft();
+                                                "Left Wayfinder: chat tools are back; scope receipts are kept (/scope)".into()
+                                            }
+                                            Err(error) => format!("/scope-clear: {error}"),
+                                        };
+                                        continue;
+                                    }
+                                    let prepared = if let Some(selector) =
+                                        text.strip_prefix("/retry-command ")
+                                    {
+                                        (|| -> Result<_, String> {
+                                            let (origin, sequence) = selector
+                                                .trim()
+                                                .split_once(':')
+                                                .ok_or("Usage: /retry-command SESSION:COMMAND")?;
+                                            let origin = origin
+                                                .parse::<usize>()
+                                                .ok()
+                                                .and_then(|n| n.checked_sub(1))
+                                                .ok_or("Invalid session number")?;
+                                            let sequence = sequence
+                                                .parse::<u64>()
+                                                .map_err(|_| "Invalid command number")?;
+                                            let command = work
+                                                .app
+                                                .sessions
+                                                .get(origin)
+                                                .and_then(|session| {
+                                                    session.commands().iter().find(|command| {
+                                                        command.sequence == sequence
+                                                    })
+                                                })
+                                                .ok_or("Saved command not found")?;
+                                            if command.intent.selection_request().is_some() {
+                                                return Err("Selection is not replayed; use /workspace to explicitly Open or Resume".into());
+                                            }
+                                            Ok(Some(command.intent.clone()))
+                                        })()
+                                    } else {
+                                        let prepared = work.tasks.prepare_command(&text, &model);
+                                        if prepared.is_err() && text == "/retry-task" {
+                                            work.app.sessions[index]
                                         .commands()
                                         .iter()
                                         .rev()
@@ -2298,72 +2300,103 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         })
                                         .map(|command| Ok(Some(command.intent.clone())))
                                         .unwrap_or(prepared)
-                                } else {
-                                    prepared
-                                }
-                            };
-                            match prepared {
-                                Ok(Some(intent)) => {
-                                    let id = alfredo_tui::console_command::ConsoleCommand::identity(
+                                        } else {
+                                            prepared
+                                        }
+                                    };
+                                    match prepared {
+                                        Ok(Some(intent)) => {
+                                            let id = alfredo_tui::console_command::ConsoleCommand::identity(
                                         &intent,
                                     );
-                                    let previous = work.app.sessions.iter().position(|session| {
-                                        session.commands().iter().any(|command| command.id == id)
-                                    });
-                                    let origin = previous.unwrap_or(index);
-                                    let wayfinder_retry = match &intent {
+                                            let previous =
+                                                work.app.sessions.iter().position(|session| {
+                                                    session
+                                                        .commands()
+                                                        .iter()
+                                                        .any(|command| command.id == id)
+                                                });
+                                            let origin = previous.unwrap_or(index);
+                                            let wayfinder_retry = match &intent {
                                         alfredo_tui::command_intent::Intent::Wayfinder {
                                             request,
                                             user_message,
                                         } => Some((request.clone(), *user_message)),
                                         _ => None,
                                     };
-                                    let admitted = if wayfinder_retry.is_some()
-                                        && work.wayfinder.session_active(origin)
-                                    {
-                                        Err("Wait for this turn's scope operation before retrying"
+                                            let admitted = if wayfinder_retry.is_some()
+                                                && work.wayfinder.session_active(origin)
+                                            {
+                                                Err("Wait for this turn's scope operation before retrying"
                                             .into())
-                                    } else if previous.is_some() {
-                                        work.app.sessions[origin]
-                                            .retry_command(&id)
-                                            .map(|()| id.clone())
-                                    } else {
-                                        work.app.sessions[origin].submit_command(text, intent)
-                                    };
-                                    match admitted {
-                                        Ok(id) => {
-                                            if let Some((request, user_message)) = wayfinder_retry {
-                                                let session = &work.app.sessions[origin];
-                                                let turn = alfredo_tui::wayfinder::Turn {
-                                                    session: origin,
-                                                    attempt: 0,
-                                                    model: session.model.clone(),
-                                                    user_message,
-                                                    messages: session.request_through(user_message),
-                                                };
-                                                if let Err(error) =
-                                                    work.wayfinder.resume(turn, request)
-                                                {
-                                                    work.app.sessions[origin].set_command_state(&id, alfredo_tui::console_command::CommandState::Refused { reason: alfredo_tui::console_command::bounded_reason(&error) });
+                                            } else if previous.is_some() {
+                                                work.app.sessions[origin]
+                                                    .retry_command(&id)
+                                                    .map(|()| id.clone())
+                                            } else {
+                                                work.app.sessions[origin]
+                                                    .submit_command(text, intent)
+                                            };
+                                            match admitted {
+                                                Ok(id) => {
+                                                    if let Some((request, user_message)) =
+                                                        wayfinder_retry
+                                                    {
+                                                        let session = &work.app.sessions[origin];
+                                                        let turn = alfredo_tui::wayfinder::Turn {
+                                                            session: origin,
+                                                            attempt: 0,
+                                                            model: session.model.clone(),
+                                                            user_message,
+                                                            messages: session
+                                                                .request_through(user_message),
+                                                        };
+                                                        if let Err(error) =
+                                                            work.wayfinder.resume(turn, request)
+                                                        {
+                                                            work.app.sessions[origin].set_command_state(&id, alfredo_tui::console_command::CommandState::Refused { reason: alfredo_tui::console_command::bounded_reason(&error) });
+                                                            work.app.notice = error;
+                                                            continue;
+                                                        }
+                                                    }
+                                                    work.app.sessions[index].remember_submission();
+                                                    work.app.sessions[index].clear_draft();
+                                                    // A command typed to an agent keeps its view.
+                                                    if work.tasks.agent_shown().is_none() {
+                                                        work.tasks.set_visible(false);
+                                                    }
+                                                    work.app.notice.clear();
+                                                    work.app.append_history_warning(origin);
+                                                    if origin != index {
+                                                        work.app.notice = format!(
+                                                            "Retry remains linked to Session {}",
+                                                            origin + 1
+                                                        );
+                                                    }
+                                                    pending_command = Some((origin, id));
+                                                }
+                                                Err(error) => {
                                                     work.app.notice = error;
-                                                    continue;
+                                                    work.app.sessions[index].reject_draft();
                                                 }
                                             }
-                                            work.app.sessions[index].remember_submission();
-                                            work.app.sessions[index].clear_draft();
-                                            // A command typed to an agent keeps its view.
-                                            if work.tasks.agent_shown().is_none() {
-                                                work.tasks.set_visible(false);
+                                        }
+                                        Ok(None) => {
+                                            match work.tasks.command(&runtime, &text, &model) {
+                                                Ok(()) => {
+                                                    work.app.sessions[index].remember_submission();
+                                                    work.app.sessions[index].clear_draft();
+                                                    work.app.notice = if text == "/plan-cancel" {
+                                                        work.tasks.planner.notice.clone()
+                                                    } else {
+                                                        String::new()
+                                                    };
+                                                }
+                                                Err(error) => {
+                                                    work.app.notice = error;
+                                                    work.app.sessions[index].reject_draft();
+                                                }
                                             }
-                                            work.app.notice.clear();
-                                            work.app.append_history_warning(origin);
-                                            if origin != index {
-                                                work.app.notice = format!(
-                                                    "Retry remains linked to Session {}",
-                                                    origin + 1
-                                                );
-                                            }
-                                            pending_command = Some((origin, id));
                                         }
                                         Err(error) => {
                                             work.app.notice = error;
@@ -2371,83 +2404,68 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                                Ok(None) => match work.tasks.command(&runtime, &text, &model) {
-                                    Ok(()) => {
-                                        work.app.sessions[index].remember_submission();
-                                        work.app.sessions[index].clear_draft();
-                                        work.app.notice = if text == "/plan-cancel" {
-                                            work.tasks.planner.notice.clone()
-                                        } else {
-                                            String::new()
-                                        };
-                                    }
-                                    Err(error) => {
-                                        work.app.notice = error;
-                                        work.app.sessions[index].reject_draft();
-                                    }
-                                },
-                                Err(error) => {
-                                    work.app.notice = error;
-                                    work.app.sessions[index].reject_draft();
-                                }
-                            }
-                        }
-                        // The agent view owns the prompt: text is an instruction to that agent.
-                        KeyCode::Enter if work.tasks.agent_shown().is_some() => {
-                            let target = work.tasks.agent_shown().map(|view| view.target).unwrap();
-                            let note = work.app.sessions[index].draft.clone();
-                            match alfredo_tui::instruct::Instructions::give_to(
-                                &mut work.tasks,
-                                target,
-                                &note,
-                            ) {
-                                Ok(notice) => {
-                                    work.app.sessions[index].remember_submission();
-                                    work.app.sessions[index].clear_draft();
-                                    work.app.notice = notice;
-                                    if let Some(view) = work.tasks.agent.as_ref() {
-                                        // Sending returns the reader to the newest turn.
-                                        view.scroll_rows(i32::MAX / 2);
+                                // The agent view owns the prompt: text is an instruction to that agent.
+                                KeyCode::Enter if work.tasks.agent_shown().is_some() => {
+                                    let target =
+                                        work.tasks.agent_shown().map(|view| view.target).unwrap();
+                                    let note = work.app.sessions[index].draft.clone();
+                                    match alfredo_tui::instruct::Instructions::give_to(
+                                        &mut work.tasks,
+                                        target,
+                                        &note,
+                                    ) {
+                                        Ok(notice) => {
+                                            work.app.sessions[index].remember_submission();
+                                            work.app.sessions[index].clear_draft();
+                                            work.app.notice = notice;
+                                            if let Some(view) = work.tasks.agent.as_ref() {
+                                                // Sending returns the reader to the newest turn.
+                                                view.scroll_rows(i32::MAX / 2);
+                                            }
+                                        }
+                                        Err(error) => work.app.notice = error,
                                     }
                                 }
-                                Err(error) => work.app.notice = error,
-                            }
-                        }
-                        // A turn is running: queue the prompt, sent when it completes (#338).
-                        // An approval card keeps the old refusal (#264).
-                        KeyCode::Enter
-                            if work.app.sessions[index].status.active()
-                                && work.app.sessions[index].pending_approval().is_none() =>
-                        {
-                            work.app.notice = match work.app.sessions[index].queue_draft() {
+                                // A turn is running: queue the prompt, sent when it completes (#338).
+                                // An approval card keeps the old refusal (#264).
+                                KeyCode::Enter
+                                    if work.app.sessions[index].status.active()
+                                        && work.app.sessions[index]
+                                            .pending_approval()
+                                            .is_none() =>
+                                {
+                                    work.app.notice = match work.app.sessions[index].queue_draft() {
                                 Ok(()) => "Queued · sent when the reply ends · Esc returns it to the prompt".into(),
                                 Err(error) => error.into(),
                             };
-                        }
-                        KeyCode::Enter => {
-                            work.app.models_visible = false;
-                            work.tasks.set_visible(false);
-                            if work.app.sessions[index].compaction_due(provider.num_ctx()) {
-                                // Near the size limit: summarise the oldest turns first; the
-                                // prompt stays in the draft and is sent once the note is ready.
-                                match command_staging::spawn_compaction(
-                                    &runtime,
-                                    &provider,
-                                    &compact_sender,
-                                    &mut jobs[index],
-                                    &mut work.app.sessions[index],
-                                    index,
-                                    true,
-                                ) {
-                                    Ok(()) => {
-                                        work.app.notice = "Conversation is near its size limit; summarising earlier turns…".into();
-                                    }
-                                    Err(error) => work.app.notice = error.into(),
                                 }
-                            } else {
-                                request = Some(work.app.sessions[index].begin());
-                            }
-                        }
+                                KeyCode::Enter => {
+                                    work.app.models_visible = false;
+                                    work.tasks.set_visible(false);
+                                    if work.app.sessions[index].compaction_due(provider.num_ctx()) {
+                                        // Near the size limit: summarise the oldest turns first; the
+                                        // prompt stays in the draft and is sent once the note is ready.
+                                        match command_staging::spawn_compaction(
+                                            &runtime,
+                                            &provider,
+                                            &compact_sender,
+                                            &mut jobs[index],
+                                            &mut work.app.sessions[index],
+                                            index,
+                                            true,
+                                        ) {
+                                            Ok(()) => {
+                                                work.app.notice = "Conversation is near its size limit; summarising earlier turns…".into();
+                                            }
+                                            Err(error) => work.app.notice = error.into(),
+                                        }
+                                    } else {
+                                        request = Some(work.app.sessions[index].begin());
+                                    }
+                                }
+                                _ => {}
+                            },
+                        },
                         KeyCode::Backspace => {
                             work.app.sessions[index].backspace();
                             let session = &work.app.sessions[index];

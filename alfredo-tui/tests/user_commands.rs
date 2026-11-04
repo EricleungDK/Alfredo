@@ -3,8 +3,8 @@ use alfredo_tui::{
     commands::Completion,
     model::{Session, Status, MAX_DRAFT},
     user_commands::{
-        claims, directory, expand, is_blocked, listed, publish, reload, resolve, scan, send,
-        sent_notice, stage, summarise_first, Resolved, MAX_BYTES,
+        claims, directory, expand, is_blocked, listed, publish, reload, resolve, route, scan, send,
+        sent_notice, stage, summarise_first, Resolved, Route, MAX_BYTES,
     },
 };
 use std::{
@@ -413,4 +413,39 @@ fn the_sent_notice_names_the_command_or_the_refusal() {
         sent_notice("/fix", &Err("Nothing to send")),
         "Nothing to send"
     );
+}
+
+#[test]
+fn route_runs_only_claimed_drafts_and_passes_everything_else() {
+    let root = Temp::new();
+    let dir = commands_in(root.path());
+    fs::write(dir.join("fix.md"), "Fix $ARGUMENTS").unwrap();
+    fs::write(dir.join("big.md"), vec![b'a'; 65_537]).unwrap();
+    symlink(root.path().join("elsewhere"), dir.join("link.md")).unwrap();
+    assert_eq!(
+        route(false, &dir, " /fix it "),
+        Route::Run(Resolved {
+            typed: "/fix it".into(),
+            name: "/fix".into(),
+            prompt: Ok("Fix it".into()),
+        })
+    );
+    assert_eq!(route(true, &dir, "/fix it"), Route::Pass, "agent view open");
+    assert_eq!(route(false, &dir, "/nothere"), Route::Pass);
+    assert_eq!(route(false, &dir, "hello"), Route::Pass);
+    assert_eq!(route(false, &dir, "/model"), Route::Pass, "built-in");
+    assert_eq!(route(false, &dir, "/help"), Route::Pass, "reserved");
+    // Refusals still run so the owner sees why; the draft is kept by the caller.
+    assert_eq!(
+        route(false, &dir, "/big"),
+        Route::Run(Resolved {
+            typed: "/big".into(),
+            name: "/big".into(),
+            prompt: Err("/big refused: over 64 KiB".into()),
+        })
+    );
+    assert!(matches!(
+        route(false, &dir, "/link"),
+        Route::Run(Resolved { prompt: Err(_), .. })
+    ));
 }

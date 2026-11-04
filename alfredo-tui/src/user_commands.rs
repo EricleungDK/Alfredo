@@ -255,6 +255,23 @@ pub fn resolve(dir: &Path, draft: &str) -> Resolved {
     }
 }
 
+/// What Enter does with `draft`: a user command to run, or leave to the other Enter rules.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Route {
+    Pass,
+    Run(Resolved),
+}
+
+/// Decides Enter for `draft`: `Run` when [`claims`] it (the file is then read afresh by
+/// [`resolve`]), otherwise `Pass`.
+pub fn route(agent_shown: bool, dir: &Path, draft: &str) -> Route {
+    if claims(agent_shown, dir, draft) {
+        Route::Run(resolve(dir, draft))
+    } else {
+        Route::Pass
+    }
+}
+
 /// A command or scope receipt is pending, so a user command must wait.
 pub fn is_blocked(wayfinder_active: bool, command_pending: bool) -> bool {
     wayfinder_active || command_pending
