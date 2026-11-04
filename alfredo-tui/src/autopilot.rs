@@ -12,7 +12,8 @@ use crate::{
     understanding,
 };
 #[path = "autopilot_failure.rs"]
-mod failure;
+#[doc(hidden)]
+pub mod failure;
 pub(crate) use failure::{failure_detail, title_failure_line};
 use failure::{
     held_or_done, interrupted_reason, last_failure_line, run_usage, sandbox_failure,

@@ -51,7 +51,7 @@ pub(super) fn run_usage(
 
 /// Root cause when the head failed because the sandbox could not start. The
 /// run's evidence carries the typed `failure_code`; repairing cannot fix it.
-pub(super) fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+pub fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
     if head.status != TaskStatus::Failed {
         return None;
     }
@@ -63,7 +63,7 @@ pub(super) fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String
 
 /// Failure text when the head's approved files exceed the worker's bounds. The
 /// run's evidence carries the typed `failure_code`; repairing cannot fix it.
-pub(super) fn too_large_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+pub fn too_large_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
     if head.status != TaskStatus::Failed {
         return None;
     }
@@ -75,7 +75,7 @@ pub(super) fn too_large_failure(tasks: &TaskControl, head: &Task) -> Option<Stri
 
 /// Failure text when the head's model request never reached the server. The run's
 /// evidence carries the typed `failure_code`; repairing the code cannot fix it.
-pub(super) fn unreachable_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+pub fn unreachable_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
     if head.status != TaskStatus::Failed {
         return None;
     }
@@ -85,10 +85,10 @@ pub(super) fn unreachable_failure(tasks: &TaskControl, head: &Task) -> Option<St
         .then(|| clean(&evidence.detail, 300))
 }
 
-pub(super) const INTERRUPTED: &str = "run interrupted";
+pub const INTERRUPTED: &str = "run interrupted";
 
 /// Why an interrupted run cannot be recovered automatically.
-pub(super) fn interrupted_reason(tasks: &TaskControl, head: u64) -> String {
+pub fn interrupted_reason(tasks: &TaskControl, head: u64) -> String {
     match tasks.run_observations.get(&head) {
         Some(text) if text.contains("another process") => {
             format!("{INTERRUPTED}: its worker is still active in another Alfredo process")
@@ -105,13 +105,13 @@ pub(super) fn held_or_done(family: &Family, tasks: &TaskControl) -> bool {
     matches!(family.settled, Settled::Success(_)) || tasks.owner.held().contains(&family.root)
 }
 
-pub(super) const BUDGET_EXHAUSTED: &str = "repair budget exhausted";
+pub const BUDGET_EXHAUSTED: &str = "repair budget exhausted";
 
 /// One line of a recorded failure for the summary, shortened on a character
 /// boundary. A failed check keeps its `Check failed (exit N): stderr:` head and
 /// ends with the output's key error line (as `worker::failing_lines` picks it,
 /// else the last output line); the head is cut first so the error stays visible.
-pub(super) fn last_failure_line(detail: &str) -> String {
+pub fn last_failure_line(detail: &str) -> String {
     const LIMIT: usize = 160;
     const KEY_LIMIT: usize = 120;
     let first = detail
@@ -130,7 +130,7 @@ pub(super) fn last_failure_line(detail: &str) -> String {
 
 /// The summary line of an autopilot repair's title (`Repair #N: autopilot: <failure>`), as
 /// `Last failure` shows it, so a title cut for width keeps the check's key error line.
-pub(crate) fn title_failure_line(title: &str) -> Option<String> {
+pub fn title_failure_line(title: &str) -> Option<String> {
     let (_, detail) = title.split_once(": autopilot: ")?;
     Some(last_failure_line(detail))
 }
@@ -179,7 +179,7 @@ fn shorten(line: &str, limit: usize) -> String {
 
 /// Repair reason detail: a failed check's bounded output tail from verified
 /// evidence (naming a no-progress attempt), else the recorded run detail. Never empty.
-pub(crate) fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
+pub fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
     let failure = tasks
         .store()
         .evidence(head.id)
@@ -194,4 +194,53 @@ pub(crate) fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
         .map(|run| clean(&run.detail, 1780))
         .filter(|detail| !detail.trim_end_matches(':').trim().is_empty())
         .unwrap_or_else(|| "worker failed; no detail recorded".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::TaskStore;
+
+    fn control(name: &str, held_root: Option<u64>) -> TaskControl {
+        let root = std::env::temp_dir().join(format!("alfredo-held-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        let store = TaskStore::new(&root.join("state"), &root.join("workspace"), "test").unwrap();
+        let mut tasks = TaskControl::new(store);
+        if let Some(held) = held_root {
+            let item = serde_json::json!({
+                "id": 1, "root": held, "task": held, "note": "n", "effect": "repair",
+                "status": "queued", "done": false,
+            });
+            let state = serde_json::json!({"version": 1, "next": 2, "instructions": [item]});
+            std::fs::write(
+                crate::instruct::state_path(&root, "c"),
+                serde_json::to_vec(&state).unwrap(),
+            )
+            .unwrap();
+            tasks.owner = crate::instruct::Instructions::open(&root, "c").unwrap();
+        }
+        tasks
+    }
+
+    fn family(root: u64, settled: Settled) -> Family {
+        Family {
+            root,
+            head: root,
+            settled,
+            repairs: 0,
+        }
+    }
+
+    #[test]
+    fn a_family_is_held_or_done_when_it_succeeded_or_the_owner_holds_it() {
+        let free = control("free", None);
+        let held = control("held", Some(4));
+        assert!(held_or_done(&family(4, Settled::Active), &held));
+        assert!(!held_or_done(&family(5, Settled::Active), &held));
+        assert!(held_or_done(&family(4, Settled::Success(9)), &free));
+        assert!(!held_or_done(&family(4, Settled::Active), &free));
+        assert!(!held_or_done(&family(4, Settled::Stuck("x".into())), &free));
+        assert!(!held_or_done(&family(4, Settled::Cancelled), &free));
+    }
 }
