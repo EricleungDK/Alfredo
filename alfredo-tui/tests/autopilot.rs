@@ -1,4 +1,5 @@
 //! Autopilot drives the existing governed transactions; real HTTP fixtures and workers.
+mod exec_stub;
 mod ollama_fixture;
 use alfredo_tui::{
     assessment::{Criterion, Decision, Outcome, ReviewRisk},
@@ -1349,6 +1350,21 @@ fn failed_run_shows_the_token_totals_line_when_the_server_reported_counts() {
     );
 }
 
+#[test]
+fn sandbox_denied_failure_does_not_say_install_bubblewrap() {
+    // /usr/bin/bwrap exists here, so a sandbox-start failure is a host denial.
+    let (report, notice) = sandbox_refused_with(0, |_| None);
+    assert!(!report.contains("apt install"), "{report}");
+    assert!(!notice.contains("apt install"), "{notice}");
+    assert!(report.contains("user namespaces"), "{report}");
+    // Only a missing file earns the install hint.
+    assert_eq!(
+        alfredo_tui::doctor::sandbox_start_hint(false),
+        alfredo_tui::doctor::BWRAP_FIX
+    );
+    assert!(!alfredo_tui::doctor::sandbox_start_hint(true).contains("apt install"));
+}
+
 fn sandbox_refused_with(
     max_repairs: u32,
     usage: impl Fn(&Value) -> Option<Value> + Send + Sync + 'static,
@@ -1392,7 +1408,8 @@ fn sandbox_refused_with(
         report.contains("bwrap: No permissions to create new namespace"),
         "{report}"
     );
-    assert!(report.contains("sudo apt install bubblewrap"), "{report}");
+    assert!(!report.contains("apt install"), "{report}");
+    assert!(report.contains("user namespaces"), "{report}");
     assert!(!report.contains("repair budget exhausted"), "{report}");
     assert!(
         !server
@@ -4623,10 +4640,8 @@ fn bare_go_refuses_saved_tasks_that_depend_on_unaccepted_work_outside_the_run() 
 }
 
 fn hook_script(fixture: &Fixture, name: &str, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = fixture.root.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    exec_stub::write_executable(&path, &format!("#!/bin/sh\n{body}\n"));
     path
 }
 

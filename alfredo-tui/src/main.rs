@@ -827,22 +827,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     work.tasks.workspace(),
                                     &prompt,
                                 );
-                                // One transcript row per refusal; the footer only points at them.
-                                if !attachment.notices.is_empty() {
+                                // One transcript row per refusal or cut; the footer counts
+                                // only refusals.
+                                if let Some(notice) = alfredo_tui::chat_mentions::refusal_footer(
+                                    attachment.refused,
+                                    tools_back,
+                                ) {
                                     refusal_notice_set = true;
-                                    work.app.notice = if tools_back {
-                                        format!(
-                                            "{} @path mention(s) not attached · reasons are listed in the transcript",
-                                            attachment.notices.len()
-                                        )
-                                    } else {
-                                        // Tool-free turn: keep the tools-off notice visible too.
-                                        format!(
-                                            "{} @path mention(s) not attached · {}",
-                                            attachment.notices.len(),
-                                            alfredo_tui::wayfinder::TOOLS_OFF_NOTICE
-                                        )
-                                    };
+                                    work.app.notice = notice;
                                 }
                                 work.app.sessions[turn.session].show_mention_refusals(
                                     turn.user_message,
@@ -1095,8 +1087,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             ) {
                                 // Their withdrawal paths already word the footer.
                             } else {
-                                // The reason must not live only in the chat rows (#538).
-                                work.app.notice = error.clone();
+                                // The reason must not live only in the chat rows (#538); a
+                                // sandbox refusal leads with its fix (#608).
+                                let word = command.text.split_whitespace().next();
+                                match alfredo_tui::doctor::sandbox_refusal_view(
+                                    &error,
+                                    word.unwrap_or_default(),
+                                ) {
+                                    Some((notice, rows)) => {
+                                        work.app.notice = notice;
+                                        work.app.transient_rows = rows;
+                                        // Only the chat view draws the rows.
+                                        work.app.models_visible = false;
+                                        work.tasks.set_visible(false);
+                                    }
+                                    None => work.app.notice = error.clone(),
+                                }
                             }
                             alfredo_tui::console_command::CommandState::Refused {
                                 reason: alfredo_tui::console_command::bounded_reason(&error),
@@ -1769,9 +1775,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 Err(error) => {
-                                    // The footer cuts the long config refusal before its fix (#537).
+                                    // The footer cuts the long config and sandbox refusals before their fix (#537, #608).
                                     if let Some((notice, rows)) =
-                                        alfredo_tui::worker::config_refusal_view(&error)
+                                        alfredo_tui::worker::refusal_view(&error, "/go")
                                     {
                                         work.app.notice = notice;
                                         work.app.transient_rows = rows;

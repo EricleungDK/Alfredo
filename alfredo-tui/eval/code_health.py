@@ -35,7 +35,7 @@ ITEM_START = re.compile(r'(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const|defa
                         r'(?:fn|mod|impl|struct|enum|trait|union|macro_rules!)\b')
 CALL = re.compile(r'\.(?:unwrap|expect)\(')
 DIAGNOSTIC = re.compile(r'^\S[^\n]*?:\d+:\d+: (?:warning|error)\b', re.M)
-SUMMARY = re.compile(r'^warning: `[^`]+` \((lib|bin[^)]*)\) generated (\d+) warnings?', re.M)
+SUMMARY = re.compile(r'^warning: `[^`]+` \((lib|bin[^)]*)\) generated (\d+) warnings?(?: \((\d+) duplicates?\))?', re.M)
 
 
 class CodeHealthError(Exception):
@@ -221,11 +221,12 @@ def parse_clippy(output):
     """Count clippy diagnostics in `--message-format=short` output; split lib/bin by the summary lines."""
     diagnostics = len(DIAGNOSTIC.findall(output))
     lib = bins = 0
-    for target, count in SUMMARY.findall(output):
+    for target, count, duplicates in SUMMARY.findall(output):
+        printed = int(count) - int(duplicates or 0)  # clippy's total counts duplicates it does not print
         if target == 'lib':
-            lib += int(count)
+            lib += printed
         else:
-            bins += int(count)
+            bins += printed
     if lib + bins != diagnostics:
         raise CodeHealthError(f'clippy printed {diagnostics} diagnostics but its summary lines add up to '
                               f'{lib + bins} (lib {lib}, bin {bins}); duplicates or a changed output format')
