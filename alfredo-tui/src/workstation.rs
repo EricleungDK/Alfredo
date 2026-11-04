@@ -64,6 +64,11 @@ impl ChatView {
         Ok(Self { tasks, saved_model })
     }
 }
+/// Whether `now` is still short of `deadline`: at the deadline itself the wait is over.
+pub fn before(now: std::time::Instant, deadline: std::time::Instant) -> bool {
+    now < deadline
+}
+
 impl Workstation {
     /// Queue the owner's `/repair ID retry` for the task an unreachable model server
     /// stopped, exactly as typing it would: recorded in the conversation, then released
@@ -77,7 +82,7 @@ impl Workstation {
         patience: std::time::Duration,
     ) -> Result<(usize, String), String> {
         let deadline = std::time::Instant::now() + patience;
-        while self.tasks.pending && std::time::Instant::now() < deadline {
+        while self.tasks.pending && before(std::time::Instant::now(), deadline) {
             self.tasks.poll();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

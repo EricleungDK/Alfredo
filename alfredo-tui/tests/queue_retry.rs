@@ -76,3 +76,12 @@ fn the_wait_gives_up_after_its_patience() {
     assert!(error.contains("pending"), "{error}");
     assert!(work.tasks.pending);
 }
+
+#[test]
+fn the_wait_is_over_at_the_deadline_itself() {
+    use alfredo_tui::workstation::before;
+    let now = Instant::now();
+    assert!(before(now, now + Duration::from_nanos(1)));
+    assert!(!before(now, now), "at the deadline the wait is over");
+    assert!(!before(now + Duration::from_nanos(1), now));
+}
