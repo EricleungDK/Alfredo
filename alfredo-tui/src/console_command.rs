@@ -105,3 +105,11 @@ pub fn bounded_reason(reason: &str) -> String {
         result
     }
 }
+
+/// Why the command `id` was refused, if it was: the refusal the owner would see.
+pub fn refused_reason(commands: &[ConsoleCommand], id: &str) -> Option<String> {
+    commands.iter().find_map(|saved| match &saved.state {
+        CommandState::Refused { reason } if saved.id == id => Some(reason.clone()),
+        _ => None,
+    })
+}

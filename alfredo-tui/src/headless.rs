@@ -6,11 +6,14 @@
 //! `--chat PROMPT --headless` ([`run_chat`]) runs one Chat Agent turn the same way;
 //! its Approval gate is answered by a scripted [`Policy`], never by a skip mode.
 use alfredo_tui::{
-    autopilot::{name_stopped_task, RunState, Status, TaskOutcome},
+    autopilot::{
+        name_stopped_task, retry_wait, RetryWait, RunState, Status, TaskOutcome,
+        RETRY_RESTART_LIMIT,
+    },
     chat_tools::approval::{Card, CardKind, Decision, Gate, Log, Outcome, Record},
     chat_tools::{MAX_STEPS, STEP_CAP_NOTICE},
     command_intent::Intent,
-    console_command::{bounded_reason, CommandState},
+    console_command::{bounded_reason, refused_reason, CommandState},
     model::{Stop, Update},
     provider::Ollama,
     tasks::TaskStatus,
@@ -329,49 +332,6 @@ fn paused_refusal(run: &Status) -> String {
     )
 }
 
-/// How long the old `Failed` stop may wait for the queued retry to restart the run.
-const RETRY_RESTART_LIMIT: Duration = Duration::from_secs(60);
-
-/// What the wait for a queued `--resume` retry decides.
-#[derive(Debug, PartialEq, Eq)]
-enum RetryWait {
-    Hold,
-    Refused(String),
-    TimedOut,
-}
-
-/// A refused retry or one that outlasted `limit` ends the run; otherwise keep waiting.
-fn retry_wait(refused: Option<&str>, elapsed: Duration, limit: Duration) -> RetryWait {
-    match refused {
-        Some(reason) => RetryWait::Refused(reason.to_owned()),
-        None if elapsed > limit => RetryWait::TimedOut,
-        None => RetryWait::Hold,
-    }
-}
-
-/// Queue the owner's `/repair ID retry` for the task an unreachable model server
-/// stopped, exactly as typing it would: recorded in the conversation, then released
-/// through the saved-intent barrier. Autopilot re-enters its loop once the repair exists.
-fn queue_retry(work: &mut Workstation, id: u64, model: &str) -> Result<(usize, String), String> {
-    // The refresh launched at startup must land first: a command waits for it.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while work.tasks.pending && Instant::now() < deadline {
-        work.tasks.poll();
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let text = format!("/repair {id} retry");
-    let intent = work
-        .tasks
-        .prepare_command(&text, model)
-        .map_err(|error| format!("--resume: the retry was refused: {error}"))?
-        .ok_or("--resume: the retry is not a task command")?;
-    let origin = work.app.selected;
-    let command = work.app.sessions[origin]
-        .submit_command(text, intent)
-        .map_err(|error| format!("--resume: the retry was not recorded: {error}"))?;
-    Ok((origin, command))
-}
-
 /// Run the goal to its end. `Err` is a setup error; otherwise the exit code.
 pub fn run(options: Options) -> Result<i32, String> {
     let Options {
@@ -443,7 +403,7 @@ pub fn run(options: Options) -> Result<i32, String> {
         ));
     } else if let Some((run, id)) = stopped {
         goal = run.goal;
-        let queued = queue_retry(&mut work, id, &model)?;
+        let queued = work.queue_retry(id, &model, alfredo_tui::autopilot::REFRESH_PATIENCE)?;
         pending = Some(queued.clone());
         retry = Some((queued.0, queued.1, Instant::now()));
         say(format!(
@@ -524,13 +484,7 @@ pub fn run(options: Options) -> Result<i32, String> {
         } else if let Some((origin, command, since)) = retry.take() {
             // The queued retry re-enters the loop on a later tick; until then the old
             // stop is not the end, unless the retry was refused or never took.
-            let refused = work.app.sessions[origin]
-                .commands()
-                .iter()
-                .find_map(|saved| match (&saved.state, saved.id == command) {
-                    (CommandState::Refused { reason }, true) => Some(reason.clone()),
-                    _ => None,
-                });
+            let refused = refused_reason(work.app.sessions[origin].commands(), &command);
             match retry_wait(refused.as_deref(), since.elapsed(), RETRY_RESTART_LIMIT) {
                 RetryWait::Hold => retry = Some((origin, command, since)),
                 RetryWait::Refused(reason) => {
@@ -570,8 +524,8 @@ pub fn run(options: Options) -> Result<i32, String> {
             }
             let mut result = result_json(&model, &status, &outcomes, &reason, fatal.is_some());
             // A model-unreachable stop names its task and the way forward (issue #584).
-            let stopped = work.autopilot.reentrant_run(&work.tasks).map(|(_, id)| id);
-            if let Some(id) = stopped.filter(|_| status.state == RunState::Failed) {
+            // `reentrant_run` is only ever a `Failed` run, so no state check is needed.
+            if let Some((_, id)) = work.autopilot.reentrant_run(&work.tasks) {
                 name_stopped_task(&mut result, id);
                 say(format!(
                     "next: start the model server, then --resume --headless retries #{id} without planning again"
@@ -1659,44 +1613,6 @@ mod tests {
             Turn::default().json("m", Policy::Deny, &[])["usage"],
             serde_json::json!({"prompt_tokens": null, "completion_tokens": null, "model_seconds": null})
         );
-    }
-
-    #[test]
-    fn retry_wait_holds_until_refused_or_past_the_limit() {
-        let limit = Duration::from_secs(60);
-        assert_eq!(retry_wait(None, Duration::ZERO, limit), RetryWait::Hold);
-        assert_eq!(retry_wait(None, limit, limit), RetryWait::Hold);
-        assert_eq!(
-            retry_wait(None, limit + Duration::from_millis(1), limit),
-            RetryWait::TimedOut
-        );
-        assert_eq!(
-            retry_wait(Some("no"), Duration::ZERO, limit),
-            RetryWait::Refused("no".into())
-        );
-        assert_eq!(
-            retry_wait(Some("no"), limit * 2, limit),
-            RetryWait::Refused("no".into())
-        );
-    }
-
-    #[test]
-    fn stopped_task_id_replaces_only_the_autopilot_entrys_null_id() {
-        let stuck = outcome(2, TaskStatus::Failed, 0, Some(Err("failed".into())));
-        let mut json = result_json(
-            "m",
-            &status(RunState::Failed, 0),
-            &[stuck],
-            "Cannot reach Ollama",
-            true,
-        );
-        name_stopped_task(&mut json, 7);
-        assert_eq!(json["failed"][0]["id"], 2);
-        assert_eq!(json["failed"][1]["id"], 7);
-        assert_eq!(json["failed"][1]["title"], "autopilot");
-        let mut plain = result_json("m", &status(RunState::Done, 2), &[], "", false);
-        name_stopped_task(&mut plain, 7);
-        assert_eq!(plain["failed"], serde_json::json!([]));
     }
 
     #[test]

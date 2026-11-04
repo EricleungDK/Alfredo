@@ -2761,3 +2761,26 @@ pub fn name_stopped_task(result: &mut serde_json::Value, id: u64) {
         entry["id"] = id.into();
     }
 }
+
+/// How long the old `Failed` stop may wait for the queued retry to restart the run.
+pub const RETRY_RESTART_LIMIT: Duration = Duration::from_secs(60);
+
+/// How long a queued retry waits for the startup task refresh to land.
+pub const REFRESH_PATIENCE: Duration = Duration::from_secs(10);
+
+/// What the wait for a queued `--resume` retry decides.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RetryWait {
+    Hold,
+    Refused(String),
+    TimedOut,
+}
+
+/// A refused retry or one that outlasted `limit` ends the run; otherwise keep waiting.
+pub fn retry_wait(refused: Option<&str>, elapsed: Duration, limit: Duration) -> RetryWait {
+    match refused {
+        Some(reason) => RetryWait::Refused(reason.to_owned()),
+        None if elapsed > limit => RetryWait::TimedOut,
+        None => RetryWait::Hold,
+    }
+}
