@@ -1143,8 +1143,8 @@ class TerminalSmoke(unittest.TestCase):
                 if request['messages'][-1]['content'].startswith('Implement this task:'):
                     worker_models.append(request['model'])
                     if 'AUTO_' in request['messages'][-1]['content'].split('\n', 1)[0]:
-                        parallel_workers.wait(timeout=8)
-                        release_parallel.wait(10)
+                        parallel_workers.wait(timeout=60)
+                        release_parallel.wait(60)
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/x-ndjson')
                 self.end_headers()
@@ -1157,16 +1157,16 @@ class TerminalSmoke(unittest.TestCase):
                         self.wfile.write((json.dumps({'message': {'content': text}, 'done': done}) + '\n').encode())
                         self.wfile.flush()
                     send_reading(''.join(f'READ_HISTORY_{n:03}\n' for n in range(60)))
-                    release_reading.wait(10)
+                    release_reading.wait(60)
                     send_reading(''.join(f'READ_MORE_{n:03}\n' for n in range(40)))
-                    finish_reading.wait(10)
+                    finish_reading.wait(60)
                     send_reading('READING_DONE', True)
                     return
                 if request['messages'][-1]['content'] == 'slow':
                     self.wfile.write(b'{"message":{"thinking":"PRIVATE_THINKING_SENTINEL"}}\n')
                     self.wfile.flush()
                     slow_started.set()
-                    release_slow.wait(10)
+                    release_slow.wait(60)
                     return
                 if request['messages'][0]['content'].startswith('Act as Frontier Architect'):
                     context = json.loads(request['messages'][1]['content'].split('\n', 1)[1])
@@ -1216,15 +1216,15 @@ class TerminalSmoke(unittest.TestCase):
         subprocess.run(['git', '-C', workspace.name, '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture'], check=True)
         env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state.name)
         for mode in ['auto', 'on', 'off']:
-            result = subprocess.run([str(binary), '--structured-thinking', mode, '--help'], capture_output=True, text=True, timeout=5)
+            result = subprocess.run([str(binary), '--structured-thinking', mode, '--help'], capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
         for tail in [[], ['invalid']]:
-            result = subprocess.run([str(binary), '--structured-thinking', *tail], capture_output=True, text=True, timeout=5)
+            result = subprocess.run([str(binary), '--structured-thinking', *tail], capture_output=True, text=True, timeout=30)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('--structured-thinking needs auto, on or off', result.stderr)
         preflight = subprocess.run(
             [str(binary), '--doctor', '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
-            capture_output=True, text=True, env=env, cwd=workspace.name, timeout=15,
+            capture_output=True, text=True, env=env, cwd=workspace.name, timeout=60,
         )
         self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
         self.assertIn('PASS model catalog: fixture is installed', preflight.stdout)
@@ -1234,11 +1234,17 @@ class TerminalSmoke(unittest.TestCase):
         )
         output = bytearray()
 
-        def wait_for(text, timeout=30):
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
+        def wait_for(text, patience=30):
+            # `patience` is not a latency assertion: a loaded box may need far longer
+            # than a tight hint, so call sites state no timeout (issue #611).
+            deadline = time.monotonic() + patience
+            while True:
+                # Check after every read, so output that arrives with the last chunk
+                # before the deadline is not discarded as a miss.
                 if text.decode() in visible_screen(output):
                     return
+                if time.monotonic() >= deadline:
+                    break
                 if select.select([master], [], [], 0.05)[0]:
                     chunk = os.read(master, 65536)
                     output.extend(chunk)
@@ -1249,6 +1255,32 @@ class TerminalSmoke(unittest.TestCase):
             tasks = [(task['id'], task['status'], (task.get('run') or {}).get('detail')) for task in json.loads(stores[0].read_text())['tasks']] if stores else []
             failed_checks = [json.loads(path.read_text()).get('check') for path in Path(state.name).rglob('evidence.json') if json.loads(path.read_text()).get('status') == 'failed']
             self.fail(f'Missing {text!r}:\n{visible_screen(output)}\nSaved task outcomes: {tasks}\nFailed checks: {failed_checks}')
+
+        def wait_for_saved_conversation(quiet=1.5, timeout=30):
+            # The app checkpoints the conversation from a background worker, so a save
+            # for the last action can still be queued or running. Swapping the file for a
+            # directory then races it: the worker can recreate the file between unlink and
+            # mkdir (FileExistsError, issue #611). Return its path once the saved bytes
+            # have stayed unchanged for `quiet` seconds, so nothing is left to write.
+            start = time.monotonic()
+            deadline = start + timeout
+            seen = None
+            stable_since = start
+            while time.monotonic() < deadline:
+                found = list(Path(state.name).glob('rust-tasks-v1/*/conversations-*.json'))
+                current = found[0].read_bytes() if found and found[0].is_file() else None
+                if current is None or current != seen:
+                    seen = current
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= quiet:
+                    return found[0]
+                if select.select([master], [], [], 0.05)[0]:
+                    chunk = os.read(master, 65536)
+                    output.extend(chunk)
+                    if b'\x1b[6n' in chunk:
+                        os.write(master, b'\x1b[1;1R')
+                self.assertIsNone(process.poll(), output.decode(errors='replace'))
+            self.fail(f'Conversation file never settled:\n{visible_screen(output)}')
 
         def wait_for_header_without(text, timeout=30):
             # Header row 1 names dispatch only while it is on.
@@ -1308,12 +1340,7 @@ class TerminalSmoke(unittest.TestCase):
             self.assertEqual(len(model_requests), 0)
             # Scope mutations must survive the same real failed-save barrier as
             # task commands. Ctrl+R retries the captured turn and exact request.
-            deadline = time.monotonic() + 5
-            while not list(Path(state.name).glob('rust-tasks-v1/*/conversations-*.json')):
-                self.assertLess(time.monotonic(), deadline, 'Initial conversation was not saved')
-                if select.select([master], [], [], 0.05)[0]:
-                    output.extend(os.read(master, 65536))
-            scope_intent_path = next(Path(state.name).glob('rust-tasks-v1/*/conversations-*.json'))
+            scope_intent_path = wait_for_saved_conversation()
             scope_intent_bytes = scope_intent_path.read_bytes()
             scope_intent_path.unlink()
             scope_intent_path.mkdir()
@@ -1351,7 +1378,7 @@ class TerminalSmoke(unittest.TestCase):
             self.assertEqual(understanding['flow']['mode'], 'chart')
             self.assertTrue(understanding['confirmed'])
             os.write(master, b'slow\r')
-            self.assertTrue(slow_started.wait(5), 'Model request did not start')
+            self.assertTrue(slow_started.wait(30), 'Model request did not start')
             scope_reference = model_requests[-1]['messages'][0]
             self.assertEqual(scope_reference['role'], 'system')
             captured_scope = json.loads(scope_reference['content'].split('Scope reference: ', 1)[1])
@@ -1388,7 +1415,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Ctrl+R retries')
             self.assertNotIn('Esc stop', visible_screen(output))
             # Intent publication failure must prevent canonical task dispatch.
-            intent_path = next(Path(state.name).glob('rust-tasks-v1/*/conversations-*.json'))
+            intent_path = wait_for_saved_conversation()
             intent_bytes = intent_path.read_bytes()
             intent_path.unlink()
             intent_path.mkdir()
@@ -1423,7 +1450,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/tasks\r')
             wait_for(b'Persisted_fix')
             os.write(master, b'\x11')  # Ctrl+Q
-            self.assertEqual(process.wait(timeout=3), 0)
+            self.assertEqual(process.wait(timeout=30), 0)
             self.assertEqual(termios.tcgetattr(slave), original)
             conversations = json.loads(next(Path(state.name).glob('rust-tasks-v1/*/conversations-*.json')).read_text())
             self.assertEqual(len(conversations['sessions']), 2)
@@ -1496,7 +1523,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/approve 1\r')
             wait_for(b'revision 5')
             os.write(master, b'/run 1\r')
-            wait_for(b'needs review', timeout=15)
+            wait_for(b'needs review')
             os.write(master, b'/chat\r')
             wait_for(b'Task #1 started')
             wait_for(b'Task #1 check passed')
@@ -1520,7 +1547,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/approve 2\r')
             wait_for(b'revision 9')
             os.write(master, b'/run 2\r')
-            wait_for('◐ #2'.encode(), timeout=15)
+            wait_for('◐ #2'.encode())
             repair_requests = [r for r in model_requests if r['messages'][-1]['content'].startswith('Implement this task: Repair #1:')]
             self.assertEqual(len(repair_requests), 1)
             self.assertEqual([m['role'] for m in repair_requests[0]['messages']], ['user', 'assistant', 'user'])
@@ -1552,7 +1579,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/resolve-repair 2\r')
             wait_for(b'revision 16')
             os.write(master, b'/run 3\r')
-            wait_for('◐ #3'.encode(), timeout=15)
+            wait_for('◐ #3'.encode())
             os.write(master, b'/evidence 3\r')
             wait_for(b'Accepted dependency inputs: #1 via repair #2')
             result = json.loads(saved.read_text())
@@ -1574,7 +1601,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/activity #3\r')
             wait_for(b'Review branch recorded')
             os.write(master, b'/plan Extend calculation with integration checks\r')
-            wait_for(b'Review draft paths', timeout=10)
+            wait_for(b'Review draft paths')
             # Readable task list by default; Ctrl+O shows the raw JSON and back.
             wait_for(b'#1 Planned calculation')
             os.write(master, b'\x0f')
@@ -1583,13 +1610,13 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'#1 Planned calculation')
             self.assertEqual(len(json.loads(saved.read_text())['tasks']), 3)
             os.write(master, b'/plan-revise Add boundary coverage\r')
-            wait_for(b'Review revised draft paths', timeout=10)
+            wait_for(b'Review revised draft paths')
             self.assertEqual(len(json.loads(saved.read_text())['tasks']), 3)
             revision_request = model_requests[-1]
             self.assertTrue(any(m['content'].startswith('Previous unsaved task draft') for m in revision_request['messages']))
             request_count = len(model_requests)
             os.write(master, b'\x11')
-            self.assertEqual(process.wait(timeout=3), 0)
+            self.assertEqual(process.wait(timeout=30), 0)
             self.assertEqual(termios.tcgetattr(slave), original)
             draft_snapshot = json.loads(next(Path(state.name).glob('rust-tasks-v1/*/conversations-*.json')).read_text())
             self.assertEqual(draft_snapshot['plan_draft']['plan']['tasks'][1]['title'], 'Revised integration')
@@ -1642,7 +1669,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/approve 4\r')
             wait_for(b'revision 25')
             os.write(master, b'/run 4\r')
-            wait_for('◐ #4'.encode(), timeout=15)
+            wait_for('◐ #4'.encode())
             self.assertEqual(worker_models[-1], replacement)
             self.assertEqual(json.loads(saved.read_text())['tasks'][3]['model'], replacement)
             self.assertEqual(Path(workspace.name, 'answer.py').read_text(), 'VALUE = 0\n')
@@ -1667,16 +1694,16 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/dispatch on\r')
             wait_for(b'   dispatch on')  # header attention while on
             os.write(master, b'/chat\r')
-            wait_for(b'   2 running', timeout=15)
+            wait_for(b'   2 running')
             release_parallel.set()
-            wait_for(b'3 review', timeout=15)
+            wait_for(b'3 review')
             os.write(master, b'\x1bOQ')
             # Hierarchy rows can extend beyond the viewport; inspect both exact
             # results without changing the concurrent-dispatch authority checks.
             os.write(master, b'/tasks #6\r')
-            wait_for('◐ #6'.encode(), timeout=15)
+            wait_for('◐ #6'.encode())
             os.write(master, b'/tasks #7\r')
-            wait_for('◐ #7'.encode(), timeout=15)
+            wait_for('◐ #7'.encode())
             self.assertIsNone(json.loads(saved.read_text())['tasks'][4].get('run'))
             os.write(master, b'/evidence 4\r')
             wait_for(b'Acceptance criteria')
@@ -1698,7 +1725,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Approved with limitations')
             wait_for(b'Limitation:')
             self.assertTrue(any(r['request']['action'].get('decision') == decision for r in json.loads(saved.read_text())['receipts']))
-            wait_for('◐ #5'.encode(), timeout=15)
+            wait_for('◐ #5'.encode())
             os.write(master, b'/dispatch off\r')
             wait_for('✓ Dispatch off'.encode())
             wait_for_header_without(b'dispatch on')
@@ -1721,10 +1748,10 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/tasks #8\r')
             wait_for(b'Task filter applied')
             os.write(master, b'/run 8\r')
-            wait_for('◐ #8'.encode(), timeout=15)
+            wait_for('◐ #8'.encode())
             requests_before_architect = len(model_requests)
             os.write(master, ('/review 8 ' + json.dumps(architecture_review) + '\r').encode())
-            wait_for(b'Review draft paths', timeout=15)
+            wait_for(b'Review draft paths')
             os.write(master, b'\x1b[6~')
             wait_for(b'Architect corrected calculation')
             self.assertEqual(len(model_requests), requests_before_architect + 1)
@@ -1759,7 +1786,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/tasks #9\r')
             wait_for(b'Task filter applied')
             os.write(master, b'/run 9\r')
-            wait_for('◐ #9'.encode(), timeout=15)
+            wait_for('◐ #9'.encode())
             revised = json.loads(saved.read_text())
             self.assertEqual(revised['tasks'][8]['run']['baseline'], revised['tasks'][7]['run']['baseline'])
             self.assertEqual(revised['tasks'][8]['run']['inputs'], revised['tasks'][7]['run']['inputs'])

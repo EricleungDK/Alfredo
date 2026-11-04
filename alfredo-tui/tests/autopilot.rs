@@ -1,4 +1,5 @@
 //! Autopilot drives the existing governed transactions; real HTTP fixtures and workers.
+mod exec_stub;
 mod ollama_fixture;
 use alfredo_tui::{
     assessment::{Criterion, Decision, Outcome, ReviewRisk},
@@ -4771,10 +4772,8 @@ fn bare_go_refuses_saved_tasks_that_depend_on_unaccepted_work_outside_the_run() 
 }
 
 fn hook_script(fixture: &Fixture, name: &str, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = fixture.root.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    exec_stub::write_executable(&path, &format!("#!/bin/sh\n{body}\n"));
     path
 }
 

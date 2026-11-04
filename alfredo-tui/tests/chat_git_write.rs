@@ -1,5 +1,6 @@
 //! Issue #237: git write tools (commit, switch, merge) and push for the Chat Agent,
 //! each behind owner Approval, run on host against temp repos with a local bare remote.
+mod exec_stub;
 mod ollama_fixture;
 
 use alfredo_tui::{
@@ -36,14 +37,11 @@ static SSH: Mutex<()> = Mutex::new(());
 /// A GIT_SSH stand-in that runs the remote command locally, so a push reaches a bare
 /// repository through an `ssh://localhost` URL (a local-path remote is refused, #309).
 fn ssh_stand_in(base: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let script = base.join("ssh-stand-in");
-    fs::write(
+    exec_stub::write_executable(
         &script,
         "#!/bin/sh\nfor last; do :; done\nexec sh -c \"$(printf '%s' \"$last\" | sed 's/^git-/git /')\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 
@@ -473,16 +471,10 @@ fn merge_file_list_of_exactly_40_lines_is_shown_whole_and_41_is_refused() {
 fn commit_hooks_do_not_run() {
     let repo = Repo::new();
     let hook = repo.root.join(".git/hooks/pre-commit");
-    fs::write(
+    exec_stub::write_executable(
         &hook,
         "#!/bin/sh\ntouch \"$(dirname \"$0\")/../../HOOK_RAN\"\nexit 1\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    );
     fs::write(repo.root.join("a.txt"), "a\n").unwrap();
     repo.approve("git_commit", json!({"message": "a", "files": ["a.txt"]}))
         .unwrap();
@@ -1601,15 +1593,10 @@ fn a_filter_or_hook_still_never_runs_with_the_submodule_keys_set() {
     fs::create_dir_all(&hooks).unwrap();
     let hook = hooks.join("pre-commit");
     let hook_marker = repo.base.join("hook-ran");
-    fs::write(
+    exec_stub::write_executable(
         &hook,
-        format!("#!/bin/sh\ntouch {}\n", hook_marker.display()),
-    )
-    .unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+        &format!("#!/bin/sh\ntouch {}\n", hook_marker.display()),
+    );
     repo.approve(
         "git_commit",
         json!({"message": "edit readme", "files": ["README.md"]}),
@@ -2143,7 +2130,6 @@ fn push_card_shows_the_push_url() {
 #[cfg(unix)]
 #[test]
 fn push_child_has_no_controlling_terminal_and_names_the_ssh_prompt() {
-    use std::os::unix::fs::PermissionsExt;
     let _ssh = SSH.lock().unwrap_or_else(|error| error.into_inner());
     let repo = Repo::new();
     git(
@@ -2157,9 +2143,9 @@ fn push_child_has_no_controlling_terminal_and_names_the_ssh_prompt() {
     );
     let marker = repo.base.join("fakessh-session");
     let script = repo.base.join("fakessh");
-    fs::write(
+    exec_stub::write_executable(
         &script,
-        format!(
+        &format!(
             "#!/bin/sh\ncut -d' ' -f6 /proc/$$/stat > '{}'\n\
              if (exec 3<>/dev/tty) 2>/dev/null; then\n\
              echo 'FAKESSH-PROMPT: continue connecting (yes/no)?' > /dev/tty\n\
@@ -2167,9 +2153,7 @@ fn push_child_has_no_controlling_terminal_and_names_the_ssh_prompt() {
              echo 'Host key verification failed.' >&2\nexit 255\n",
             marker.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     fs::write(repo.root.join("a.txt"), "a\n").unwrap();
     git(&repo.root, &["add", "a.txt"]);
     git(&repo.root, &["commit", "-q", "-m", "local work"]);
@@ -2234,9 +2218,7 @@ fn commit_a_file(repo: &Repo) {
 
 /// An executable `#!/bin/sh` script at `path` running `body`.
 fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    exec_stub::write_executable(path, &format!("#!/bin/sh\n{body}\n"));
 }
 
 /// Sets HOME to an empty directory for one test and restores it on drop. It is process-wide
