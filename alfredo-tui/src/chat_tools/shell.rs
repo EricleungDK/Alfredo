@@ -165,6 +165,9 @@ const OUTPUT_LIMIT: usize = 1024 * 1024;
 const TERMINAL_HINT: &str = "note: host commands run without a terminal, so a command that needs a terminal prompt (sudo password, ssh host key or passphrase, git credentials) cannot run here; use ssh-agent or a credential helper, or ask the owner to run it themselves.";
 /// Shown to the model when a sandboxed command fails.
 const ESCALATE_HINT: &str = "note: ran sandboxed (network off; only the Coding Workspace is writable; .git and tools outside /usr are not available). If it failed for that reason, call run_command again with escalate: true; the owner must approve running it on the host.";
+/// [`ESCALATE_HINT`] without its advice, for a run that hides secret files: the hidden-files
+/// note says not to retry on the host, so the two must not give opposite next steps.
+const SANDBOX_NOTE: &str = "note: ran sandboxed (network off; only the Coding Workspace is writable; .git and tools outside /usr are not available).";
 
 pub const RUN_COMMAND: Tool = Tool {
     name: "run_command",
@@ -448,7 +451,7 @@ fn hide_refusal(reason: String) -> String {
 
 /// The line that tells the model why masked files fail: a count only, never a name.
 fn hidden_note(hidden: usize) -> String {
-    format!("note: {hidden} secret file(s)/directory(ies) are hidden in this sandbox and fail with Permission denied; they need the owner, do not retry on the host to read them")
+    format!("note: {hidden} secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them")
 }
 
 /// Run in the bubblewrap Sandbox at `bwrap`: the worker check boundary rooted at the
@@ -740,7 +743,11 @@ fn report(plan: &Plan, ran: Ran, hidden: usize) -> Result<String, String> {
             }
             if !plan.escalate && ran.exit_code != Some(0) {
                 text.push('\n');
-                text.push_str(ESCALATE_HINT);
+                text.push_str(if hidden > 0 {
+                    SANDBOX_NOTE
+                } else {
+                    ESCALATE_HINT
+                });
             }
             if hidden > 0 {
                 text.push('\n');
