@@ -2756,3 +2756,83 @@ fn approval_card_escapes_every_default_ignorable_code_point() {
         "drawn raw on the approval card: {leaked:?}"
     );
 }
+
+/// Issue #485 (mech R3, ui.rs `draw_right`): the transcript, and so the card, is drawn
+/// only when no task view, models list or completion popup covers it. Under any one of
+/// them the draw must not credit the card as shown.
+#[test]
+fn a_task_view_models_list_or_completion_covering_the_chat_credits_no_card_as_shown() {
+    use alfredo_tui::{commands::Completion, task_control::TaskControl};
+    let (root, session) = big_session("page-covered", &numbered(200));
+    let mut paged = Paged::new(session, 100, 24);
+    let text = paged.wait_and_draw(approval::ARM * 2);
+    assert!(paged.session().approval_header_drawn(), "baseline: {text}");
+    let workspace = root.join("tasks-workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = TaskStore::new(&root.join("tasks-state"), &workspace, "covered").unwrap();
+    let mut tasks = TaskControl::new(store);
+    for cover in ["tasks", "models", "completion"] {
+        tasks.visible = cover == "tasks";
+        paged.app.models_visible = cover == "models";
+        paged.app.completion = (cover == "completion").then(|| Completion::open("/").unwrap());
+        paged
+            .terminal
+            .draw(|frame| ui::draw_with_tasks(frame, &paged.app, &tasks))
+            .unwrap();
+        let session = &paged.app.sessions[0];
+        assert!(!session.approval_header_drawn(), "{cover}: header credited");
+        assert!(!session.approval_whole(), "{cover}: card credited whole");
+    }
+    // Uncovered again, the same draw shows the card.
+    tasks.visible = false;
+    paged.app.models_visible = false;
+    paged.app.completion = None;
+    paged
+        .terminal
+        .draw(|frame| ui::draw_with_tasks(frame, &paged.app, &tasks))
+        .unwrap();
+    assert!(paged.app.sessions[0].approval_header_drawn());
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #485 (mech R3, ui.rs `draw_transcript`): the header counts as shown exactly when
+/// its header row and its args row are both on screen, one row more or less is not enough.
+/// Scrolling up one row at a time pushes the card off the bottom edge row by row.
+#[test]
+fn the_card_header_counts_as_shown_exactly_while_its_header_and_args_rows_are_on_screen() {
+    let root = workspace("page-header-edge");
+    let card = approval::card(
+        &root,
+        &call(
+            "write_file",
+            json!({"path": "big.txt", "content": numbered(200)}),
+        ),
+    )
+    .unwrap();
+    let mut session = Session::new("m".into());
+    session.insert(&"earlier context line\n".repeat(60));
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.await_approval(attempt, card, Instant::now()));
+    let mut paged = Paged::new(session, 100, 24);
+    let (mut shown, mut cut) = (0, 0);
+    for k in 1..=40 {
+        paged.session().scroll_rows(-1);
+        let text = paged.draw();
+        let on_screen = text.contains("Approve write_file") && text.contains("  args {");
+        assert_eq!(
+            paged.session().approval_header_drawn(),
+            on_screen,
+            "scrolled up {k} rows:\n{text}"
+        );
+        if on_screen {
+            shown += 1;
+        } else {
+            cut += 1;
+        }
+    }
+    // Both sides of the edge were exercised, so the equality above is not vacuous.
+    assert!(shown > 0 && cut > 0, "{shown} shown, {cut} cut");
+    let _ = fs::remove_dir_all(root);
+}
