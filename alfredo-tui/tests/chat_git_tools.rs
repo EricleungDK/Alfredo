@@ -1,4 +1,5 @@
 //! Issue #234: read-only git tools for the Chat Agent, on temp git repositories.
+mod exec_stub;
 use alfredo_tui::{
     chat_tools::{self, Tier, MAX_OUTPUT},
     model::ToolCall,
@@ -1460,15 +1461,10 @@ fn partial_clone_repo(missing: &str) -> (Repo, PathBuf) {
     fs::write(repo.root.join("README.md"), "# Demo\nedited\n").unwrap();
     let marker = repo.base.join("X");
     let script = repo.base.join("uploadpack.sh");
-    fs::write(
+    exec_stub::write_executable(
         &script,
-        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
-    )
-    .unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+        &format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    );
     let url = repo.root.display().to_string();
     for (key, value) in [
         ("core.repositoryformatversion", "1"),

@@ -32,7 +32,7 @@ pub const LIMIT: usize = 128;
 /// past `LIMIT + TEMPLATE_LIMIT` (248) templates the run is refused.
 pub const TEMPLATE_LIMIT: usize = 120;
 /// Entries one walk may visit before it refuses, so a huge tree cannot stall a run.
-const VISIT_LIMIT: usize = 250_000;
+const VISIT_LIMIT: usize = 1_000_000;
 /// Directory depth one walk may descend before it refuses.
 const DEPTH_LIMIT: usize = 64;
 
@@ -64,16 +64,22 @@ pub struct Mounts {
 
 impl Masks {
     /// How many files and directories are masked, for the count in a run's result note.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.files.len() + self.dirs.len()
     }
 
     /// Whether nothing is masked (templates are not masks).
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Build the mounts for these masks, creating the empty directory when one is needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the empty directory for the directory masks could not be created.
     pub fn mounts(&self) -> Result<Mounts, String> {
         let empty = if self.dirs.is_empty() {
             None
@@ -106,15 +112,25 @@ impl Masks {
 }
 
 /// Walk `root` (canonical) and collect its masks, or say why they cannot be collected.
+///
+/// # Errors
+///
+/// Returns the reason the walk was refused: an unreadable entry, or a depth or entry limit.
 pub fn scan(root: &Path) -> Result<Masks, String> {
     scan_with(root, VISIT_LIMIT)
 }
 
-fn scan_with(root: &Path, visit_limit: usize) -> Result<Masks, String> {
+/// [`scan`] with its own entry limit, so a test can reach the limit with a small tree.
+///
+/// # Errors
+///
+/// As [`scan`], with `visit_limit` as the entry limit.
+pub fn scan_with(root: &Path, visit_limit: usize) -> Result<Masks, String> {
     let mut scan = Scan {
         masks: Masks::default(),
         visits: 0,
         visit_limit,
+        tops: Vec::new(),
     };
     scan.directory(root, "", 0)?;
     Ok(scan.masks)
@@ -124,6 +140,8 @@ struct Scan {
     masks: Masks,
     visits: usize,
     visit_limit: usize,
+    /// Entries visited under each top-level directory so far, to name the biggest in a refusal.
+    tops: Vec<(String, usize)>,
 }
 
 impl Scan {
@@ -135,15 +153,37 @@ impl Scan {
                 "the tree is nested deeper than {DEPTH_LIMIT} directories"
             ));
         }
-        let entries = fs::read_dir(path)
-            .map_err(|error| format!("{} could not be listed: {error}", shown(relative)))?;
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            // A non-secret directory this user cannot list is bound over with the empty
+            // read-only directory, like a secret one (issue #581): the sandbox runs as the
+            // same user without capabilities, so it could not read it either.
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && depth > 0 => {
+                let text = path
+                    .to_str()
+                    .ok_or_else(|| format!("{relative} is not valid UTF-8 and cannot be listed"))?;
+                self.masks.dirs.push(text.to_string());
+                return self.check_cap();
+            }
+            Err(error) => {
+                return Err(format!("{} could not be listed: {error}", shown(relative)));
+            }
+        };
         for entry in entries {
             let entry = entry
                 .map_err(|error| format!("{} could not be listed: {error}", shown(relative)))?;
             self.visits += 1;
+            if let Some(top) = self.tops.last_mut().filter(|_| depth > 0) {
+                top.1 += 1;
+            }
             if self.visits > self.visit_limit {
+                let (name, count) = self
+                    .tops
+                    .iter()
+                    .max_by_key(|top| (top.1, std::cmp::Reverse(top.0.as_str())))
+                    .map_or(("", 0), |top| (top.0.as_str(), top.1));
                 return Err(format!(
-                    "the workspace has more than {} entries to scan",
+                    "the workspace has more than {} entries to scan; the top-level directory with the most is {name} ({count} entries): move it out of the Coding Workspace",
                     self.visit_limit
                 ));
             }
@@ -192,16 +232,26 @@ impl Scan {
                 } else {
                     self.masks.files.push(text);
                 }
-                if self.masks.len() > LIMIT {
-                    return Err(format!(
-                        "the workspace has more than {LIMIT} secret files and directories to hide; remove or rename them, or move them out of the Coding Workspace"
-                    ));
-                }
+                self.check_cap()?;
                 continue;
             }
             if file_type.is_dir() {
+                if depth == 0 {
+                    self.tops.push((child.clone(), 0));
+                }
                 self.directory(&entry.path(), &child, depth + 1)?;
             }
+        }
+        Ok(())
+    }
+}
+
+impl Scan {
+    fn check_cap(&self) -> Result<(), String> {
+        if self.masks.len() > LIMIT {
+            return Err(format!(
+                "the workspace has more than {LIMIT} secret files and directories to hide; remove or rename them, or move them out of the Coding Workspace"
+            ));
         }
         Ok(())
     }
