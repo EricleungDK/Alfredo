@@ -298,6 +298,144 @@ fn project_notes_arrival_row_is_shown_once_reset_by_clear_and_never_sent_or_save
     assert!(session.show_project_notes(1, line.into()));
 }
 
+/// Issue #587: dispatch turning itself off is a display-only row after the messages so far.
+#[test]
+fn a_dispatch_off_row_sits_after_the_messages_so_far_and_is_never_sent_or_saved() {
+    use ratatui::{backend::TestBackend, Terminal};
+    fn screen(session: &Session, width: u16) -> String {
+        let mut app = App::new("fixture".into());
+        app.sessions[0] = session.clone();
+        let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+        terminal
+            .draw(|frame| alfredo_tui::ui::draw(frame, &app))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+    let mut session = started();
+    let (status, messages) = (session.status.clone(), session.messages.clone());
+    let request = session.request_through(0);
+    let after = session.messages.len();
+    session.show_dispatch_off(
+        "Task refresh failed; dispatch off: boom\nResume with /dispatch on".into(),
+    );
+    assert_eq!(session.dispatch_off_rows()[0].0, after);
+    let shown = screen(&session, 120);
+    assert!(
+        shown.contains("Task refresh failed; dispatch off: boom"),
+        "{shown}"
+    );
+    assert!(shown.contains("Resume with /dispatch on"), "{shown}");
+    assert_eq!(session.request_through(0), request);
+    assert_eq!(
+        (session.status.clone(), session.messages.clone()),
+        (status, messages)
+    );
+    let json = serde_json::to_string(&session).unwrap();
+    assert!(!json.contains("dispatch off"), "{json}");
+    // Invisible characters never reach the screen, and a long row wraps.
+    session.show_dispatch_off("bad\u{202e}row".into());
+    let shown = screen(&session, 120);
+    assert!(
+        shown.contains("<U+202E>") && !shown.contains('\u{202e}'),
+        "{shown}"
+    );
+    session.show_dispatch_off(format!("{} tail-marker", "word ".repeat(30)));
+    assert!(screen(&session, 40).contains("tail-marker"));
+    // Only the latest four are kept.
+    for n in 0..6 {
+        session.show_dispatch_off(format!("row {n}"));
+    }
+    let kept: Vec<&str> = session
+        .dispatch_off_rows()
+        .iter()
+        .map(|r| r.1.as_str())
+        .collect();
+    assert_eq!(kept, ["row 2", "row 3", "row 4", "row 5"]);
+}
+
+/// Issue #587: dispatch-off rows count toward the lines a saved reading anchor may point into,
+/// three rows each, so an anchor placed below one of them is kept rather than dropped.
+#[test]
+fn each_dispatch_off_row_widens_the_saved_reading_bound_by_three_lines() {
+    use alfredo_tui::conversations::Snapshot;
+    fn kept(rows: usize, line: usize) -> bool {
+        let mut app = App::new("fixture".into());
+        app.sessions[0].insert("History");
+        app.sessions[0].begin().unwrap();
+        app.sessions[0].apply(1, Update::Token("saved line\n".repeat(3)));
+        app.sessions[0].apply(1, Update::Done);
+        let mut value = serde_json::to_value(&app.sessions[0]).unwrap();
+        value["scroll"] = 20.into();
+        value["reading"] =
+            serde_json::json!({"anchor": {"line": line, "row": 0}, "last_offset": 20});
+        let mut session: Session = serde_json::from_value(value).unwrap();
+        for n in 0..rows {
+            session.show_dispatch_off(format!("row {n}"));
+        }
+        app.sessions[0] = session;
+        let saved = serde_json::to_value(Snapshot::capture(&app, "default")).unwrap();
+        saved["sessions"][0]["reading"]["anchor"].is_object()
+    }
+    // The last line each row count accepts: accepted at the bound, refused one past it.
+    let bound = |rows: usize| {
+        assert!(kept(rows, 0), "{rows} rows: line 0 must be accepted");
+        let mut last = 0;
+        while kept(rows, last + 1) {
+            last += 1;
+        }
+        last
+    };
+    let none = bound(0);
+    // Pin the absolute bound too, not only the per-row step: two messages (3 + 6 lines), the
+    // mention-refusal line and the trailing line make 11 lines, so line 10 is the last kept.
+    // Relative steps alone cannot tell the one-line mention term `+ 1` from a mutated `* 3 * n`
+    // that swallows it: both shift every bound by the same constant.
+    assert_eq!(none, 10);
+    assert_eq!(bound(1), none + 3);
+    assert_eq!(bound(2), none + 6);
+    assert_eq!(bound(4), none + 12);
+}
+
+/// Issue #587: a row sits among the messages it follows, not at the end.
+#[test]
+fn a_dispatch_off_row_stays_between_the_messages_around_it() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("First question");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(1, Update::Token("First answer".into()));
+    app.sessions[0].apply(1, Update::Done);
+    app.sessions[0].show_dispatch_off("DISPATCH_OFF_MARK".into());
+    app.sessions[0].insert("Second question");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(3, Update::Token("Second answer".into()));
+    app.sessions[0].apply(3, Update::Done);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| alfredo_tui::ui::draw(frame, &app))
+        .unwrap();
+    let shown: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    let at = |needle: &str| {
+        shown
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle}\n{shown}"))
+    };
+    assert!(at("First answer") < at("DISPATCH_OFF_MARK"));
+    assert!(at("DISPATCH_OFF_MARK") < at("Second question"));
+}
+
 /// Issue #391: each `@path` refusal is its own display-only transcript row.
 #[test]
 fn every_mention_refusal_is_a_transcript_row_replaced_by_the_next_prompt_and_never_sent_or_saved() {

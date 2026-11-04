@@ -625,6 +625,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             dirty |= work.tasks.progress_changed();
             dirty |= work.tasks.follow_running_task();
             dirty |= work.app.health.changed();
+            for row in work.tasks.take_dispatch_off_rows() {
+                let selected = work.app.selected;
+                work.app.sessions[selected].show_dispatch_off(row);
+                dirty = true;
+            }
             for event in work.tasks.take_control_events() {
                 let intent = alfredo_tui::command_intent::Intent::Control {
                     request: event.request,

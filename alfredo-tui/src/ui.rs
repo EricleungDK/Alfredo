@@ -1358,6 +1358,20 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             );
             lines.push(Line::default());
         }
+        // Dispatch turned itself off (issue #587): a warning row where it happened.
+        for (_, row) in session
+            .dispatch_off_rows()
+            .iter()
+            .filter(|(after, _)| (*after).min(session.messages.len()) == index)
+        {
+            group = None;
+            lines.extend(row.lines().flat_map(|line| {
+                wrap_words(&safe_visible(line), width)
+                    .into_iter()
+                    .map(|part| Line::styled(part, Style::default().fg(Color::Yellow)))
+            }));
+            lines.push(Line::default());
+        }
         loop {
             let receipt = receipts.peek().filter(|item| item.after_messages == index);
             let command = commands.peek().filter(|item| item.after_messages == index);

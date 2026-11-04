@@ -167,6 +167,20 @@ fn index_bound_state_follows_the_kept_turns() {
     assert!(session.source(13).is_none());
 }
 
+/// Issue #587: a dispatch-off row follows the message it came after through a compaction.
+#[test]
+fn dispatch_off_rows_follow_the_kept_turns_through_a_compaction() {
+    let mut session = long(7);
+    session.show_dispatch_off("late row".into());
+    let before = session.messages.len();
+    compact(&mut session, "note");
+    let rows = session.dispatch_off_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, session.messages.len());
+    assert!(rows[0].0 < before);
+    assert_eq!(rows[0].1, "late row");
+}
+
 /// A turn whose reply was cancelled; it becomes an interrupted turn once the next one starts.
 /// Issue #391: `@path` refusal rows follow their prompt through a compaction.
 #[test]

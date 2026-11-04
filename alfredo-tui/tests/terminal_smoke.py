@@ -239,6 +239,8 @@ class DispatchSurvivesBusyStore(unittest.TestCase):
                             os.write(terminal.master, b'\x1b[1;1R')
                 header = terminal.screen().split('\n')[0]
                 self.assertIn('dispatch on', header, terminal.screen())
+                # Issue #587: a short hold leaves no "dispatch off" row in the chat view.
+                self.assertNotIn('dispatch off', terminal.screen(), terminal.screen())
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
             finally:
@@ -293,6 +295,67 @@ class DispatchStopsWhenBusyStoreStaysBusy(unittest.TestCase):
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
             finally:
                 terminal.close()
+
+
+class DispatchOffRowInChat(unittest.TestCase):
+    def _start(self, name):
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        state = tempfile.TemporaryDirectory(prefix=f'alfredo-{name}-state-')
+        repo = tempfile.TemporaryDirectory(prefix=f'alfredo-{name}-repo-')
+        self.addCleanup(state.cleanup)
+        self.addCleanup(repo.cleanup)
+        root = os.path.realpath(repo.name)
+        subprocess.run(['git', '-C', root, 'init', '-q', '--template='], check=True)
+        env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state.name)
+        terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9'], root, env)
+        self.addCleanup(terminal.close)
+        terminal.wait_for('◈ ○ chat 1')
+        terminal.write(b'/dispatch on\r')
+        terminal.wait_for('   dispatch on')
+        return terminal, Path(state.name)
+
+    def test_chat_view_gets_one_row_when_the_busy_store_turns_dispatch_off(self):
+        # Issue #587: when the store stays busy past the transient limit, dispatch turns
+        # itself off; the reason used to show only on the F2 status line. The chat
+        # transcript now gets one row with the refusal and the way back.
+        terminal, state = self._start('offrow')
+        lock = next(state.rglob('tasks.lock'))
+        with open(lock, 'rb') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            try:
+                deadline = time.monotonic() + 4
+                while time.monotonic() < deadline:
+                    if select.select([terminal.master], [], [], 0.05)[0]:
+                        chunk = os.read(terminal.master, 65536)
+                        terminal.output.extend(chunk)
+                        if b'\x1b[6n' in chunk:
+                            os.write(terminal.master, b'\x1b[1;1R')
+            finally:
+                fcntl.flock(held, fcntl.LOCK_UN)
+        # The chat pane is narrow, so the row wraps; wait for each part.
+        terminal.wait_for('dispatch off: Task store is')
+        terminal.wait_for('busy; refresh and retry')
+        terminal.wait_for('Resume with /dispatch on')
+        screen = terminal.screen()
+        self.assertEqual(screen.count('dispatch off: Task store is'), 1, screen)
+        self.assertNotIn('dispatch on', screen.split('\n')[0], screen)
+        terminal.write(b'\x11')
+        self.assertEqual(terminal.process.wait(timeout=5), 0)
+
+    def test_chat_view_gets_the_same_row_when_a_refresh_error_turns_dispatch_off(self):
+        # Issue #587: a non-transient refresh failure (an unreadable task file) turns
+        # dispatch off at once and adds the same kind of row, once.
+        terminal, state = self._start('offerr')
+        tasks = next(state.rglob('tasks.lock')).with_name('tasks.json')
+        tasks.write_bytes(b'{ not json')
+        terminal.wait_for('Task refresh failed; dispatch off:')
+        terminal.wait_for('Resume with /dispatch on')
+        screen = terminal.screen()
+        self.assertEqual(screen.count('Task refresh failed; dispatch off:'), 1, screen)
+        self.assertNotIn('dispatch on', screen.split('\n')[0], screen)
+        terminal.write(b'\x11')
+        self.assertEqual(terminal.process.wait(timeout=5), 0)
 
 
 class MissionFlagsInsideRepository(unittest.TestCase):

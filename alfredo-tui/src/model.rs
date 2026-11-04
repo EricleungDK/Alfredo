@@ -315,6 +315,10 @@ pub struct Session {
     /// per refusal (issue #391). Display only: never sent to the model, never saved.
     #[serde(skip)]
     mention_refusals: (usize, Vec<String>),
+    /// Rows for dispatch turning itself off (issue #587), each with the message count
+    /// it follows. Display only: never sent to the model, never saved.
+    #[serde(skip)]
+    dispatch_off_rows: Vec<(usize, String)>,
     pub scroll: std::cell::Cell<u16>,
     #[serde(
         default,
@@ -411,6 +415,7 @@ impl Session {
             notes_lines: Vec::new(),
             notes_fingerprint: None,
             mention_refusals: (0, Vec::new()),
+            dispatch_off_rows: Vec::new(),
             scroll: std::cell::Cell::new(0),
             reading: Default::default(),
             transcript_cache: Default::default(),
@@ -1159,6 +1164,19 @@ impl Session {
         self.mention_refusals = (user_message, rows);
     }
 
+    /// Show `row` (issue #587) after the messages so far; the latest four are kept.
+    /// Display only: not a message, grants nothing.
+    pub fn show_dispatch_off(&mut self, row: String) {
+        self.dispatch_off_rows.push((self.messages.len(), row));
+        let extra = self.dispatch_off_rows.len().saturating_sub(4);
+        self.dispatch_off_rows.drain(..extra);
+    }
+
+    /// Dispatch-off rows and the message count each follows.
+    pub fn dispatch_off_rows(&self) -> &[(usize, String)] {
+        &self.dispatch_off_rows
+    }
+
     /// The `@path` refusal rows and the user message they follow.
     pub fn mention_refusals(&self) -> (usize, &[String]) {
         (self.mention_refusals.0, &self.mention_refusals.1)
@@ -1501,6 +1519,7 @@ impl Session {
                 // Project notes (#322) render above the transcript.
                 + self.notes_lines.len()
                 + self.mention_refusals.1.len() + 1
+                + 3 * self.dispatch_off_rows.len()
                 + 1
         };
         let reading = self.reading.get();
