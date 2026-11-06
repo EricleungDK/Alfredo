@@ -1383,6 +1383,63 @@ fn a_write_file_card_with_one_huge_line_is_deny_only_and_writes_nothing() {
     }
 }
 
+/// A 200-line file and the same file with `count` contiguous lines (from line 100) changed.
+fn big_file_and_change(count: usize) -> (String, String) {
+    let old: String = (1..=200).map(|n| format!("row {n}\n")).collect();
+    let mut new = old.clone();
+    for n in 100..100 + count {
+        new = new.replacen(&format!("row {n}\n"), &format!("ROW {n} changed\n"), 1);
+    }
+    (old, new)
+}
+
+/// Issue #586: at 24x80 a write_file or edit_file card whose diff fits shows one
+/// `path · N bytes` row instead of the args excerpt, so `y` arms, and `y` writes exactly
+/// the bytes the diff shows.
+#[test]
+fn a_three_line_write_file_or_edit_file_card_arms_at_24x80_with_a_path_and_byte_row() {
+    let (old, new) = big_file_and_change(3);
+    let edit = call(
+        "edit_file",
+        json!({
+            "path": "big.txt",
+            "old_text": old.lines().skip(99).take(3).collect::<Vec<_>>().join("\n"),
+            "new_text": new.lines().skip(99).take(3).collect::<Vec<_>>().join("\n"),
+        }),
+    );
+    let write = call("write_file", json!({"path": "big.txt", "content": &new}));
+    for (name, tool) in [("write_file", write), ("edit_file", edit)] {
+        let root = workspace("argsrow");
+        fs::write(root.join("big.txt"), &old).unwrap();
+        let card = approval::card(&root, &tool).unwrap();
+        let mut session = Session::new("m".into());
+        session.insert("write it");
+        session.begin().unwrap();
+        let attempt = session.attempt;
+        session.apply(attempt, Update::Admitted);
+        assert!(session.await_approval(attempt, card.clone(), Instant::now()));
+        let probe = probe_session(session, 80, 24);
+        let text = &probe.text;
+        assert!(!text.contains("y is off"), "{name}: {text}");
+        assert!(probe.whole && probe.header, "{name}: {text}");
+        let bytes = format!("big.txt · {} bytes", new.len());
+        assert!(
+            text.lines().any(|row| row.trim() == bytes),
+            "{name}: {bytes} on one row: {text}"
+        );
+        assert!(!text.contains("  args "), "{name}: {text}");
+        for n in 100..103 {
+            assert!(text.contains(&format!("-row {n}")), "{name} {n}: {text}");
+            assert!(text.contains(&format!("+ROW {n} changed")), "{name} {n}: {text}");
+        }
+        assert_eq!(probe.y, Some(Decision::Approve), "{name}: {text}");
+        assert_eq!(fs::read_to_string(root.join("big.txt")).unwrap(), old);
+        approval::apply(&root, &card).unwrap();
+        assert_eq!(fs::read_to_string(root.join("big.txt")).unwrap(), new, "{name}");
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 /// Issue #269: a write_file card that fits whole on screen still arms.
 #[test]
 fn a_write_file_card_that_fits_still_arms() {
