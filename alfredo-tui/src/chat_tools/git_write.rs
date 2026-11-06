@@ -263,6 +263,7 @@ fn preview_card(
             Change {
                 summary,
                 diff,
+                written: None,
                 fingerprint,
             },
             kind,

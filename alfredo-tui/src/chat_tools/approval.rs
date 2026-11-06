@@ -55,6 +55,9 @@ pub struct Card {
     pub summary: String,
     /// Diff or effect preview shown on the card.
     pub preview: String,
+    /// For `write_file`/`edit_file`: the file written (display form) and the byte count
+    /// it ends with. The card shows them in one row instead of the args excerpt (#586).
+    pub written: Option<(String, usize)>,
     /// State of the target when previewed; an approved call refuses if it changed.
     pub fingerprint: String,
 }
@@ -299,6 +302,7 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
             },
             summary: shown.summary,
             preview: shown.preview,
+            written: None,
             fingerprint: shown.cwd,
         });
     }
@@ -313,6 +317,7 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
         kind,
         summary: change.summary,
         preview: change.diff,
+        written: change.written,
         fingerprint: change.fingerprint,
     })
 }

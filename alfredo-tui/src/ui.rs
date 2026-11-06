@@ -1802,13 +1802,33 @@ fn approval_card_lines(
     width: usize,
     rows: usize,
 ) -> (Vec<Line<'static>>, usize, bool) {
-    let (lines, head, complete) = approval_card_build(card, width, rows, false);
-    if complete {
-        (lines, head, true)
+    // A file edit is tried with its file row beside the args excerpt, then with the row
+    // instead of the excerpt (issue #586); the same row budget decides whether either
+    // fits whole. Every other card draws the args excerpt alone.
+    let tries: &[Rows] = if card.written.is_some() {
+        &[Rows::Both, Rows::FileOnly]
     } else {
-        let (lines, head, _) = approval_card_build(card, width, rows, true);
-        (lines, head, false)
+        &[Rows::Args]
+    };
+    for &kind in tries {
+        let (lines, head, complete) = approval_card_build(card, width, rows, false, kind);
+        if complete {
+            return (lines, head, true);
+        }
     }
+    let (lines, head, _) = approval_card_build(card, width, rows, true, Rows::Args);
+    (lines, head, false)
+}
+
+/// Which header rows a pending card draws between its title and its diff.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rows {
+    /// The args excerpt alone (every card kind).
+    Args,
+    /// A file edit's `path · N bytes` row above the args excerpt.
+    Both,
+    /// A file edit's `path · N bytes` row instead of the args excerpt.
+    FileOnly,
 }
 
 fn approval_card_build(
@@ -1816,6 +1836,7 @@ fn approval_card_build(
     width: usize,
     rows: usize,
     deny_only: bool,
+    rows_kind: Rows,
 ) -> (Vec<Line<'static>>, usize, bool) {
     use crate::chat_tools::approval::CardKind;
     // A deny-only card cuts its header so the args and key lines stay on screen.
@@ -1872,12 +1893,30 @@ fn approval_card_build(
             style.add_modifier(Modifier::REVERSED),
         ));
     }
-    let arguments = card.arguments.to_string();
-    let shown: String = arguments.chars().take(width.max(20) * 2).collect();
-    lines.push(Line::styled(
-        format!("  args {}", safe_visible(&shown)),
-        dim(),
-    ));
+    // A file edit names the file and its new size in one row (issue #586). `Rows::Both`
+    // adds it above the args excerpt; `Rows::FileOnly` replaces the excerpt, which
+    // repeats what the diff shows. A path that would wrap is never cut: it keeps the
+    // args row alone.
+    let file_row = card
+        .written
+        .as_ref()
+        .filter(|_| rows_kind != Rows::Args && card.kind == CardKind::Edit)
+        .map(|(path, bytes)| {
+            Line::styled(format!("  {} · {bytes} bytes", safe_visible(path)), dim())
+        })
+        .filter(|row| {
+            crate::transcript_cache::line_height(row, width.min(usize::from(u16::MAX)) as u16) == 1
+        });
+    let file_only = rows_kind == Rows::FileOnly && file_row.is_some();
+    lines.extend(file_row);
+    if !file_only {
+        let arguments = card.arguments.to_string();
+        let shown: String = arguments.chars().take(width.max(20) * 2).collect();
+        lines.push(Line::styled(
+            format!("  args {}", safe_visible(&shown)),
+            dim(),
+        ));
+    }
     let head = lines.len() - 1;
     // A preview taller than the rows left shows its first lines and a count of the
     // rest (issue #268). `y` arms only when nothing of a command is cut (issue #303).
@@ -2022,6 +2061,7 @@ mod tests {
             kind: CardKind::Edit,
             summary: "write notes.md".into(),
             preview: preview.join("\n"),
+            written: None,
             fingerprint: String::new(),
         }
     }
@@ -2079,6 +2119,73 @@ mod tests {
         }
     }
 
+    fn edit_card(path: &str, preview_lines: usize) -> crate::chat_tools::approval::Card {
+        let mut card = wide_card(|n| format!("+line {n}"));
+        card.preview = (0..preview_lines)
+            .map(|n| format!("+line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        card.arguments = serde_json::json!({"path": path, "content": "c".repeat(300)});
+        card.written = Some((path.to_string(), 4321));
+        card
+    }
+
+    fn texts(lines: &[Line<'static>]) -> Vec<String> {
+        lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    /// Issue #586: a file edit draws `path · N bytes` above the args when both fit, in
+    /// place of the args when only the row fits, and never when the card is not an edit.
+    #[test]
+    fn file_edit_cards_draw_a_path_and_byte_row_and_drop_args_only_when_short_of_rows() {
+        let card = edit_card("src/a.rs", 3);
+        let (lines, head, whole) = approval_card_lines(&card, 80, 40);
+        let text = texts(&lines);
+        assert!(whole && head == 3, "{text:?}");
+        assert_eq!(text[2], "  src/a.rs · 4321 bytes");
+        assert!(text[3].starts_with("  args "), "{text:?}");
+        // Four args rows leave no room for the 3-line diff here; the row alone fits.
+        let (lines, head, whole) = approval_card_lines(&card, 80, 8);
+        let text = texts(&lines);
+        assert!(whole && head == 2, "{text:?}");
+        assert_eq!(text[2], "  src/a.rs · 4321 bytes");
+        assert!(!text.iter().any(|l| l.contains("args")), "{text:?}");
+        assert!(height_of(&lines, 80) <= 8);
+        // Not even the row helps: deny-only keeps the old args row and wording.
+        let (lines, _, whole) = approval_card_lines(&card, 80, 5);
+        let text = texts(&lines);
+        assert!(
+            !whole && text.iter().any(|l| l.starts_with("  args ")),
+            "{text:?}"
+        );
+        assert!(!text.iter().any(|l| l.contains("bytes")), "{text:?}");
+        assert!(text.last().unwrap().contains("y is off"), "{text:?}");
+        // A git card carrying a stray `written` still draws args only.
+        let mut git = edit_card("src/a.rs", 3);
+        git.kind = crate::chat_tools::approval::CardKind::Git;
+        let text = texts(&approval_card_lines(&git, 80, 40).0);
+        assert!(!text.iter().any(|l| l.contains("bytes")), "{text:?}");
+        assert!(text[2].starts_with("  args "), "{text:?}");
+    }
+
+    /// Issue #586: a path that wraps is never cut; the card keeps the args row. The path
+    /// on the row is escaped like every other card string.
+    #[test]
+    fn the_file_row_is_one_row_and_escapes_the_path() {
+        let long = "p".repeat(100);
+        let text = texts(&approval_card_lines(&edit_card(&long, 3), 80, 40).0);
+        assert!(!text.iter().any(|l| l.contains("bytes")), "{text:?}");
+        // Exactly the width: 2 + path + " · 4321 bytes" fills the row.
+        let fits = "p".repeat(80 - 2 - " · 4321 bytes".chars().count());
+        let text = texts(&approval_card_lines(&edit_card(&fits, 3), 80, 40).0);
+        assert_eq!(text[2], format!("  {fits} · 4321 bytes"));
+        let over = "p".repeat(80 - 2 - " · 4321 bytes".chars().count() + 1);
+        let text = texts(&approval_card_lines(&edit_card(&over, 3), 80, 40).0);
+        assert!(!text.iter().any(|l| l.contains("bytes")), "{text:?}");
+        let text = texts(&approval_card_lines(&edit_card("a\u{202e}b\u{200b}.rs", 3), 80, 40).0);
+        assert_eq!(text[2], "  a<U+202E>b<U+200B>.rs · 4321 bytes");
+    }
+
     fn shell_card(command: &str, escalated: bool) -> crate::chat_tools::approval::Card {
         use crate::chat_tools::approval::{Card, CardKind};
         let mut preview = String::from("cwd . · sandboxed · network off · timeout 60s");
@@ -2091,6 +2198,7 @@ mod tests {
             kind: CardKind::Shell { escalated },
             summary: format!("run {command}"),
             preview,
+            written: None,
             fingerprint: String::new(),
         }
     }
@@ -2175,6 +2283,7 @@ mod tests {
             kind: CardKind::Edit,
             summary: format!("edit {path}"),
             preview: "@@\n-a\n+b".into(),
+            written: None,
             fingerprint: String::new(),
         };
         for (width, rows) in [(80usize, 24usize), (80, 12), (80, 18)] {
@@ -2202,6 +2311,7 @@ mod tests {
                 kind,
                 summary: "s".into(),
                 preview,
+                written: None,
                 fingerprint: String::new(),
             };
             let small = card("one\ntwo".into());
