@@ -1941,7 +1941,12 @@ Approval (ADR 0004); there is no skip-approval mode.
   are refused with that advice while `n` still denies. This holds for a single very long
   line (a one-line 1 MiB write, a 4000-character commit message) as much as for many
   lines. The `args` line is a two-row excerpt of the raw arguments and is not part of this
-  test; the preview is what the owner approves. Enlarging the terminal re-evaluates the
+  test; the preview is what the owner approves. A `write_file` or `edit_file` card also
+  shows one `path · N bytes` row (the file and its size after the write, the path escaped
+  like the header); when the card is too tall with the `args` excerpt, that row replaces
+  the excerpt, so a short change to a long file (3 contiguous lines on a 24x80 terminal)
+  arms instead of going deny-only (issue #586). A path too wide for one row is never cut,
+  and the `args` line stays on `run_command` and the git tools. Enlarging the terminal re-evaluates the
   card; on a terminal so short that the header cannot be drawn, only Esc answers.
 - **The card shows minimal hunks (issue #510).** A `write_file` or `edit_file` card draws only the changed lines, one `@@ line N @@` header per run of changes (N is the line in the current file); unchanged lines between hunks are not drawn, so a rewrite that changes lines 1 and 100 of a 100-line file is a 6-line card. A change that needs more than 160 added plus removed lines is drawn as one span from its first to its last change and is then refused by the cap below. One contiguous change reads as before.
 - **Over-cap changes are refused, not cut (issue #269).** A card never hides lines the

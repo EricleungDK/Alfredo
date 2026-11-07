@@ -1797,18 +1797,39 @@ fn cut_cells(text: &str, cells: usize) -> String {
 /// The flag is true only when `y` may arm: the whole card (header, args, every `$`
 /// line of a command, key line) fits in `rows` (issue #303). Otherwise the card is
 /// deny-only: a shortened header and a key line that says why `y` and `a` are off.
-fn approval_card_lines(
+#[doc(hidden)]
+pub fn approval_card_lines(
     card: &crate::chat_tools::approval::Card,
     width: usize,
     rows: usize,
 ) -> (Vec<Line<'static>>, usize, bool) {
-    let (lines, head, complete) = approval_card_build(card, width, rows, false);
-    if complete {
-        (lines, head, true)
+    // A file edit is tried with its file row beside the args excerpt, then with the row
+    // instead of the excerpt (issue #586); the same row budget decides whether either
+    // fits whole. Every other card draws the args excerpt alone.
+    let tries: &[Rows] = if card.written.is_some() {
+        &[Rows::Both, Rows::FileOnly]
     } else {
-        let (lines, head, _) = approval_card_build(card, width, rows, true);
-        (lines, head, false)
+        &[Rows::Args]
+    };
+    for &kind in tries {
+        let (lines, head, complete) = approval_card_build(card, width, rows, false, kind);
+        if complete {
+            return (lines, head, true);
+        }
     }
+    let (lines, head, _) = approval_card_build(card, width, rows, true, Rows::Args);
+    (lines, head, false)
+}
+
+/// Which header rows a pending card draws between its title and its diff.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rows {
+    /// The args excerpt alone (every card kind).
+    Args,
+    /// A file edit's `path · N bytes` row above the args excerpt.
+    Both,
+    /// A file edit's `path · N bytes` row instead of the args excerpt.
+    FileOnly,
 }
 
 fn approval_card_build(
@@ -1816,6 +1837,7 @@ fn approval_card_build(
     width: usize,
     rows: usize,
     deny_only: bool,
+    rows_kind: Rows,
 ) -> (Vec<Line<'static>>, usize, bool) {
     use crate::chat_tools::approval::CardKind;
     // A deny-only card cuts its header so the args and key lines stay on screen.
@@ -1872,12 +1894,30 @@ fn approval_card_build(
             style.add_modifier(Modifier::REVERSED),
         ));
     }
-    let arguments = card.arguments.to_string();
-    let shown: String = arguments.chars().take(width.max(20) * 2).collect();
-    lines.push(Line::styled(
-        format!("  args {}", safe_visible(&shown)),
-        dim(),
-    ));
+    // A file edit names the file and its new size in one row (issue #586). `Rows::Both`
+    // adds it above the args excerpt; `Rows::FileOnly` replaces the excerpt, which
+    // repeats what the diff shows. A path that would wrap is never cut: it keeps the
+    // args row alone.
+    let file_row = card
+        .written
+        .as_ref()
+        .filter(|_| rows_kind != Rows::Args && card.kind == CardKind::Edit)
+        .map(|(path, bytes)| {
+            Line::styled(format!("  {} · {bytes} bytes", safe_visible(path)), dim())
+        })
+        .filter(|row| {
+            crate::transcript_cache::line_height(row, width.min(usize::from(u16::MAX)) as u16) == 1
+        });
+    let file_only = rows_kind == Rows::FileOnly && file_row.is_some();
+    lines.extend(file_row);
+    if !file_only {
+        let arguments = card.arguments.to_string();
+        let shown: String = arguments.chars().take(width.max(20) * 2).collect();
+        lines.push(Line::styled(
+            format!("  args {}", safe_visible(&shown)),
+            dim(),
+        ));
+    }
     let head = lines.len() - 1;
     // A preview taller than the rows left shows its first lines and a count of the
     // rest (issue #268). `y` arms only when nothing of a command is cut (issue #303).
@@ -2022,6 +2062,7 @@ mod tests {
             kind: CardKind::Edit,
             summary: "write notes.md".into(),
             preview: preview.join("\n"),
+            written: None,
             fingerprint: String::new(),
         }
     }
@@ -2091,6 +2132,7 @@ mod tests {
             kind: CardKind::Shell { escalated },
             summary: format!("run {command}"),
             preview,
+            written: None,
             fingerprint: String::new(),
         }
     }
@@ -2175,6 +2217,7 @@ mod tests {
             kind: CardKind::Edit,
             summary: format!("edit {path}"),
             preview: "@@\n-a\n+b".into(),
+            written: None,
             fingerprint: String::new(),
         };
         for (width, rows) in [(80usize, 24usize), (80, 12), (80, 18)] {
@@ -2202,6 +2245,7 @@ mod tests {
                 kind,
                 summary: "s".into(),
                 preview,
+                written: None,
                 fingerprint: String::new(),
             };
             let small = card("one\ntwo".into());

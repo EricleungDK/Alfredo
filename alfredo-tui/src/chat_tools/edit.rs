@@ -52,6 +52,8 @@ pub const EDIT_FILE: Tool = Tool {
 pub(crate) struct Change {
     pub summary: String,
     pub diff: String,
+    /// The file the call writes (display form) and the byte count it ends with (issue #586).
+    pub written: Option<(String, usize)>,
     /// Target state when previewed (see [`fingerprint`]).
     pub fingerprint: String,
 }
@@ -147,12 +149,14 @@ pub(crate) fn preview(
                 } else {
                     format!("new directories: {dirs}\n{body}")
                 },
+                written: Some((display(root, &path), new.len())),
                 fingerprint,
             }
         }),
         "edit_file" => plan_edit(root, arguments).map(|(path, old, new)| Change {
             summary: format!("edit {}", display(root, &path)),
             diff: diff(&old, &new),
+            written: Some((display(root, &path), new.len())),
             fingerprint,
         }),
         _ => return None,
