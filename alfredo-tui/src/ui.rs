@@ -2206,6 +2206,60 @@ mod tests {
         }
     }
 
+    /// Issue #303: a very long path in the header can only arm when the header fits.
+    #[test]
+    fn edit_cards_with_very_long_paths_fit_or_stay_deny_only() {
+        use crate::chat_tools::approval::{Card, CardKind};
+        let path = format!("{}/file.rs", "dir/".repeat(400));
+        let card = Card {
+            tool: "edit_file".into(),
+            arguments: serde_json::json!({"path": path, "old_text": "a", "new_text": "b"}),
+            kind: CardKind::Edit,
+            summary: format!("edit {path}"),
+            preview: "@@\n-a\n+b".into(),
+            written: None,
+            fingerprint: String::new(),
+        };
+        for (width, rows) in [(80usize, 24usize), (80, 12), (80, 18)] {
+            let (lines, _, whole) = approval_card_lines(&card, width, rows);
+            assert!(!whole, "{width}x{rows}");
+            assert!(height_of(&lines, width) <= rows, "{width}x{rows}");
+            assert!(lines.last().unwrap().to_string().contains("n deny"));
+        }
+        let short = Card {
+            summary: "edit a.rs".into(),
+            ..card
+        };
+        let (lines, _, whole) = approval_card_lines(&short, 80, 12);
+        assert!(whole && height_of(&lines, 80) <= 12);
+    }
+
+    /// Issue #269: every card kind arms only when every preview line is drawn.
+    #[test]
+    fn every_card_kind_is_whole_only_when_its_whole_preview_is_drawn() {
+        use crate::chat_tools::approval::{Card, CardKind};
+        for kind in [CardKind::Edit, CardKind::Git, CardKind::Push] {
+            let card = |preview: String| Card {
+                tool: "t".into(),
+                arguments: serde_json::json!({}),
+                kind,
+                summary: "s".into(),
+                preview,
+                written: None,
+                fingerprint: String::new(),
+            };
+            let small = card("one\ntwo".into());
+            let (_, _, whole) = approval_card_lines(&small, 80, 24);
+            assert!(whole, "{kind:?}: a card that fits arms");
+            for preview in ["x".repeat(100_000), "a\n".repeat(60), "漢".repeat(5000)] {
+                let (lines, _, whole) = approval_card_lines(&card(preview), 80, 24);
+                assert!(!whole, "{kind:?}: a cut preview never arms");
+                assert!(height_of(&lines, 80) <= 24, "{kind:?}");
+                assert!(lines.last().unwrap().to_string().contains("n deny"));
+            }
+        }
+    }
+
     #[test]
     fn capacity_wait_lines_clip_the_cat_to_the_width_and_drop_it_when_it_cannot_fit() {
         let mut session = Session::new("fixture".into());
