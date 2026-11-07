@@ -1797,7 +1797,8 @@ fn cut_cells(text: &str, cells: usize) -> String {
 /// The flag is true only when `y` may arm: the whole card (header, args, every `$`
 /// line of a command, key line) fits in `rows` (issue #303). Otherwise the card is
 /// deny-only: a shortened header and a key line that says why `y` and `a` are off.
-fn approval_card_lines(
+#[doc(hidden)]
+pub fn approval_card_lines(
     card: &crate::chat_tools::approval::Card,
     width: usize,
     rows: usize,
@@ -2119,73 +2120,6 @@ mod tests {
         }
     }
 
-    fn edit_card(path: &str, preview_lines: usize) -> crate::chat_tools::approval::Card {
-        let mut card = wide_card(|n| format!("+line {n}"));
-        card.preview = (0..preview_lines)
-            .map(|n| format!("+line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        card.arguments = serde_json::json!({"path": path, "content": "c".repeat(300)});
-        card.written = Some((path.to_string(), 4321));
-        card
-    }
-
-    fn texts(lines: &[Line<'static>]) -> Vec<String> {
-        lines.iter().map(|l| l.to_string()).collect()
-    }
-
-    /// Issue #586: a file edit draws `path · N bytes` above the args when both fit, in
-    /// place of the args when only the row fits, and never when the card is not an edit.
-    #[test]
-    fn file_edit_cards_draw_a_path_and_byte_row_and_drop_args_only_when_short_of_rows() {
-        let card = edit_card("src/a.rs", 3);
-        let (lines, head, whole) = approval_card_lines(&card, 80, 40);
-        let text = texts(&lines);
-        assert!(whole && head == 3, "{text:?}");
-        assert_eq!(text[2], "  src/a.rs · 4321 bytes");
-        assert!(text[3].starts_with("  args "), "{text:?}");
-        // Four args rows leave no room for the 3-line diff here; the row alone fits.
-        let (lines, head, whole) = approval_card_lines(&card, 80, 8);
-        let text = texts(&lines);
-        assert!(whole && head == 2, "{text:?}");
-        assert_eq!(text[2], "  src/a.rs · 4321 bytes");
-        assert!(!text.iter().any(|l| l.contains("args")), "{text:?}");
-        assert!(height_of(&lines, 80) <= 8);
-        // Not even the row helps: deny-only keeps the old args row and wording.
-        let (lines, _, whole) = approval_card_lines(&card, 80, 5);
-        let text = texts(&lines);
-        assert!(
-            !whole && text.iter().any(|l| l.starts_with("  args ")),
-            "{text:?}"
-        );
-        assert!(!text.iter().any(|l| l.contains("bytes")), "{text:?}");
-        assert!(text.last().unwrap().contains("y is off"), "{text:?}");
-        // A git card carrying a stray `written` still draws args only.
-        let mut git = edit_card("src/a.rs", 3);
-        git.kind = crate::chat_tools::approval::CardKind::Git;
-        let text = texts(&approval_card_lines(&git, 80, 40).0);
-        assert!(!text.iter().any(|l| l.contains("bytes")), "{text:?}");
-        assert!(text[2].starts_with("  args "), "{text:?}");
-    }
-
-    /// Issue #586: a path that wraps is never cut; the card keeps the args row. The path
-    /// on the row is escaped like every other card string.
-    #[test]
-    fn the_file_row_is_one_row_and_escapes_the_path() {
-        let long = "p".repeat(100);
-        let text = texts(&approval_card_lines(&edit_card(&long, 3), 80, 40).0);
-        assert!(!text.iter().any(|l| l.contains("bytes")), "{text:?}");
-        // Exactly the width: 2 + path + " · 4321 bytes" fills the row.
-        let fits = "p".repeat(80 - 2 - " · 4321 bytes".chars().count());
-        let text = texts(&approval_card_lines(&edit_card(&fits, 3), 80, 40).0);
-        assert_eq!(text[2], format!("  {fits} · 4321 bytes"));
-        let over = "p".repeat(80 - 2 - " · 4321 bytes".chars().count() + 1);
-        let text = texts(&approval_card_lines(&edit_card(&over, 3), 80, 40).0);
-        assert!(!text.iter().any(|l| l.contains("bytes")), "{text:?}");
-        let text = texts(&approval_card_lines(&edit_card("a\u{202e}b\u{200b}.rs", 3), 80, 40).0);
-        assert_eq!(text[2], "  a<U+202E>b<U+200B>.rs · 4321 bytes");
-    }
-
     fn shell_card(command: &str, escalated: bool) -> crate::chat_tools::approval::Card {
         use crate::chat_tools::approval::{Card, CardKind};
         let mut preview = String::from("cwd . · sandboxed · network off · timeout 60s");
@@ -2269,60 +2203,6 @@ mod tests {
                 );
             }
             assert!(text.last().unwrap().contains("y approve"));
-        }
-    }
-
-    /// Issue #303: a very long path in the header can only arm when the header fits.
-    #[test]
-    fn edit_cards_with_very_long_paths_fit_or_stay_deny_only() {
-        use crate::chat_tools::approval::{Card, CardKind};
-        let path = format!("{}/file.rs", "dir/".repeat(400));
-        let card = Card {
-            tool: "edit_file".into(),
-            arguments: serde_json::json!({"path": path, "old_text": "a", "new_text": "b"}),
-            kind: CardKind::Edit,
-            summary: format!("edit {path}"),
-            preview: "@@\n-a\n+b".into(),
-            written: None,
-            fingerprint: String::new(),
-        };
-        for (width, rows) in [(80usize, 24usize), (80, 12), (80, 18)] {
-            let (lines, _, whole) = approval_card_lines(&card, width, rows);
-            assert!(!whole, "{width}x{rows}");
-            assert!(height_of(&lines, width) <= rows, "{width}x{rows}");
-            assert!(lines.last().unwrap().to_string().contains("n deny"));
-        }
-        let short = Card {
-            summary: "edit a.rs".into(),
-            ..card
-        };
-        let (lines, _, whole) = approval_card_lines(&short, 80, 12);
-        assert!(whole && height_of(&lines, 80) <= 12);
-    }
-
-    /// Issue #269: every card kind arms only when every preview line is drawn.
-    #[test]
-    fn every_card_kind_is_whole_only_when_its_whole_preview_is_drawn() {
-        use crate::chat_tools::approval::{Card, CardKind};
-        for kind in [CardKind::Edit, CardKind::Git, CardKind::Push] {
-            let card = |preview: String| Card {
-                tool: "t".into(),
-                arguments: serde_json::json!({}),
-                kind,
-                summary: "s".into(),
-                preview,
-                written: None,
-                fingerprint: String::new(),
-            };
-            let small = card("one\ntwo".into());
-            let (_, _, whole) = approval_card_lines(&small, 80, 24);
-            assert!(whole, "{kind:?}: a card that fits arms");
-            for preview in ["x".repeat(100_000), "a\n".repeat(60), "漢".repeat(5000)] {
-                let (lines, _, whole) = approval_card_lines(&card(preview), 80, 24);
-                assert!(!whole, "{kind:?}: a cut preview never arms");
-                assert!(height_of(&lines, 80) <= 24, "{kind:?}");
-                assert!(lines.last().unwrap().to_string().contains("n deny"));
-            }
         }
     }
 
