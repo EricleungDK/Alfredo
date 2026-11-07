@@ -1403,7 +1403,6 @@ mod tests {
             kind,
             summary: format!("edit {path}"),
             preview: String::new(),
-            written: None,
             fingerprint: String::new(),
         }
     }

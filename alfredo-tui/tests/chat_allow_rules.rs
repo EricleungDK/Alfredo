@@ -50,7 +50,6 @@ fn shell(command: &str, escalated: bool) -> Card {
         kind: CardKind::Shell { escalated },
         summary: format!("run {command}"),
         preview: String::new(),
-        written: None,
         fingerprint: "/x".into(),
     }
 }
@@ -62,7 +61,6 @@ fn plain(tool: &str, kind: CardKind) -> Card {
         kind,
         summary: tool.into(),
         preview: String::new(),
-        written: None,
         fingerprint: String::new(),
     }
 }

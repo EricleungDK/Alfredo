@@ -64,7 +64,6 @@ fn sandboxed_prefix_rule_never_hands_secret_files_to_the_model() {
         kind: CardKind::Shell { escalated: false },
         summary: String::new(),
         preview: String::new(),
-        written: None,
         fingerprint: "/x".into(),
     };
     let rule = allow::rule_for(&seed).unwrap();

@@ -1411,13 +1411,15 @@ fn a_three_line_write_file_or_edit_file_card_arms_at_24x80_with_a_path_and_byte_
     for (name, tool) in [("write_file", write), ("edit_file", edit)] {
         let root = workspace("argsrow");
         fs::write(root.join("big.txt"), &old).unwrap();
-        let card = approval::card(&root, &tool).unwrap();
+        let (card, file) = approval::card_with_file(&root, &tool).unwrap();
+        assert!(file.is_some(), "{name}");
         let mut session = Session::new("m".into());
         session.insert("write it");
         session.begin().unwrap();
         let attempt = session.attempt;
         session.apply(attempt, Update::Admitted);
         assert!(session.await_approval(attempt, card.clone(), Instant::now()));
+        session.set_approval_file(file);
         let probe = probe_session(session, 80, 24);
         let text = &probe.text;
         assert!(!text.contains("y is off"), "{name}: {text}");
@@ -2213,13 +2215,14 @@ fn probe_card(
     for (name, body) in files {
         fs::write(root.join(name), body).unwrap();
     }
-    let card = approval::card(&root, tool).unwrap();
+    let (card, file) = approval::card_with_file(&root, tool).unwrap();
     let mut session = Session::new("m".into());
     session.insert("write it");
     session.begin().unwrap();
     let attempt = session.attempt;
     session.apply(attempt, Update::Admitted);
     assert!(session.await_approval(attempt, card.clone(), Instant::now()));
+    session.set_approval_file(file);
     (probe_session(session, width, height), card, root)
 }
 
@@ -2345,16 +2348,59 @@ fn a_path_too_long_for_one_row_is_never_cut_into_the_file_row() {
     let write = call("write_file", json!({"path": path, "content": "x\n"}));
     let root = workspace("longrow");
     fs::create_dir_all(root.join("d".repeat(100))).unwrap();
-    let card = approval::card(&root, &write).unwrap();
-    assert!(card.written.is_some());
+    let (card, file) = approval::card_with_file(&root, &write).unwrap();
+    assert!(file.is_some());
     let mut session = Session::new("m".into());
     session.insert("write it");
     session.begin().unwrap();
     let attempt = session.attempt;
     session.apply(attempt, Update::Admitted);
     assert!(session.await_approval(attempt, card, Instant::now()));
+    session.set_approval_file(file);
     let probe = probe_session(session, 80, 40);
     assert!(probe.text.contains("  args"), "{}", probe.text);
     assert!(!probe.text.contains("· 2 bytes"), "{}", probe.text);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #586: a file row belongs to the card it came with. A new card, a cancelled turn
+/// or a card with no row never shows the previous card's row.
+#[test]
+fn a_file_row_never_outlives_or_crosses_to_another_card() {
+    let (old, new) = big_file_and_change(3);
+    let write = call("write_file", json!({"path": "big.txt", "content": &new}));
+    let root = workspace("filerowlife");
+    fs::write(root.join("big.txt"), &old).unwrap();
+    let (card, file) = approval::card_with_file(&root, &write).unwrap();
+    assert_eq!(
+        file,
+        Some(approval::FileRow {
+            path: "big.txt".into(),
+            bytes: new.len()
+        })
+    );
+    let mut session = Session::new("m".into());
+    session.insert("write it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.pending_approval_file().is_none());
+    assert!(session.await_approval(attempt, card.clone(), Instant::now()));
+    session.set_approval_file(file);
+    assert!(session.pending_approval_file().is_some());
+    // The next card starts without a row.
+    assert!(session.await_approval(attempt, card, Instant::now()));
+    assert!(session.pending_approval_file().is_none());
+    // A run_command card has no row.
+    let shell = call("run_command", json!({"command": "ls"}));
+    let (_, none) = approval::card_with_file(&root, &shell).unwrap();
+    assert_eq!(none, None);
+    // After the turn is cancelled there is no pending card, so no row.
+    session.set_approval_file(Some(approval::FileRow {
+        path: "x".into(),
+        bytes: 1,
+    }));
+    session.cancel();
+    assert!(session.pending_approval_file().is_none());
     let _ = fs::remove_dir_all(root);
 }
