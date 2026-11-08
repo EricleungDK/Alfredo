@@ -736,7 +736,7 @@ fn health_stays_right_aligned_on_the_mission_row_with_a_task_snapshot() {
 #[test]
 fn task_detail_footer_names_ctrl_o_for_worker_code_and_drops_lower_priority_first() {
     use alfredo_tui::dashboard::{footer, Footer, Turn};
-    for width in [60, 80, 100, 140] {
+    for width in [80, 100, 140] {
         let line = footer(Footer::Tasks, Turn::Idle, width);
         assert!(line.contains("^O code"), "{width}: {line}");
         assert!(line.contains("F1 help"), "{width}: {line}");

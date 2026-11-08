@@ -19,6 +19,10 @@ mod inspector;
 
 pub use activity_lines::short_phase;
 use activity_lines::{collapsed_lines, collapsed_step, command_lines, repeated_failure, Phase};
+
+/// Bottom title of the F1 help list; `^O code` is the task-detail worker-code fold.
+pub const HELP_BOTTOM_TITLE: &str =
+    " F2 tasks/chat  F3 evidence  F4 activity  F5 pause  F6 pane  Enter agent  ^O code/raw plan ";
 use inspector::{
     receipt_style, response_heading, task_panel, task_panel_pinned, task_receipt_lines,
     verified_receipt, work_inspector,
@@ -842,9 +846,7 @@ fn draw_help(frame: &mut Frame, help: &crate::commands::Completion, area: Rect) 
                     help.query.trim_start_matches(['/', '@'])
                 )
             })
-            .title_bottom(
-                " F2 tasks/chat  F3 evidence  F4 activity  F5 pause  F6 pane  Enter agent  ^O expand/raw plan ",
-            )
+            .title_bottom(HELP_BOTTOM_TITLE)
     };
     frame.render_stateful_widget(
         List::new(items)

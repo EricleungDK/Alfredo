@@ -593,6 +593,7 @@ pub fn display_output(text: &str) -> String {
 /// start was dropped: lines before the first heading then fold into one
 /// `… N earlier lines` row, since they may be the middle of a file.
 /// Display only: `parse_answer` reads the raw text.
+#[must_use]
 pub fn folded_output(text: &str, cut: bool) -> String {
     fn count(lines: usize) -> String {
         match lines {
