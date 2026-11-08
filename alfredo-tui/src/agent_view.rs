@@ -130,18 +130,21 @@ pub fn references(prompt: &str) -> Vec<String> {
 /// The answer as `▸ path` headings, each followed by its code when `expanded`
 /// and otherwise folded to one row with its line count.
 fn code(text: &str, expanded: bool, cut: bool) -> Vec<(String, Tone)> {
-    let text = crate::dashboard::safe(text);
-    if expanded {
-        crate::worker::display_output(&text)
+    // Fold or expand the raw answer first, then drop controls, as task detail does: a
+    // control inside a path shows as `<U+XXXX>` in the heading rather than vanishing.
+    let shown = if expanded {
+        crate::worker::display_output(text)
     } else {
-        crate::worker::folded_output(&text, cut)
-    }
-    .lines()
-    .map(|line| match line.strip_prefix("▸ ") {
-        Some(_) => (line.to_owned(), Tone::Path),
-        None => (line.to_owned(), Tone::Normal),
-    })
-    .collect()
+        crate::worker::folded_output(text, cut)
+    };
+    let shown = crate::dashboard::safe(&shown);
+    shown
+        .lines()
+        .map(|line| match line.strip_prefix("▸ ") {
+            Some(_) => (line.to_owned(), Tone::Path),
+            None => (line.to_owned(), Tone::Normal),
+        })
+        .collect()
 }
 
 fn plain(text: &str, tone: Tone) -> Vec<(String, Tone)> {

@@ -3,6 +3,7 @@
 //! while the answer streams.
 use crate::tasks::WorkPolicy;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
@@ -59,10 +60,10 @@ fn shown_path(path: &str) -> String {
         .collect()
 }
 
-/// A FILE or EDIT path as its `▸` heading shows it. Format, bidi, zero-width, tag and
-/// line-separator characters show as `<U+XXXX>` (`dashboard::safe_visible`), so the
-/// heading draws the bytes the model wrote. A tab shows too: a raw tab draws as nothing.
-/// The path is one line already: a marker line ends at its newline.
+/// A FILE or EDIT path as its `▸` heading shows it: the characters `dashboard::safe_visible`
+/// shows as `<U+XXXX>` (format, bidi, zero-width, tag, default-ignorable and line
+/// separators), so the heading draws the bytes the model wrote. A tab shows too: a raw tab
+/// draws as nothing. The path is one line already: a marker line ends at its newline.
 fn heading_path(path: &str) -> String {
     crate::dashboard::safe_visible(path).replace('\t', "<U+0009>")
 }
@@ -507,8 +508,10 @@ enum Row<'a> {
     Heading(String),
     /// An end marker closed the current block, or a fence closed a snippet.
     End,
-    /// A shown line, as streamed (with its newline when complete).
-    Text(&'a str, Kind),
+    /// A shown line, as streamed (with its newline when complete). A line that starts
+    /// `▸ ` is shown with its hidden characters visible, since the agent view draws it
+    /// as a path row.
+    Text(Cow<'a, str>, Kind),
 }
 
 /// Where a shown line sits.
@@ -571,6 +574,13 @@ fn display_rows(text: &str) -> Vec<Row<'_>> {
             } else {
                 Kind::Prose
             };
+            // A line that a path row would style as one is shown with hidden characters
+            // visible, as a heading is; the agent view draws `▸ ` lines as paths.
+            let line = if line.starts_with("▸ ") {
+                Cow::Owned(crate::dashboard::safe_visible(line))
+            } else {
+                Cow::Borrowed(line)
+            };
             rows.push(Row::Text(line, kind));
         }
     }
@@ -589,7 +599,7 @@ pub fn display_output(text: &str) -> String {
                 let _ = writeln!(shown, "{heading}");
             }
             Row::End => {}
-            Row::Text(line, _) => shown.push_str(line),
+            Row::Text(line, _) => shown.push_str(&line),
         }
     }
     shown
@@ -642,7 +652,7 @@ pub fn folded_output(text: &str, cut: bool) -> String {
                 Some((_, lines)) => *lines += 1,
                 None => current = Some(("▸ code".into(), 1)),
             },
-            Row::Text(line, Kind::Prose) => shown.push_str(line),
+            Row::Text(line, Kind::Prose) => shown.push_str(&line),
         }
     }
     if let Some(open) = current {
