@@ -509,8 +509,9 @@ enum Row<'a> {
     /// An end marker closed the current block, or a fence closed a snippet.
     End,
     /// A shown line, as streamed (with its newline when complete). A line that starts
-    /// `▸ ` is shown with its hidden characters visible, since the agent view draws it
-    /// as a path row.
+    /// `▸ ` once controls are dropped (`dashboard::safe`) is shown with its hidden
+    /// characters visible, so the agent view's path row never draws one. Other lines
+    /// are as written; the agent view drops their controls.
     Text(Cow<'a, str>, Kind),
 }
 
@@ -574,9 +575,10 @@ fn display_rows(text: &str) -> Vec<Row<'_>> {
             } else {
                 Kind::Prose
             };
-            // A line that a path row would style as one is shown with hidden characters
-            // visible, as a heading is; the agent view draws `▸ ` lines as paths.
-            let line = if line.starts_with("▸ ") {
+            // The agent view drops controls and then draws a `▸ ` line as a path row. So
+            // the test runs on the safe text, and such a line is shown visibly: a control
+            // before the arrow then shows as `<U+XXXX>` rather than hiding the arrow.
+            let line = if crate::dashboard::safe(line).starts_with("▸ ") {
                 Cow::Owned(crate::dashboard::safe_visible(line))
             } else {
                 Cow::Borrowed(line)

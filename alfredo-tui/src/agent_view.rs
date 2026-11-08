@@ -130,8 +130,9 @@ pub fn references(prompt: &str) -> Vec<String> {
 /// The answer as `▸ path` headings, each followed by its code when `expanded`
 /// and otherwise folded to one row with its line count.
 fn code(text: &str, expanded: bool, cut: bool) -> Vec<(String, Tone)> {
-    // Fold or expand the raw answer first, then drop controls, as task detail does: a
-    // control inside a path shows as `<U+XXXX>` in the heading rather than vanishing.
+    // Fold or expand the raw answer first, then drop controls, as task detail does. The
+    // worker decides which lines start `▸ ` on that safe text and shows their hidden
+    // characters, so no control dropped here can expose one in a path row.
     let shown = if expanded {
         crate::worker::display_output(text)
     } else {
