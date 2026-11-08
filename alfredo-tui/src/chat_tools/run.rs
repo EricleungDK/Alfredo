@@ -424,8 +424,10 @@ async fn gated(
 ) -> String {
     let root = workspace.to_path_buf();
     let preview = call.clone();
-    let card = match tokio::task::spawn_blocking(move || approval::card(&root, &preview)).await {
-        Ok(Ok(card)) => card,
+    let planned =
+        tokio::task::spawn_blocking(move || approval::card_with_file(&root, &preview)).await;
+    let (card, file) = match planned {
+        Ok(Ok(planned)) => planned,
         Ok(Err(refusal)) => return format!("error: {refusal}"),
         Err(_) => return "error: approval preview stopped unexpectedly".into(),
     };
@@ -478,6 +480,7 @@ async fn gated(
         session,
         attempt,
         card: card.clone(),
+        file,
         reply,
         log: gate.log.clone(),
     };

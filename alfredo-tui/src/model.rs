@@ -377,6 +377,9 @@ pub struct Session {
         crate::chat_tools::approval::Card,
         Option<std::time::Instant>,
     )>,
+    /// The pending card's `path · N bytes` row (issue #586), shown beside it.
+    #[serde(skip)]
+    approval_file: Option<crate::chat_tools::approval::FileRow>,
     /// Set by the last draw: the pending card's header and args rows were inside
     /// the transcript viewport (issue #268). Arming waits for it.
     #[serde(skip)]
@@ -434,6 +437,7 @@ impl Session {
             rejected: None,
             running_command: false,
             approval: None,
+            approval_file: None,
             approval_header_drawn: std::cell::Cell::new(false),
             approval_whole: std::cell::Cell::new(false),
             key_times: (None, None),
@@ -1336,7 +1340,18 @@ impl Session {
         self.approval_header_drawn.set(false);
         self.approval_whole.set(false);
         self.approval = Some((card, None));
+        self.approval_file = None;
         true
+    }
+
+    /// The file row of the card [`Session::await_approval`] just took (issue #586).
+    pub fn set_approval_file(&mut self, file: Option<crate::chat_tools::approval::FileRow>) {
+        self.approval_file = file;
+    }
+
+    /// The pending card's file row, if it has one.
+    pub fn pending_approval_file(&self) -> Option<&crate::chat_tools::approval::FileRow> {
+        self.pending_approval().and(self.approval_file.as_ref())
     }
 
     /// The pending action card, while the turn is still running.

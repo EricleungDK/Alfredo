@@ -1383,6 +1383,72 @@ fn a_write_file_card_with_one_huge_line_is_deny_only_and_writes_nothing() {
     }
 }
 
+/// A 200-line file and the same file with `count` contiguous lines (from line 100) changed.
+fn big_file_and_change(count: usize) -> (String, String) {
+    let old: String = (1..=200).map(|n| format!("row {n}\n")).collect();
+    let mut new = old.clone();
+    for n in 100..100 + count {
+        new = new.replacen(&format!("row {n}\n"), &format!("ROW {n} changed\n"), 1);
+    }
+    (old, new)
+}
+
+/// Issue #586: at 24x80 a write_file or edit_file card whose diff fits shows one
+/// `path · N bytes` row instead of the args excerpt, so `y` arms, and `y` writes exactly
+/// the bytes the diff shows.
+#[test]
+fn a_three_line_write_file_or_edit_file_card_arms_at_24x80_with_a_path_and_byte_row() {
+    let (old, new) = big_file_and_change(3);
+    let edit = call(
+        "edit_file",
+        json!({
+            "path": "big.txt",
+            "old_text": old.lines().skip(99).take(3).collect::<Vec<_>>().join("\n"),
+            "new_text": new.lines().skip(99).take(3).collect::<Vec<_>>().join("\n"),
+        }),
+    );
+    let write = call("write_file", json!({"path": "big.txt", "content": &new}));
+    for (name, tool) in [("write_file", write), ("edit_file", edit)] {
+        let root = workspace("argsrow");
+        fs::write(root.join("big.txt"), &old).unwrap();
+        let (card, file) = approval::card_with_file(&root, &tool).unwrap();
+        assert!(file.is_some(), "{name}");
+        let mut session = Session::new("m".into());
+        session.insert("write it");
+        session.begin().unwrap();
+        let attempt = session.attempt;
+        session.apply(attempt, Update::Admitted);
+        assert!(session.await_approval(attempt, card.clone(), Instant::now()));
+        session.set_approval_file(file);
+        let probe = probe_session(session, 80, 24);
+        let text = &probe.text;
+        assert!(!text.contains("y is off"), "{name}: {text}");
+        assert!(probe.whole && probe.header, "{name}: {text}");
+        let bytes = format!("big.txt · {} bytes", new.len());
+        assert!(
+            text.lines().any(|row| row.contains(&bytes)),
+            "{name}: {bytes} on one row: {text}"
+        );
+        assert!(!text.contains("  args "), "{name}: {text}");
+        for n in 100..103 {
+            assert!(text.contains(&format!("-row {n}")), "{name} {n}: {text}");
+            assert!(
+                text.contains(&format!("+ROW {n} changed")),
+                "{name} {n}: {text}"
+            );
+        }
+        assert_eq!(probe.y, Some(Decision::Approve), "{name}: {text}");
+        assert_eq!(fs::read_to_string(root.join("big.txt")).unwrap(), old);
+        approval::apply(&root, &card).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("big.txt")).unwrap(),
+            new,
+            "{name}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 /// Issue #269: a write_file card that fits whole on screen still arms.
 #[test]
 fn a_write_file_card_that_fits_still_arms() {
@@ -2135,4 +2201,206 @@ fn approval_card_escapes_every_default_ignorable_code_point() {
         leaked.is_empty(),
         "drawn raw on the approval card: {leaked:?}"
     );
+}
+
+/// Draws a pending card for `tool` in a workspace holding `files`; returns the probe
+/// (draw at `width`x`height`, then `y`, `a`, `n`) and the card.
+fn probe_card(
+    files: &[(&str, &str)],
+    tool: &ToolCall,
+    width: u16,
+    height: u16,
+) -> (KeyProbe, approval::Card, PathBuf) {
+    let root = workspace("probecard");
+    for (name, body) in files {
+        fs::write(root.join(name), body).unwrap();
+    }
+    let (card, file) = approval::card_with_file(&root, tool).unwrap();
+    let mut session = Session::new("m".into());
+    session.insert("write it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.await_approval(attempt, card.clone(), Instant::now()));
+    session.set_approval_file(file);
+    (probe_session(session, width, height), card, root)
+}
+
+/// Issue #586: the loosening has a limit. 3 contiguous lines (a 7-line diff) fit a 24x80
+/// card; 4 (9 lines) and more do not and keep the existing deny-only wording, writing nothing.
+#[test]
+fn a_diff_that_cannot_fit_24x80_stays_deny_only_with_the_existing_wording() {
+    for (count, fits) in [(3, true), (4, false), (5, false), (30, false)] {
+        let (old, new) = big_file_and_change(count);
+        let write = call("write_file", json!({"path": "big.txt", "content": &new}));
+        let (probe, card, root) = probe_card(&[("big.txt", &old)], &write, 80, 24);
+        let text = &probe.text;
+        assert_eq!(probe.whole, fits, "{count}: {text}");
+        assert_eq!(
+            probe.y,
+            fits.then_some(Decision::Approve),
+            "{count}: {text}"
+        );
+        assert_eq!(text.contains("y is off"), !fits, "{count}: {text}");
+        if !fits {
+            assert!(text.contains("enlarge the terminal or press n"), "{text}");
+            assert_eq!(probe.a, None, "{text}");
+            assert_eq!(probe.n, Some(Decision::Deny), "{text}");
+            assert_eq!(fs::read_to_string(root.join("big.txt")).unwrap(), old);
+        } else {
+            approval::apply(&root, &card).unwrap();
+            assert_eq!(fs::read_to_string(root.join("big.txt")).unwrap(), new);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #586: a tiny terminal still cannot arm a file edit, and `n` waits for a header.
+#[test]
+fn a_file_edit_card_on_a_tiny_terminal_is_still_not_answerable_by_y() {
+    let (old, new) = big_file_and_change(3);
+    let write = call("write_file", json!({"path": "big.txt", "content": &new}));
+    for (w, h) in [(80, 12), (80, 10), (40, 24), (20, 24)] {
+        let (probe, _, root) = probe_card(&[("big.txt", &old)], &write, w, h);
+        assert_eq!(probe.y, None, "{w}x{h}: {}", probe.text);
+        assert_eq!(probe.a, None, "{w}x{h}: {}", probe.text);
+        assert!(!probe.whole, "{w}x{h}: {}", probe.text);
+        assert_eq!(fs::read_to_string(root.join("big.txt")).unwrap(), old);
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #586: on a roomy terminal the card keeps the args excerpt and adds the file row;
+/// a run_command card never gets the file row.
+#[test]
+fn a_roomy_file_edit_card_keeps_args_and_other_cards_have_no_file_row() {
+    let (old, new) = big_file_and_change(3);
+    let write = call("write_file", json!({"path": "big.txt", "content": &new}));
+    let (probe, _, root) = probe_card(&[("big.txt", &old)], &write, 120, 40);
+    assert!(probe
+        .text
+        .contains(&format!("big.txt · {} bytes", new.len())));
+    assert!(probe.text.contains("  args {"), "{}", probe.text);
+    let _ = fs::remove_dir_all(root);
+    for (w, h) in [(80, 24), (120, 40)] {
+        let probe = probe_keys("ls", false, w, h);
+        assert!(probe.text.contains("  args {"), "{w}x{h}: {}", probe.text);
+        assert!(!probe.text.contains(" bytes"), "{w}x{h}: {}", probe.text);
+    }
+}
+
+/// Issue #586: the byte count is the size the file ends with, including a final newline
+/// that appears or vanishes and CRLF endings kept by edit_file; the diff says so too.
+#[test]
+fn the_byte_row_counts_the_bytes_written_for_line_ending_changes() {
+    // Final newline removed: one byte fewer, and the diff says so.
+    let write = call(
+        "write_file",
+        json!({"path": "a.txt", "content": "one\ntwo"}),
+    );
+    let (probe, card, root) = probe_card(&[("a.txt", "one\ntwo\n")], &write, 80, 24);
+    assert!(probe.text.contains("a.txt · 7 bytes"), "{}", probe.text);
+    assert!(card.preview.contains("final newline"), "{}", card.preview);
+    assert!(probe.text.contains("final newline"), "{}", probe.text);
+    assert_eq!(probe.y, Some(Decision::Approve), "{}", probe.text);
+    approval::apply(&root, &card).unwrap();
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "one\ntwo");
+    let _ = fs::remove_dir_all(root);
+    // A CRLF file edited with LF text is written back with CRLF: 2 bytes per line.
+    let edit = call(
+        "edit_file",
+        json!({"path": "w.txt", "old_text": "b", "new_text": "BB"}),
+    );
+    let (probe, card, root) = probe_card(&[("w.txt", "a\r\nb\r\nc\r\n")], &edit, 80, 24);
+    assert!(probe.text.contains("w.txt · 10 bytes"), "{}", probe.text);
+    approval::apply(&root, &card).unwrap();
+    assert_eq!(fs::read(root.join("w.txt")).unwrap(), b"a\r\nBB\r\nc\r\n");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #586: the path on the file row goes through `safe_visible` (a bidi override or
+/// zero-width character shows as `<U+XXXX>`), a wide-character path counts display
+/// columns, and the file written is the file shown.
+#[test]
+fn the_file_row_escapes_invisible_characters_in_the_path_and_names_the_written_file() {
+    let name = "a\u{202e}b\u{200b}漢.txt";
+    let write = call("write_file", json!({"path": name, "content": "x\n"}));
+    let (probe, card, root) = probe_card(&[], &write, 80, 24);
+    let text = &probe.text;
+    // A wide character takes two cells, so the buffer text has a gap after it.
+    assert!(text.contains("a<U+202E>b<U+200B>漢"), "{text}");
+    assert!(text.contains(".txt · 2 bytes"), "{text}");
+    assert!(
+        !text.contains('\u{202e}') && !text.contains('\u{200b}'),
+        "{text}"
+    );
+    assert_eq!(probe.y, Some(Decision::Approve), "{text}");
+    approval::apply(&root, &card).unwrap();
+    assert_eq!(fs::read_to_string(root.join(name)).unwrap(), "x\n");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #586: a path too long for one row is never cut to fit; the card keeps the old
+/// args row and, when it does not fit whole, stays deny-only.
+#[test]
+fn a_path_too_long_for_one_row_is_never_cut_into_the_file_row() {
+    let path = format!("{}/f.txt", "d".repeat(100));
+    let write = call("write_file", json!({"path": path, "content": "x\n"}));
+    let root = workspace("longrow");
+    fs::create_dir_all(root.join("d".repeat(100))).unwrap();
+    let (card, file) = approval::card_with_file(&root, &write).unwrap();
+    assert!(file.is_some());
+    let mut session = Session::new("m".into());
+    session.insert("write it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.await_approval(attempt, card, Instant::now()));
+    session.set_approval_file(file);
+    let probe = probe_session(session, 80, 40);
+    assert!(probe.text.contains("  args"), "{}", probe.text);
+    assert!(!probe.text.contains("· 2 bytes"), "{}", probe.text);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #586: a file row belongs to the card it came with. A new card, a cancelled turn
+/// or a card with no row never shows the previous card's row.
+#[test]
+fn a_file_row_never_outlives_or_crosses_to_another_card() {
+    let (old, new) = big_file_and_change(3);
+    let write = call("write_file", json!({"path": "big.txt", "content": &new}));
+    let root = workspace("filerowlife");
+    fs::write(root.join("big.txt"), &old).unwrap();
+    let (card, file) = approval::card_with_file(&root, &write).unwrap();
+    assert_eq!(
+        file,
+        Some(approval::FileRow {
+            path: "big.txt".into(),
+            bytes: new.len()
+        })
+    );
+    let mut session = Session::new("m".into());
+    session.insert("write it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.pending_approval_file().is_none());
+    assert!(session.await_approval(attempt, card.clone(), Instant::now()));
+    session.set_approval_file(file);
+    assert!(session.pending_approval_file().is_some());
+    // The next card starts without a row.
+    assert!(session.await_approval(attempt, card, Instant::now()));
+    assert!(session.pending_approval_file().is_none());
+    // A run_command card has no row.
+    let shell = call("run_command", json!({"command": "ls"}));
+    let (_, none) = approval::card_with_file(&root, &shell).unwrap();
+    assert_eq!(none, None);
+    // After the turn is cancelled there is no pending card, so no row.
+    session.set_approval_file(Some(approval::FileRow {
+        path: "x".into(),
+        bytes: 1,
+    }));
+    session.cancel();
+    assert!(session.pending_approval_file().is_none());
+    let _ = fs::remove_dir_all(root);
 }

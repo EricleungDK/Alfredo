@@ -29,6 +29,8 @@ from terminal_smoke import Pty
 
 LONG = 'echo ' + 'a ' * 440 + '; touch pwned'
 SLOW = 'echo $$ > pid; touch started; sleep 4; touch marker'
+BIG_OLD = ''.join(f'row {n}\n' for n in range(1, 201))
+BIG_NEW = BIG_OLD.replace('row 100\nrow 101\nrow 102\n', 'ROW 100 new\nROW 101 new\nROW 102 new\n')
 README = '# Demo project\nREADME_BODY_MARKER: a tiny repository used by the smoke.\n'
 
 
@@ -84,6 +86,14 @@ class Fixture:
                 elif 'redraft' in prompt:
                     denied = 'denied' in tool_results[-1]['content']
                     chunks = [{'message': {'content': 'MODEL_SAW_DENIAL' if denied else 'MODEL_SAW_EDIT'},
+                               'done': False}]
+                elif 'rewrite big' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'write_file', 'arguments': {
+                            'path': 'big.txt', 'content': BIG_NEW}}}]}, 'done': False}]
+                elif 'rewrite big' in prompt:
+                    denied = 'denied' in tool_results[-1]['content']
+                    chunks = [{'message': {'content': 'BIG_DENIED' if denied else 'BIG_WRITTEN'},
                                'done': False}]
                 elif 'slow command' in prompt and not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
@@ -437,6 +447,30 @@ class ChatTools(unittest.TestCase):
         self.terminal.wait_for('LONG_DENIED')
         self.assertFalse(root.joinpath('pwned').exists())
         self.assertEqual(self.approval_outcomes(), ['denied'])
+
+    def test_a_three_line_write_file_at_24x80_shows_one_path_row_and_y_writes_it(self):
+        # Issue #586: the args excerpt used to push this card past 24 rows (deny-only).
+        root = Path(os.path.realpath(self.repo.name))
+        root.joinpath('big.txt').write_text(BIG_OLD)
+        subprocess.run(['git', '-C', str(root), 'add', 'big.txt'], check=True)
+        subprocess.run(['git', '-C', str(root), '-c', 'user.name=t', '-c', 'user.email=t@t',
+                        'commit', '-q', '-m', 'big'], check=True)
+        fcntl.ioctl(self.terminal.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
+        self.terminal.process.send_signal(signal.SIGWINCH)
+        self.terminal.wait_for_width(80)
+        time.sleep(0.5)
+        self.terminal.write(b'rewrite big\r')
+        self.terminal.wait_for('Approve write_file')
+        self.terminal.wait_for('+ROW 102 new')
+        screen = self.terminal.screen()
+        self.assertNotIn('y is off', screen)
+        self.assertIn(f'big.txt \u00b7 {len(BIG_NEW)} bytes', screen)
+        self.assertNotIn('  args ', screen)
+        self.assertEqual(root.joinpath('big.txt').read_text(), BIG_OLD, 'nothing before y')
+        time.sleep(1.0)
+        self.terminal.write(b'y')
+        self.terminal.wait_for('BIG_WRITTEN')
+        self.assertEqual(root.joinpath('big.txt').read_text(), BIG_NEW)
 
     def tool_names(self, request):
         return [tool['function']['name'] for tool in request.get('tools') or []]

@@ -1182,11 +1182,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .sessions
                     .get_mut(request.session)
                     .is_some_and(|session| {
-                        session.await_approval(
+                        let shown = session.await_approval(
                             request.attempt,
                             request.card.clone(),
                             std::time::Instant::now(),
-                        )
+                        );
+                        if shown {
+                            session.set_approval_file(request.file.clone());
+                        }
+                        shown
                     });
                 if shown {
                     work.app.note_approval_wait(request.session);

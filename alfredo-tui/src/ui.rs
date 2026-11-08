@@ -1582,8 +1582,12 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         }
         let mut card_head = None;
         if let Some(card) = session.pending_approval() {
-            let (card_lines, head, whole) =
-                approval_card_lines(card, usize::from(width), usize::from(content[1].height));
+            let (card_lines, head, whole) = approval_card_lines_with_file(
+                card,
+                session.pending_approval_file(),
+                usize::from(width),
+                usize::from(content[1].height),
+            );
             card_head = Some((heights.len(), head, card_lines.len(), whole));
             heights.extend(
                 card_lines
@@ -1797,25 +1801,60 @@ fn cut_cells(text: &str, cells: usize) -> String {
 /// The flag is true only when `y` may arm: the whole card (header, args, every `$`
 /// line of a command, key line) fits in `rows` (issue #303). Otherwise the card is
 /// deny-only: a shortened header and a key line that says why `y` and `a` are off.
+#[cfg(test)]
 fn approval_card_lines(
     card: &crate::chat_tools::approval::Card,
     width: usize,
     rows: usize,
 ) -> (Vec<Line<'static>>, usize, bool) {
-    let (lines, head, complete) = approval_card_build(card, width, rows, false);
-    if complete {
-        (lines, head, true)
-    } else {
-        let (lines, head, _) = approval_card_build(card, width, rows, true);
-        (lines, head, false)
-    }
+    approval_card_lines_with_file(card, None, width, rows)
 }
 
-fn approval_card_build(
+/// [`approval_card_lines`] for a card with a file row (issue #586). A file edit is tried
+/// with its `path · N bytes` row beside the args excerpt, then with the row instead of
+/// the excerpt; the same row budget decides whether either fits whole. Every other
+/// card, and a card without a file row, draws the args excerpt alone.
+#[doc(hidden)]
+pub fn approval_card_lines_with_file(
     card: &crate::chat_tools::approval::Card,
+    file: Option<&crate::chat_tools::approval::FileRow>,
     width: usize,
     rows: usize,
-    deny_only: bool,
+) -> (Vec<Line<'static>>, usize, bool) {
+    let file = file.filter(|_| card.kind == crate::chat_tools::approval::CardKind::Edit);
+    let tries: &[Rows] = if file.is_some() {
+        &[Rows::Both, Rows::FileOnly]
+    } else {
+        &[Rows::Args]
+    };
+    for &kind in tries {
+        let (lines, head, complete) = approval_card_build(card, file, width, rows, (false, kind));
+        if complete {
+            return (lines, head, true);
+        }
+    }
+    let (lines, head, _) = approval_card_build(card, file, width, rows, (true, Rows::Args));
+    (lines, head, false)
+}
+
+/// Which header rows a pending card draws between its title and its diff.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rows {
+    /// The args excerpt alone (every card kind).
+    Args,
+    /// A file edit's `path · N bytes` row above the args excerpt.
+    Both,
+    /// A file edit's `path · N bytes` row instead of the args excerpt.
+    FileOnly,
+}
+
+/// `(deny_only, rows)`: a deny-only card cuts its header; `rows` picks the header rows.
+fn approval_card_build(
+    card: &crate::chat_tools::approval::Card,
+    file: Option<&crate::chat_tools::approval::FileRow>,
+    width: usize,
+    rows: usize,
+    (deny_only, rows_kind): (bool, Rows),
 ) -> (Vec<Line<'static>>, usize, bool) {
     use crate::chat_tools::approval::CardKind;
     // A deny-only card cuts its header so the args and key lines stay on screen.
@@ -1872,12 +1911,27 @@ fn approval_card_build(
             style.add_modifier(Modifier::REVERSED),
         ));
     }
-    let arguments = card.arguments.to_string();
-    let shown: String = arguments.chars().take(width.max(20) * 2).collect();
-    lines.push(Line::styled(
-        format!("  args {}", safe_visible(&shown)),
-        dim(),
-    ));
+    // A file edit names the file and its new size in one row (issue #586). A path that
+    // would wrap is never cut: it keeps the args row alone.
+    let file_row = file
+        .filter(|_| rows_kind != Rows::Args && card.kind == CardKind::Edit)
+        .map(|file| {
+            let (path, bytes) = (safe_visible(&file.path), file.bytes);
+            Line::styled(format!("  {path} · {bytes} bytes"), dim())
+        })
+        .filter(|row| {
+            crate::transcript_cache::line_height(row, width.min(usize::from(u16::MAX)) as u16) == 1
+        });
+    let file_only = rows_kind == Rows::FileOnly && file_row.is_some();
+    lines.extend(file_row);
+    if !file_only {
+        let arguments = card.arguments.to_string();
+        let shown: String = arguments.chars().take(width.max(20) * 2).collect();
+        lines.push(Line::styled(
+            format!("  args {}", safe_visible(&shown)),
+            dim(),
+        ));
+    }
     let head = lines.len() - 1;
     // A preview taller than the rows left shows its first lines and a count of the
     // rest (issue #268). `y` arms only when nothing of a command is cut (issue #303).

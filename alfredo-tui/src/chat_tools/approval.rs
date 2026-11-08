@@ -66,6 +66,15 @@ impl Card {
     }
 }
 
+/// What a `write_file`/`edit_file` card writes: the file (display form) and the byte
+/// count it ends with. The card shows them in one row (issue #586). It travels beside
+/// the [`Card`], from the same preview, and is only ever shown, never acted on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileRow {
+    pub path: String,
+    pub bytes: usize,
+}
+
 /// What came of one card.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -231,6 +240,8 @@ pub struct Request {
     pub session: usize,
     pub attempt: u64,
     pub card: Card,
+    /// The file row of a `write_file`/`edit_file` card, from the card's own preview.
+    pub file: Option<FileRow>,
     pub reply: oneshot::Sender<Decision>,
     pub log: Option<Log>,
 }
@@ -285,13 +296,18 @@ pub const DENIED: &str =
 
 /// Build the card for a mutating call, or the reason it is refused before asking.
 pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
+    card_with_file(root, call).map(|(card, _)| card)
+}
+
+/// [`card`] plus the file row of a `write_file`/`edit_file` call, both from one preview.
+pub fn card_with_file(root: &Path, call: &ToolCall) -> Result<(Card, Option<FileRow>), String> {
     let arguments = super::normalize_arguments(&call.arguments);
     if !arguments.is_object() {
         return Err("arguments must be a JSON object".into());
     }
     if let Some(shown) = super::shell::preview(root, &call.name, &arguments) {
         let shown = shown?;
-        return Ok(Card {
+        let card = Card {
             tool: call.name.clone(),
             arguments,
             kind: CardKind::Shell {
@@ -300,21 +316,24 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
             summary: shown.summary,
             preview: shown.preview,
             fingerprint: shown.cwd,
-        });
+        };
+        return Ok((card, None));
     }
     let (change, kind) = match super::edit::preview(root, &call.name, &arguments) {
         Some(change) => (change?, CardKind::Edit),
         None => super::git_write::preview(root, &call.name, &arguments)
             .ok_or_else(|| format!("{} has no approval preview", call.name))??,
     };
-    Ok(Card {
+    let file = change.written.map(|(path, bytes)| FileRow { path, bytes });
+    let card = Card {
         tool: call.name.clone(),
         arguments,
         kind,
         summary: change.summary,
         preview: change.diff,
         fingerprint: change.fingerprint,
-    })
+    };
+    Ok((card, file))
 }
 
 /// Run an approved card: refuse when the target changed since the preview,
