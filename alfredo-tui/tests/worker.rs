@@ -7980,6 +7980,30 @@ fn fold_counts_a_streaming_line_and_bounds_a_very_long_one() {
 }
 
 #[test]
+fn fold_offsets_stay_exact_after_an_over_long_line_is_skipped() {
+    let mut fold = worker::Fold::default();
+    let mut text = String::from("=== FILE: a.py ===\n");
+    fold.push(&text);
+    let long = "x".repeat(3000);
+    fold.push(&long);
+    let rest = "yy\n=== FILE: b.py ===\nz\n";
+    fold.push(rest);
+    text.push_str(&long);
+    text.push_str(rest);
+    // The tail starts 4 bytes before `b.py`'s marker: it still holds the heading, so
+    // nothing is put in front of it.
+    let tail = &text[text.len() - 25..];
+    assert!(tail.contains("=== FILE: b.py ==="));
+    assert_eq!(fold.expanded(tail), tail);
+    // A tail that starts inside the previous line lacks the heading: the marker returns.
+    let tail = &text[text.len() - 15..];
+    assert_eq!(
+        fold.expanded(tail),
+        format!("=== FILE: b.py ===\n{}", "z\n")
+    );
+}
+
+#[test]
 fn fold_collapses_the_oldest_files_and_keeps_the_open_one() {
     let mut fold = worker::Fold::default();
     for index in 0..1000 {
