@@ -359,7 +359,12 @@ impl Report {
             .iter()
             .filter(|c| self.case_issues(c).is_empty())
             .count();
-        format!("Diagnostic cohort {}: {attempted}/{} attempted, {accepted} canonical accepted, {observed} with complete model/runtime/timing observations. Upstream binary pin and exact token headroom unverified; no promotion or general speed claim.", if self.finished { "finished" } else { "incomplete" }, self.cases.len())
+        let mut summary = format!("Diagnostic cohort {}: {attempted}/{} attempted, {accepted} canonical accepted, {observed} with complete model/runtime/timing observations. Upstream binary pin and exact token headroom unverified; no promotion or general speed claim.", if self.finished { "finished" } else { "incomplete" }, self.cases.len());
+        if let Some(reason) = &self.stop_reason {
+            summary.push_str("\nStopped: ");
+            summary.push_str(reason);
+        }
+        summary
     }
 }
 

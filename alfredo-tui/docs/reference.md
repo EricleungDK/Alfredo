@@ -422,6 +422,8 @@ workspaces and review evidence beside the chosen report. Existing paths refuse;
 incomplete checkpoints never resume generation. `--inspect-qualification` validates
 and summarizes a saved artifact without HTTP or task effects. A finished cohort may
 contain failed fixtures; generated output and ReviewReady are not canonical acceptance.
+An incomplete report adds a `Stopped: <reason>` line to the summary, and a report path
+that cannot be read is named in the error.
 
 Actual payload/profile/message/prefix hashes omit raw prompts from request records.
 Post-generation runtime inspection runs before recorded completion while the shared

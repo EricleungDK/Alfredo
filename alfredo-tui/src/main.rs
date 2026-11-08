@@ -354,7 +354,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if qualification_repetitions.is_some() {
                 return Err("Inspection does not take repetitions".into());
             }
-            let report = alfredo_tui::qualification::read(&path)?;
+            let report = alfredo_tui::qualification::read(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
             println!("{}", report.summary());
             return Ok(());
         }

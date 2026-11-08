@@ -436,6 +436,22 @@ class QualificationCliSmoke(unittest.TestCase):
         self.assertEqual(server.counts(), before)
         self.assertFalse(list(Path(report['manifest']['artifact_directory']).glob('case-*')))
 
+    def test_unreachable_endpoint_summary_names_stop_reason_and_missing_report_names_path(self):
+        path = self.root / 'unreachable.json'
+        completed = self.cli('--endpoint', 'http://127.0.0.1:9', '--model', MODEL,
+                             '--qualify-inference', path, '--qualification-repetitions', '1')
+        self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+        lines = completed.stdout.splitlines()
+        self.assertTrue(lines[0].startswith('Diagnostic cohort incomplete'), completed.stdout)
+        self.assertEqual(lines[1], 'Stopped: Initial server/model identity unavailable; no inference was started')
+        inspected = self.cli('--inspect-qualification', path)
+        self.assertEqual(inspected.returncode, 0, inspected.stdout + inspected.stderr)
+        self.assertEqual(inspected.stdout.splitlines()[1], lines[1])
+        missing = self.root / 'missing-report.json'
+        failed = self.cli('--inspect-qualification', missing)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn(str(missing), failed.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
