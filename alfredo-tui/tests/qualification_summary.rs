@@ -33,6 +33,11 @@ async fn summary_of_an_incomplete_cohort_names_why_it_stopped() {
         .expect("unreachable endpoint stops the cohort");
     let summary = report.summary();
     let _ = fs::remove_dir_all(&dir);
+    let mut cleared = report.clone();
+    cleared.stop_reason = None;
+    let without = cleared.summary();
+    assert!(!without.contains("Stopped:"), "{without}");
+    assert_eq!(without.lines().count(), 1, "{without}");
     let mut lines = summary.lines();
     assert!(lines
         .next()

@@ -822,17 +822,6 @@ mod tests {
         assert!(Output::new(&output.path).is_err());
     }
     #[test]
-    fn summary_reports_stop_reason_only_when_one_was_recorded() {
-        let mut report = Fixture::new().report();
-        assert!(!report.summary().contains("Stopped:"));
-        report.stop_reason = Some("Fixture stop".into());
-        let summary = report.summary();
-        let mut lines = summary.lines();
-        assert!(lines.next().unwrap().starts_with("Diagnostic cohort"));
-        assert_eq!(lines.next(), Some("Stopped: Fixture stop"));
-        assert_eq!(lines.next(), None);
-    }
-    #[test]
     fn failed_scenarios_remain_in_denominator_without_reviewed_latency() {
         let fixture = Fixture::new();
         let mut report = fixture.report();
