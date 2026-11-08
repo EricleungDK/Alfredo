@@ -381,7 +381,7 @@ pub fn footer_hints(dashboard: bool, width: usize) -> String {
     )
 }
 
-/// One line, at most nine hints separated by two spaces, relevant to the
+/// One line, at most eight hints separated by two spaces, relevant to the
 /// focused area; lower-priority hints drop first when narrow.
 pub fn footer(context: Footer, turn: Turn, width: usize) -> String {
     let hints: &[(&str, u8)] = match context {
@@ -398,8 +398,7 @@ pub fn footer(context: Footer, turn: Turn, width: usize) -> String {
             ("F6 pane", 1),
             ("↑↓ task", 1),
             ("F2 chat", 1),
-            ("F3 evidence", 2),
-            ("^O code", 2),
+            ("F3 evidence ^O code", 2),
             ("F5 pause", 3),
             ("PgUp/Dn scroll", 3),
             ("F1 help", 0),
