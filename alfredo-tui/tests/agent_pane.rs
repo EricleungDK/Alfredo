@@ -295,7 +295,7 @@ fn watch_and_tell_work_from_anywhere() {
 #[test]
 fn live_output_that_exactly_fills_the_tail_is_shown_as_streamed() {
     let raw = "=== FILE: calc.py ===\nx = 1\n";
-    let mut fixture = fixture("");
+    let fixture = fixture("");
     fixture.progress.send_modify(|progress| {
         progress.model_output = raw.into();
         progress.received_bytes = raw.len();
