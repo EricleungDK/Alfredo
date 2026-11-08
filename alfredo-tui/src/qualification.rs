@@ -359,7 +359,12 @@ impl Report {
             .iter()
             .filter(|c| self.case_issues(c).is_empty())
             .count();
-        format!("Diagnostic cohort {}: {attempted}/{} attempted, {accepted} canonical accepted, {observed} with complete model/runtime/timing observations. Upstream binary pin and exact token headroom unverified; no promotion or general speed claim.", if self.finished { "finished" } else { "incomplete" }, self.cases.len())
+        let mut summary = format!("Diagnostic cohort {}: {attempted}/{} attempted, {accepted} canonical accepted, {observed} with complete model/runtime/timing observations. Upstream binary pin and exact token headroom unverified; no promotion or general speed claim.", if self.finished { "finished" } else { "incomplete" }, self.cases.len());
+        if let Some(reason) = &self.stop_reason {
+            summary.push_str("\nStopped: ");
+            summary.push_str(reason);
+        }
+        summary
     }
 }
 
@@ -815,6 +820,17 @@ mod tests {
             .contains("1/8 attempted, 0 canonical accepted, 0 with complete"));
         assert!(fs::read_dir(&output.artifacts).unwrap().next().is_none());
         assert!(Output::new(&output.path).is_err());
+    }
+    #[test]
+    fn summary_reports_stop_reason_only_when_one_was_recorded() {
+        let mut report = Fixture::new().report();
+        assert!(!report.summary().contains("Stopped:"));
+        report.stop_reason = Some("Fixture stop".into());
+        let summary = report.summary();
+        let mut lines = summary.lines();
+        assert!(lines.next().unwrap().starts_with("Diagnostic cohort"));
+        assert_eq!(lines.next(), Some("Stopped: Fixture stop"));
+        assert_eq!(lines.next(), None);
     }
     #[test]
     fn failed_scenarios_remain_in_denominator_without_reviewed_latency() {
