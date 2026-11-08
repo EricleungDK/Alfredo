@@ -8004,6 +8004,90 @@ fn fold_offsets_stay_exact_after_an_over_long_line_is_skipped() {
 }
 
 #[test]
+fn fold_counts_a_blank_first_line_and_still_hides_the_wrapper_fence() {
+    // A blank line is not content yet: the fence after it still wraps the file.
+    let text = "=== FILE: a.py ===\n\n```python\nx\n```\n=== END FILE ===\n";
+    let mut fold = worker::Fold::default();
+    fold.push(text);
+    assert_eq!(fold.render(), "▸ a.py · 2 lines\n");
+    assert_eq!(worker::folded_output(text, false), "▸ a.py · 2 lines\n");
+}
+
+#[test]
+fn fold_offsets_add_up_across_several_lines() {
+    let mut fold = worker::Fold::default();
+    let text = "aaa\n=== FILE: b.py ===\nz\n";
+    fold.push(text);
+    // The tail starts 2 bytes into the stream: the heading at byte 4 is inside it.
+    let tail = &text[2..];
+    assert_eq!(fold.expanded(tail), tail);
+    // From byte 6 on it is not: the marker goes in front, minus the partial line.
+    assert_eq!(fold.expanded(&text[6..]), "=== FILE: b.py ===\nz\n");
+}
+
+#[test]
+fn fold_stops_reading_a_line_once_it_passes_the_line_buffer() {
+    // The streaming line is judged as it stands (a `===` line is still hidden) and its
+    // rest is skipped, so it does not turn into a counted line when its newline comes.
+    let mut fold = worker::Fold::default();
+    fold.push("=== FILE: a.py ===\n");
+    fold.push(&format!("=== {}", "x".repeat(3000)));
+    fold.push("\nafter\n");
+    assert_eq!(fold.render(), "▸ a.py · 1 line so far\n");
+}
+
+#[test]
+fn fold_starts_a_code_row_for_a_snippet_after_a_closed_block() {
+    let text = "=== FILE: a.py ===\nx\n=== END FILE ===\n```\ncode\n```\n";
+    let mut fold = worker::Fold::default();
+    fold.push(text);
+    assert_eq!(fold.render(), "▸ a.py · 1 line\n▸ code · 1 line\n");
+    assert_eq!(fold.render(), worker::folded_output(text, false));
+}
+
+#[test]
+fn fold_marks_only_prose_lines_longer_than_the_cap_as_cut() {
+    let render = |text: &str| {
+        let mut fold = worker::Fold::default();
+        fold.push(text);
+        fold.render()
+    };
+    let line = |count: usize| "p".repeat(count);
+    // Exactly at the cap, with or without its newline: nothing is cut.
+    assert_eq!(
+        render(&format!("{}\n", line(240))),
+        format!("{}\n", line(240))
+    );
+    assert_eq!(render(&line(240)), format!("{}\n", line(240)));
+    assert_eq!(render("short"), "short\n");
+    // One over: cut at the cap and marked.
+    assert_eq!(
+        render(&format!("{}\n", line(241))),
+        format!("{}…\n", line(240))
+    );
+}
+
+#[test]
+fn fold_keeps_exactly_the_row_cap_before_collapsing_a_file() {
+    let render = |files: usize| {
+        let mut fold = worker::Fold::default();
+        for index in 0..files {
+            fold.push(&format!("=== FILE: f{index}.py ===\nx\n=== END FILE ===\n"));
+        }
+        fold.render()
+    };
+    let full = render(64);
+    assert_eq!(full.lines().count(), 64);
+    assert!(full.starts_with("▸ f0.py · 1 line\n"), "{full}");
+    let over = render(65);
+    assert_eq!(over.lines().count(), 65);
+    assert!(
+        over.starts_with("… 1 earlier file\n▸ f1.py · 1 line\n"),
+        "{over}"
+    );
+}
+
+#[test]
 fn fold_collapses_the_oldest_files_and_keeps_the_open_one() {
     let mut fold = worker::Fold::default();
     for index in 0..1000 {

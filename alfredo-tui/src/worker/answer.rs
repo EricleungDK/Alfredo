@@ -732,7 +732,7 @@ impl Fold {
             }
             Some(Row::Text(text, Kind::Prose)) => {
                 let kept: String = text.chars().take(FOLD_PROSE).collect();
-                let cut = kept.len() < text.len();
+                let cut = kept.len() < text.trim_end_matches('\n').len();
                 let end = if cut { "…" } else { "" };
                 let kept = kept.trim_end_matches('\n');
                 self.rows
