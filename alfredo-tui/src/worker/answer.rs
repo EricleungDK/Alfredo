@@ -59,6 +59,14 @@ fn shown_path(path: &str) -> String {
         .collect()
 }
 
+/// A FILE or EDIT path as its `▸` heading shows it. Format, bidi, zero-width, tag and
+/// line-separator characters show as `<U+XXXX>` (`dashboard::safe_visible`), so the
+/// heading draws the bytes the model wrote. A tab shows too: a raw tab draws as nothing.
+/// The path is one line already: a marker line ends at its newline.
+fn heading_path(path: &str) -> String {
+    crate::dashboard::safe_visible(path).replace('\t', "<U+0009>")
+}
+
 /// Block content: one wrapping markdown fence layer stripped (only when no other
 /// fence line lies inside), one trailing newline.
 fn block_content(lines: &[&str]) -> String {
@@ -529,11 +537,11 @@ fn display_rows(text: &str) -> Vec<Row<'_>> {
     for line in text.split_inclusive('\n') {
         let complete = line.ends_with('\n');
         if let Some(path) = file_marker(line) {
-            rows.push(Row::Heading(format!("▸ {path}")));
+            rows.push(Row::Heading(format!("▸ {}", heading_path(path))));
             (in_block, in_file, seen, wrapped, depth) = (true, true, false, false, 0);
             in_snippet = false;
         } else if let Some(path) = edit_marker(line).filter(|_| !in_file) {
-            rows.push(Row::Heading(format!("▸ {path} (edit)")));
+            rows.push(Row::Heading(format!("▸ {} (edit)", heading_path(path))));
             (in_block, seen, wrapped, depth) = (true, false, false, 0);
             in_snippet = false;
         } else if end_marker(line) || (!in_file && line.trim_end() == EDIT_END) {
