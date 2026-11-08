@@ -534,8 +534,13 @@ fn work_detail(
         }
     }
     if let Some(live) = live {
-        // FILE blocks read as code: `▸ path` headings, marker lines hidden.
-        let model_output = crate::worker::display_output(&live.model_output);
+        // FILE blocks fold to one `▸ path · N lines` row each; Ctrl+O shows the code
+        // under its heading, marker lines hidden.
+        let model_output = if tasks.code_expanded {
+            crate::worker::display_output(&live.model_output)
+        } else {
+            crate::worker::folded_output(&live.model_output, live.cut)
+        };
         for (label, output) in [
             ("Model output", &model_output),
             ("Check stdout", &live.stdout),

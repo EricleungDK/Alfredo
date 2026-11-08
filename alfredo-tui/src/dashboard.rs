@@ -606,6 +606,8 @@ pub struct Live {
     pub stage: String,
     pub cancelling: bool,
     pub model_output: String,
+    /// `model_output` is a tail: its start was dropped.
+    pub cut: bool,
     pub stdout: String,
     pub stderr: String,
 }

@@ -259,7 +259,7 @@ fn running_task_shows_live_stage_model_text_and_check_output_following_the_tail(
 }
 
 #[test]
-fn running_task_shows_streamed_file_blocks_as_code_without_markers() {
+fn running_task_folds_streamed_file_blocks_and_ctrl_o_shows_code_without_markers() {
     let mut fixture = calc_plan();
     fixture.select(2);
     let (_sender, receiver) = tokio::sync::watch::channel(Progress {
@@ -270,6 +270,19 @@ fn running_task_shows_streamed_file_blocks_as_code_without_markers() {
     fixture
         .control
         .attach_progress(2, receiver, Arc::new(AtomicBool::new(false)));
+    // Folded by default: the prose stays, each file is one row with its line count.
+    let screen = text(&fixture.render(100, 30));
+    for shown in [
+        "I will add both files.",
+        "▸ todo.py · 2 lines",
+        "▸ test_todo.py · 2 lines so far",
+    ] {
+        assert!(screen.contains(shown), "{shown} missing: {screen}");
+    }
+    for hidden in ["import json", "class T(unittest.TestCase):", "=== FILE"] {
+        assert!(!screen.contains(hidden), "{hidden} shown: {screen}");
+    }
+    fixture.control.code_expanded = true;
     let buffer = fixture.render(100, 30);
     let screen = text(&buffer);
     for shown in [
@@ -285,6 +298,28 @@ fn running_task_shows_streamed_file_blocks_as_code_without_markers() {
         assert!(!screen.contains(hidden), "{hidden} shown: {screen}");
     }
     assert_borders_closed(&buffer);
+}
+
+#[test]
+fn running_task_with_a_cut_output_tail_folds_the_lines_before_the_first_file() {
+    let mut fixture = calc_plan();
+    fixture.select(2);
+    // The kept tail starts inside a file whose heading was dropped.
+    let output = "EARLIER_CODE = 1\nMORE_CODE = 2\n=== END FILE ===\n=== FILE: b.py ===\nb = 2\n";
+    let (_sender, receiver) = tokio::sync::watch::channel(Progress {
+        stage: "Receiving model plan",
+        model_output: output.into(),
+        received_bytes: output.len() + 4096,
+        ..Default::default()
+    });
+    fixture
+        .control
+        .attach_progress(2, receiver, Arc::new(AtomicBool::new(false)));
+    let screen = text(&fixture.render(100, 30));
+    for shown in ["… 2 earlier lines", "▸ b.py · 1 line so far"] {
+        assert!(screen.contains(shown), "{shown} missing: {screen}");
+    }
+    assert!(!screen.contains("EARLIER_CODE"), "{screen}");
 }
 
 #[test]

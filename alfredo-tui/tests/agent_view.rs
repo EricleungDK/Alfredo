@@ -88,18 +88,13 @@ fn finished_attempt_reads_as_instruction_references_code_check_and_outcome() {
     );
     assert_eq!(turns[0].lines[1].1, Tone::Summary);
     assert_eq!(text(&turns[1]), ["README.md, docs/usage.md"]);
-    // FILE blocks read as code per file with the existing display rules.
+    // FILE blocks fold to one row per file with its line count.
     assert_eq!(
         text(&turns[2]),
-        [
-            "▸ greet.py",
-            "def greet(name):",
-            "    return f\"Hello, {name}!\"",
-            "▸ test_greet.py",
-            "import unittest"
-        ]
+        ["▸ greet.py · 2 lines", "▸ test_greet.py · 1 line"]
     );
     assert_eq!(turns[2].lines[0].1, Tone::Path);
+    assert_eq!(turns[2].lines[1].1, Tone::Path);
     assert_eq!(
         turns[3].lines[0],
         ("python3 -m unittest test_greet.py".into(), Tone::Dim)
@@ -121,6 +116,19 @@ fn expanded_instruction_shows_the_request_text() {
     assert_eq!(lines[0], "Create greet.py and test_greet.py");
     assert!(lines.contains(&"Implement this task: Create greet.py and test_greet.py"));
     assert!(lines.contains(&"READ-ONLY FILE docs/usage.md"));
+    // Expanded, FILE blocks read as code per file with the existing display rules.
+    assert_eq!(
+        text(&turns[2]),
+        [
+            "▸ greet.py",
+            "def greet(name):",
+            "    return f\"Hello, {name}!\"",
+            "▸ test_greet.py",
+            "import unittest"
+        ]
+    );
+    assert_eq!(turns[2].lines[0].1, Tone::Path);
+    assert_eq!(turns[2].lines[1].1, Tone::Normal);
 }
 
 #[test]
@@ -135,6 +143,7 @@ fn repair_attempts_and_owner_notes_follow_in_order() {
         stage: "generating".into(),
         prompt: Some(prompt()),
         output: "=== FILE: greet.py ===\ndef greet(name):\n".into(),
+        cut: false,
         check_output: String::new(),
         checking: false,
         cancelling: false,
@@ -144,7 +153,8 @@ fn repair_attempts_and_owner_notes_follow_in_order() {
         text: "greet must say Hello".into(),
         status: "repair #3 started".into(),
     }];
-    let turns = agent_view::project(&[first, repair], &notes, false);
+    let attempts = [first, repair];
+    let turns = agent_view::project(&attempts, &notes, false);
     assert_eq!(
         labels(&turns),
         [
@@ -174,7 +184,9 @@ fn repair_attempts_and_owner_notes_follow_in_order() {
     );
     // The repair made from the note names it rather than repeating it.
     assert_eq!(text(&turns[6])[0], "Repair #1 with your note");
-    // A live attempt streams its answer; no outcome yet.
+    // A live attempt streams its answer, folded while the file is open; no outcome yet.
+    assert_eq!(text(&turns[8]), ["▸ greet.py · 1 line so far"]);
+    let turns = agent_view::project(&attempts, &notes, true);
     assert_eq!(text(&turns[8]), ["▸ greet.py", "def greet(name):"]);
 }
 
@@ -185,6 +197,7 @@ fn live_check_shows_the_command_and_streamed_output() {
         stage: "check".into(),
         prompt: None,
         output: answer(),
+        cut: false,
         check_output: "Ran 1 test\n".into(),
         checking: true,
         cancelling: false,
@@ -209,6 +222,7 @@ fn waiting_worker_says_what_it_is_doing_without_inventing_output() {
         stage: "queued".into(),
         prompt: None,
         output: String::new(),
+        cut: false,
         check_output: String::new(),
         checking: false,
         cancelling: true,
@@ -302,7 +316,7 @@ fn titles_name_the_current_attempt() {
 }
 
 #[test]
-fn worker_turn_hides_markdown_fences_but_keeps_code_under_path_headings() {
+fn worker_turn_folds_files_and_expanded_hides_fences_but_keeps_code_under_headings() {
     let mut first = attempt(1, TaskStatus::Failed);
     let mut rec = recorded(false);
     rec.answer = Some(
@@ -310,10 +324,13 @@ fn worker_turn_hides_markdown_fences_but_keeps_code_under_path_headings() {
             .into(),
     );
     first.recorded = Some(Ok(rec));
-    let turns = agent_view::project(&[first], &[], false);
-    let worker = turns.iter().find(|turn| turn.label == "Worker").unwrap();
+    let worker = |turns: &[Turn]| turns.iter().find(|t| t.label == "Worker").unwrap().clone();
+    // Folded: the prose stays, the file is one row and its wrapper fence is not counted.
+    let turns = agent_view::project(std::slice::from_ref(&first), &[], false);
+    assert_eq!(text(&worker(&turns)), ["Sure:", "▸ greet.py · 2 lines"]);
+    let turns = agent_view::project(&[first], &[], true);
     assert_eq!(
-        text(worker),
+        text(&worker(&turns)),
         ["Sure:", "▸ greet.py", "def greet(name):", "    return name"]
     );
     // A live partial fence line is hidden until it is complete.
@@ -322,13 +339,13 @@ fn worker_turn_hides_markdown_fences_but_keeps_code_under_path_headings() {
         stage: "generating".into(),
         prompt: None,
         output: "=== FILE: greet.py ===\n```pyth".into(),
+        cut: false,
         check_output: String::new(),
         checking: false,
         cancelling: false,
     });
-    let turns = agent_view::project(&[running], &[], false);
-    let worker = turns.iter().find(|turn| turn.label == "Worker").unwrap();
-    assert_eq!(text(worker), ["▸ greet.py"]);
+    let turns = agent_view::project(&[running], &[], true);
+    assert_eq!(text(&worker(&turns)), ["▸ greet.py"]);
 }
 
 #[test]
@@ -347,8 +364,17 @@ fn steered_attempt_shows_partial_output_then_a_dim_cut_marker() {
         labels(&turns),
         ["Autopilot → worker #1", "References", "Worker", "Outcome"]
     );
+    // Folded, the cut file counts what streamed before the cut.
     assert_eq!(
         text(&turns[2]),
+        [
+            "▸ greet.py · 2 lines so far",
+            "— steered at 12s · output cut"
+        ]
+    );
+    let expanded = agent_view::project(&[steered.clone()], &[], true);
+    assert_eq!(
+        text(&expanded[2]),
         [
             "▸ greet.py",
             "def greet(name):",
@@ -389,6 +415,7 @@ fn check_command_quotes_arguments_with_spaces_in_instruction_and_check_turns() {
         stage: "check".into(),
         prompt: None,
         output: answer(),
+        cut: false,
         check_output: String::new(),
         checking: true,
         cancelling: false,

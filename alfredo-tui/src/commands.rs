@@ -31,7 +31,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/plan-save", "save reviewed draft as proposed tasks"),
     ("/plan-cancel", "stop planning; take no task action"),
     ("/task", "description — propose coding work"),
-    ("/tasks", "[query or #ID] — find tasks; empty clears filter"),
+    (
+        "/tasks",
+        "[query or #ID] — find tasks; empty clears filter (Ctrl+O shows streamed code)",
+    ),
     ("/activity", "[query or #ID] — inspect saved task receipts"),
     ("/after", "1,2 description — propose dependent work"),
     ("/permit", "ID JSON — set exact files and check argv"),
@@ -85,7 +88,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/watch",
-        "ID|architect — open an agent's transcript (F6, Enter on its row)",
+        "ID|architect — open an agent's transcript (F6, Enter on its row; Ctrl+O shows code)",
     ),
     (
         "/tell",

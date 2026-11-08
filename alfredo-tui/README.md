@@ -118,7 +118,8 @@ entry in your repository; reviewed results are held by `refs/alfredo/candidates/
   collapse while another group is active.
 - **Right pane**: F2 switches between the selected task's detail and the chat.
   Task detail is labeled sections (`Files`, `Check`, `Depends`, `State`, `Next`,
-  `Result`, then the diff); live worker output follows the tail. A group shows its
+  `Result`, then the diff); live worker output follows the tail, with each file the
+  worker writes folded to one `▸ path · N lines` row (Ctrl+O shows the code). A group shows its
   goal, progress and tasks. Receipt IDs and revisions stay in F3 evidence and F4
   activity. While autopilot runs the detail follows the running task unless you
   moved the selection in the last 10 s.
@@ -145,13 +146,14 @@ repairs, newest at the bottom, following the tail while it runs:
 │ README.md                                       │
 │                                                 │
 │ Worker                                          │
-│ ▸ greet.py                                      │
-│ def greet(name):                                │
+│ ▸ greet.py · 2 lines                            │
+│ ▸ test_greet.py · 4 lines so far                │
 └─────────────────────────────────────────────────┘
 ```
 
 Turns: the instruction sent to the model (two lines; Ctrl+O shows the full request),
-read-only references (names only), the answer as code per file, the check command
+read-only references (names only), the answer with each file folded to one
+`▸ path · N lines` row (Ctrl+O shows the code), the check command
 with its output tail, the outcome, then each repair attempt and your notes. A run
 without a retained conversation shows what its evidence holds, with a one-line note.
 PageUp/PageDown scroll like the chat. Enter on the architect shows the planning
