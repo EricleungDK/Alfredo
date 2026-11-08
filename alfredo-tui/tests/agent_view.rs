@@ -334,6 +334,21 @@ fn worker_turn_shows_format_characters_in_a_file_path_visibly() {
 }
 
 #[test]
+fn worker_turn_path_shows_a_carriage_return_like_task_detail() {
+    // Task detail folds first and then drops controls, so the CR shows as <U+000D>.
+    let mut first = attempt(1, TaskStatus::Accepted);
+    let mut rec = recorded(true);
+    rec.answer = Some("=== FILE: src/a\rsr.txt ===\nx\n=== END FILE ===\n".into());
+    first.recorded = Some(Ok(rec));
+    let turns = agent_view::project(&[first], &[], false);
+    let worker = turns.iter().find(|t| t.label == "Worker").unwrap();
+    assert_eq!(
+        worker.lines,
+        [("▸ src/a<U+000D>sr.txt · 1 line".into(), Tone::Path)]
+    );
+}
+
+#[test]
 fn worker_turn_folds_files_and_expanded_hides_fences_but_keeps_code_under_headings() {
     let mut first = attempt(1, TaskStatus::Failed);
     let mut rec = recorded(false);

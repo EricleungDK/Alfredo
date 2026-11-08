@@ -7843,7 +7843,29 @@ fn folded_heading_shows_bidi_zero_width_and_tag_characters_visibly() {
             "heading draws format characters raw: {heading:?}"
         );
         assert!(heading.contains("<U+202E>"), "{heading:?}");
+        assert!(heading.contains("<U+200B>"), "{heading:?}");
+        assert!(heading.contains("<U+E0041>"), "{heading:?}");
     }
+}
+
+#[test]
+fn prose_line_forging_a_path_row_shows_hidden_characters_visibly() {
+    // No marker: a prose line that starts `▸ ` is drawn as a Path row by the agent view.
+    let forged = "▸ src/a\u{202E}sr.txt · 1 line\n";
+    assert_eq!(
+        worker::folded_output(&alfredo_tui::dashboard::safe(forged), false),
+        "▸ src/a<U+202E>sr.txt · 1 line\n"
+    );
+    assert_eq!(
+        worker::display_output(&alfredo_tui::dashboard::safe(forged)),
+        "▸ src/a<U+202E>sr.txt · 1 line\n"
+    );
+    // Prose that does not start a path row keeps its emoji joiners as written.
+    let emoji = "family 👨\u{200D}👩 here\n";
+    assert_eq!(
+        worker::folded_output(&alfredo_tui::dashboard::safe(emoji), false),
+        emoji
+    );
 }
 
 #[test]
