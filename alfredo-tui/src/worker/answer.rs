@@ -3,6 +3,7 @@
 //! while the answer streams.
 use crate::tasks::WorkPolicy;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
@@ -57,6 +58,14 @@ fn shown_path(path: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+/// A FILE or EDIT path as its `▸` heading shows it: the characters `dashboard::safe_visible`
+/// shows as `<U+XXXX>` (format, bidi, zero-width, tag, default-ignorable and line
+/// separators), so the heading draws the bytes the model wrote. A tab shows too: a raw tab
+/// draws as nothing. The path is one line already: a marker line ends at its newline.
+fn heading_path(path: &str) -> String {
+    crate::dashboard::safe_visible(path).replace('\t', "<U+0009>")
 }
 
 /// Block content: one wrapping markdown fence layer stripped (only when no other
@@ -499,8 +508,11 @@ enum Row<'a> {
     Heading(String),
     /// An end marker closed the current block, or a fence closed a snippet.
     End,
-    /// A shown line, as streamed (with its newline when complete).
-    Text(&'a str, Kind),
+    /// A shown line, as streamed (with its newline when complete). A line that starts
+    /// `▸ ` once controls are dropped (`dashboard::safe`) is shown with its hidden
+    /// characters visible, so the agent view's path row never draws one. Other lines
+    /// are as written; the agent view drops their controls.
+    Text(Cow<'a, str>, Kind),
 }
 
 /// Where a shown line sits.
@@ -529,11 +541,11 @@ fn display_rows(text: &str) -> Vec<Row<'_>> {
     for line in text.split_inclusive('\n') {
         let complete = line.ends_with('\n');
         if let Some(path) = file_marker(line) {
-            rows.push(Row::Heading(format!("▸ {path}")));
+            rows.push(Row::Heading(format!("▸ {}", heading_path(path))));
             (in_block, in_file, seen, wrapped, depth) = (true, true, false, false, 0);
             in_snippet = false;
         } else if let Some(path) = edit_marker(line).filter(|_| !in_file) {
-            rows.push(Row::Heading(format!("▸ {path} (edit)")));
+            rows.push(Row::Heading(format!("▸ {} (edit)", heading_path(path))));
             (in_block, seen, wrapped, depth) = (true, false, false, 0);
             in_snippet = false;
         } else if end_marker(line) || (!in_file && line.trim_end() == EDIT_END) {
@@ -563,6 +575,14 @@ fn display_rows(text: &str) -> Vec<Row<'_>> {
             } else {
                 Kind::Prose
             };
+            // The agent view drops controls and then draws a `▸ ` line as a path row. So
+            // the test runs on the safe text, and such a line is shown visibly: a control
+            // before the arrow then shows as `<U+XXXX>` rather than hiding the arrow.
+            let line = if crate::dashboard::safe(line).starts_with("▸ ") {
+                Cow::Owned(crate::dashboard::safe_visible(line))
+            } else {
+                Cow::Borrowed(line)
+            };
             rows.push(Row::Text(line, kind));
         }
     }
@@ -581,7 +601,7 @@ pub fn display_output(text: &str) -> String {
                 let _ = writeln!(shown, "{heading}");
             }
             Row::End => {}
-            Row::Text(line, _) => shown.push_str(line),
+            Row::Text(line, _) => shown.push_str(&line),
         }
     }
     shown
@@ -634,7 +654,7 @@ pub fn folded_output(text: &str, cut: bool) -> String {
                 Some((_, lines)) => *lines += 1,
                 None => current = Some(("▸ code".into(), 1)),
             },
-            Row::Text(line, Kind::Prose) => shown.push_str(line),
+            Row::Text(line, Kind::Prose) => shown.push_str(&line),
         }
     }
     if let Some(open) = current {

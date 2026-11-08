@@ -798,7 +798,7 @@ title and `files … · check …` (Ctrl+O shows the retained request text),
 the model's prose as written, each FILE or EDIT block and each fenced snippet folded
 to one `▸ path · N lines` row, `N lines so far` while it is still open; Ctrl+O shows
 each block as `▸ path` then code, as in the live detail, with markdown fence lines
-hidden, and inside a FILE block only the fence wrapping the whole file), `Check` (command, bounded
+hidden, and inside a FILE block only the fence wrapping the whole file; a path's bidi, zero-width, tag and line-separator characters show as `<U+XXXX>` in its heading), `Check` (command, bounded
 output tail, `✓ passed · exit 0` or `✗ failed · exit 1`), `Outcome`, then the next
 attempt. Owner notes appear as `You` turns with their effect. A legacy, missing or
 corrupt conversation shows the evidence with a one-line reason and invents nothing.
