@@ -398,7 +398,7 @@ pub fn footer(context: Footer, turn: Turn, width: usize) -> String {
             ("F6 pane", 1),
             ("↑↓ task", 1),
             ("F2 chat", 1),
-            ("F3 evidence", 2),
+            ("F3 evidence ^O code", 2),
             ("F5 pause", 3),
             ("PgUp/Dn scroll", 3),
             ("F1 help", 0),

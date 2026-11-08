@@ -184,3 +184,20 @@ fn mission_flags_outside_a_repository_name_workspace_instead_of_being_ignored() 
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn help_agents_line_says_ctrl_o_expands_instruction_and_each_files_code() {
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    let agents = help
+        .lines()
+        .find(|line| line.starts_with("Agents:"))
+        .expect("Agents line");
+    assert!(
+        agents.contains("Ctrl+O expand instructions and each file's code"),
+        "{agents}"
+    );
+}

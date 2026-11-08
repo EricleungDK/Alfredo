@@ -734,6 +734,22 @@ fn health_stays_right_aligned_on_the_mission_row_with_a_task_snapshot() {
 }
 
 #[test]
+fn task_detail_footer_names_ctrl_o_for_worker_code_and_drops_lower_priority_first() {
+    use alfredo_tui::dashboard::{footer, Footer, Turn};
+    for width in [80, 100, 140] {
+        let line = footer(Footer::Tasks, Turn::Idle, width);
+        assert!(line.contains("^O code"), "{width}: {line}");
+        assert!(line.contains("F1 help"), "{width}: {line}");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(line.as_str()) <= width,
+            "{width}: {line}"
+        );
+    }
+    let narrow = footer(Footer::Tasks, Turn::Idle, 80);
+    assert!(!narrow.contains("F5 pause"), "{narrow}");
+}
+
+#[test]
 fn chat_footer_keeps_esc_stop_while_a_turn_runs_and_drops_it_when_idle() {
     use alfredo_tui::dashboard::{footer, Footer, Turn};
     for context in [Footer::Chat, Footer::ChatExpanded] {
