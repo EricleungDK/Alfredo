@@ -236,6 +236,9 @@ class AgentTerminalSmoke(unittest.TestCase):
         self.screen_has('▸ calc.py · 1 line so far')
         terminal.send(b'\x0f')
         self.screen_has('def answer():')
+        # Fold again: expanded request text would push later turn labels off the tail.
+        terminal.send(b'\x0f')
+        self.screen_has('▸ calc.py · 1 line so far')
 
         terminal.send(f'{STEER}\r')
         self.screen_has('Steering #1')
