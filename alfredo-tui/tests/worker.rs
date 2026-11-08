@@ -7770,6 +7770,63 @@ fn display_output_hides_markdown_fence_lines_and_partial_fences() {
     );
 }
 
+#[test]
+fn folded_output_shows_one_row_per_file_and_keeps_the_prose() {
+    let answer = format!(
+        "I will add both files.\n{}{}Done.\n",
+        blocks(&[("todo.py", "import json\nprint(1)\n"), ("one.txt", "x\n")]),
+        edit_block("calc.py", &[("a\n", "b\n")]),
+    );
+    assert_eq!(
+        worker::folded_output(&answer, false),
+        "I will add both files.\n▸ todo.py · 2 lines\n▸ one.txt · 1 line\n▸ calc.py (edit) · 5 lines\nDone.\n"
+    );
+    // The wrapper fence is not counted; a file still streaming says so.
+    let streaming = "=== FILE: a.py ===\n```python\nx = 1\ny = 2\n```\n=== END FILE ===\n=== FILE: b.py ===\nz = 3\n";
+    assert_eq!(
+        worker::folded_output(streaming, false),
+        "▸ a.py · 2 lines\n▸ b.py · 1 line so far\n"
+    );
+    assert_eq!(
+        worker::folded_output("=== FILE: b.py ===\n", false),
+        "▸ b.py · 0 lines so far\n"
+    );
+    // Expanded, the same text reads as before.
+    assert_eq!(
+        worker::display_output(streaming),
+        "▸ a.py\nx = 1\ny = 2\n▸ b.py\nz = 3\n"
+    );
+}
+
+#[test]
+fn folded_output_folds_fenced_snippets_in_the_prose() {
+    let prose = "Here you go:\n```python\nx = 1\ny = 2\n```\nThen run it:\n```sh\nmake\n";
+    assert_eq!(
+        worker::folded_output(prose, false),
+        "Here you go:\n▸ code · 2 lines\nThen run it:\n▸ code · 1 line so far\n"
+    );
+    // Prose with no code reads exactly as the unfolded text.
+    let plain = "model line 1\nmodel line 2\n";
+    assert_eq!(worker::folded_output(plain, false), plain);
+    // Fences inside a file's own content stay part of that file.
+    let markdown = "=== FILE: R.md ===\n# T\n```sh\nmake\n```\n=== END FILE ===\n";
+    assert_eq!(worker::folded_output(markdown, false), "▸ R.md · 4 lines\n");
+}
+
+#[test]
+fn folded_output_of_a_cut_tail_folds_the_lines_before_the_first_file() {
+    // The tail starts in the middle of a file whose heading was dropped.
+    let tail = "    return 1\n\ndef b():\n=== END FILE ===\n=== FILE: c.py ===\nc = 3\n";
+    assert_eq!(
+        worker::folded_output(tail, true),
+        "… 3 earlier lines\n▸ c.py · 1 line so far\n"
+    );
+    // Uncut, the same leading lines are the model's prose.
+    assert!(worker::folded_output(tail, false).starts_with("    return 1\n"));
+    // A cut tail with no file heading cannot be told from prose: shown as is.
+    assert_eq!(worker::folded_output("x\ny\n", true), "x\ny\n");
+}
+
 /// Worker fixture that streams `content` as one non-final frame, then holds the
 /// connection open until the returned sender fires (or drops).
 fn serve_partial(content: &str) -> (Ollama, thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {

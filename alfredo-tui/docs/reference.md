@@ -792,8 +792,10 @@ conversation (`agent-conversation.json`, verified against the evidence digest),
 saved check evidence and the live worker observation. Turns, oldest first:
 `You → worker #N` or `Autopilot → worker #N` (repairs: `→ repair #N`) with the task
 title and `files … · check …` (Ctrl+O shows the retained request text),
-`References` (read-only reference names from the request), `Worker` (the answer,
-FILE blocks as `▸ path` then code, as in the live detail; markdown fence lines are
+`References` (read-only reference names from the request), `Worker` (the answer:
+the model's prose as written, each FILE or EDIT block and each fenced snippet folded
+to one `▸ path · N lines` row, `N lines so far` while it is still open; Ctrl+O shows
+each block as `▸ path` then code, as in the live detail, with markdown fence lines
 hidden, and inside a FILE block only the fence wrapping the whole file), `Check` (command, bounded
 output tail, `✓ passed · exit 0` or `✗ failed · exit 1`), `Outcome`, then the next
 attempt. Owner notes appear as `You` turns with their effect. A legacy, missing or
@@ -1032,7 +1034,8 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | F6 | Focus the side pane (overlay below 88 columns); F6 or Escape returns to the prompt |
 | Enter in the agent view | Instruct that agent (text); slash commands still run |
 | Escape in the agent view | Return to the previous pane; the agent's draft is kept, also across restarts |
-| Ctrl+O in the agent view | Expand or collapse full instruction text |
+| Ctrl+O in the agent view | Expand or collapse full instruction text and each file's code (files start folded to `▸ path · N lines`) |
+| Ctrl+O in task detail | Show the running worker's streamed files and code snippets in full, or fold them back to one `▸ path · N lines` row each; starts folded, not saved |
 | Ctrl+O in the conversation | Show every tool result in the open conversation in full (up to 200 lines each, then `… N more lines`) or back to one line; starts collapsed, not saved, shown in the footer hints |
 | Ctrl+O in the Plan draft panel | Switch between the readable task list and the raw draft JSON |
 | Up / Down, Tab, Enter in the side pane | Move, switch missions/work, open the row |

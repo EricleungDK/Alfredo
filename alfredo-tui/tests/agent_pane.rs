@@ -163,8 +163,9 @@ fn enter_on_a_task_row_opens_its_agent_and_the_prompt_targets_it() {
             .iter()
             .position(|row| row.starts_with("You → worker #1"))
             .unwrap_or_else(|| panic!("{screen}"));
+        // The streamed file folds to one row; Ctrl+O shows its code below.
         assert_eq!(
-            pane[at..at + 12],
+            pane[at..at + 10],
             [
                 "You → worker #1",
                 "Make answer return 42",
@@ -174,17 +175,25 @@ fn enter_on_a_task_row_opens_its_agent_and_the_prompt_targets_it() {
                 "README.md",
                 "",
                 "Worker",
-                "▸ calc.py",
-                "def answer():",
-                "    return 42",
+                "▸ calc.py · 2 lines so far",
                 ""
             ],
             "{screen}"
         );
+        assert!(!screen.contains("def answer():"), "{screen}");
         // Instructions live in the title and footer, never in the content.
         let body = &pane[..pane.len() - 5];
         assert!(!body.iter().any(|row| row.contains("Esc")), "{screen}");
     }
+    // Expanded (Ctrl+O), the file reads as code under its heading.
+    fixture.control.agent.as_mut().unwrap().expanded = true;
+    let pane = right(&render(&fixture.app, &fixture.control, 200, 50), 200);
+    let at = pane.iter().position(|row| row == "Worker").unwrap();
+    assert_eq!(
+        pane[at..at + 4],
+        ["Worker", "▸ calc.py", "def answer():", "    return 42"],
+        "{pane:#?}"
+    );
 }
 
 #[test]
@@ -212,6 +221,17 @@ fn esc_restores_the_previous_pane_and_both_drafts_survive() {
 fn live_view_follows_the_tail_and_keeps_the_reading_position_when_scrolled_up() {
     let mut fixture = fixture(&code(80));
     agent_view::open(&mut fixture.app, &mut fixture.control, Target::Task(1));
+    // Folded, the long file is one row that counts the streamed lines.
+    let pane = right(&render(&fixture.app, &fixture.control, 100, 30), 100);
+    assert!(
+        pane.iter().any(|row| row == "▸ calc.py · 80 lines so far"),
+        "{pane:#?}"
+    );
+    assert!(
+        !pane.iter().any(|row| row.starts_with("LINE_")),
+        "{pane:#?}"
+    );
+    fixture.control.agent.as_mut().unwrap().expanded = true;
     let pane = right(&render(&fixture.app, &fixture.control, 100, 30), 100);
     assert!(pane.iter().any(|row| row == "LINE_079 = 79"), "{pane:#?}");
     fixture.control.agent.as_ref().unwrap().scroll_rows(-10);

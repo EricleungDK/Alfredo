@@ -73,6 +73,8 @@ pub struct Live {
     pub prompt: Option<String>,
     /// Streamed model text (bounded tail).
     pub output: String,
+    /// `output` is a tail: its start was dropped.
+    pub cut: bool,
     pub check_output: String,
     pub checking: bool,
     pub cancelling: bool,
@@ -125,14 +127,21 @@ pub fn references(prompt: &str) -> Vec<String> {
         .collect()
 }
 
-fn code(text: &str) -> Vec<(String, Tone)> {
-    crate::worker::display_output(&crate::dashboard::safe(text))
-        .lines()
-        .map(|line| match line.strip_prefix("▸ ") {
-            Some(_) => (line.to_owned(), Tone::Path),
-            None => (line.to_owned(), Tone::Normal),
-        })
-        .collect()
+/// The answer as `▸ path` headings, each followed by its code when `expanded`
+/// and otherwise folded to one row with its line count.
+fn code(text: &str, expanded: bool, cut: bool) -> Vec<(String, Tone)> {
+    let text = crate::dashboard::safe(text);
+    if expanded {
+        crate::worker::display_output(&text)
+    } else {
+        crate::worker::folded_output(&text, cut)
+    }
+    .lines()
+    .map(|line| match line.strip_prefix("▸ ") {
+        Some(_) => (line.to_owned(), Tone::Path),
+        None => (line.to_owned(), Tone::Normal),
+    })
+    .collect()
 }
 
 fn plain(text: &str, tone: Tone) -> Vec<(String, Tone)> {
@@ -166,7 +175,8 @@ fn outcome(status: &TaskStatus) -> Option<(&'static str, Tone)> {
 }
 
 /// Transcript turns of a task family, oldest attempt first. Owner notes follow
-/// the attempt they were given to. `expanded` shows full instruction text.
+/// the attempt they were given to. `expanded` shows full instruction text and each
+/// file's code; otherwise every file folds to one `▸ path · N lines` row.
 pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn> {
     let mut turns = Vec::new();
     for attempt in attempts {
@@ -221,7 +231,7 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
         }
         let command = || (crate::argv_display::check_line(&attempt.check), Tone::Dim);
         if let Some(live) = &attempt.live {
-            let mut lines = code(&live.output);
+            let mut lines = code(&live.output, expanded, live.cut);
             if lines.is_empty() && !live.checking {
                 let mut status = format!("… {}", live.stage);
                 if live.cancelling {
@@ -254,7 +264,7 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
             }
         } else if let Some(recorded) = recorded {
             if let Some(answer) = &recorded.answer {
-                let mut lines = code(answer);
+                let mut lines = code(answer, expanded, false);
                 if let (false, Some(cut)) = (lines.is_empty(), &recorded.cut) {
                     lines.push((
                         match cut.elapsed_secs {
@@ -389,7 +399,8 @@ pub type Record = std::sync::Arc<Result<Recorded, String>>;
 #[derive(Debug)]
 pub struct View {
     pub target: Target,
-    /// Instruction turns show their full request text.
+    /// Instruction turns show their full request text and worker turns each
+    /// file's code (Ctrl+O); otherwise files fold to one row each.
     pub expanded: bool,
     pub(crate) offset: std::cell::Cell<u16>,
     pub(crate) reading: std::cell::Cell<crate::reading::Viewport>,

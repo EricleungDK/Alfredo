@@ -493,38 +493,152 @@ fn partial_fence(line: &str) -> bool {
     !line.is_empty() && (line.starts_with("```") || "```".starts_with(line))
 }
 
+/// One display row of streamed model text.
+enum Row<'a> {
+    /// A FILE or EDIT block starts: its `▸ path` heading.
+    Heading(String),
+    /// An end marker closed the current block, or a fence closed a snippet.
+    End,
+    /// A shown line, as streamed (with its newline when complete).
+    Text(&'a str, Kind),
+}
+
+/// Where a shown line sits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Outside any block or fence: the model's prose.
+    Prose,
+    /// Content of a FILE or EDIT block.
+    Block,
+    /// Inside a markdown fence outside any block: a code snippet.
+    Snippet,
+}
+
+/// The display rows of `text`: FILE markers become headings, END markers and
+/// markdown fence lines are hidden. Inside a FILE block only the fence wrapping
+/// the whole file is hidden; the file's own fences are content.
+fn display_rows(text: &str) -> Vec<Row<'_>> {
+    let mut rows = Vec::new();
+    // Inside a FILE block: content seen yet, a wrapper fence was hidden, and the
+    // depth of the file's own fences within it.
+    let (mut in_block, mut seen, mut wrapped, mut depth) = (false, false, false, 0usize);
+    // Inside a FILE block EDIT marker lines are file content, not markers.
+    let mut in_file = false;
+    // Between markdown fence lines outside any block.
+    let mut in_snippet = false;
+    for line in text.split_inclusive('\n') {
+        let complete = line.ends_with('\n');
+        if let Some(path) = file_marker(line) {
+            rows.push(Row::Heading(format!("▸ {path}")));
+            (in_block, in_file, seen, wrapped, depth) = (true, true, false, false, 0);
+            in_snippet = false;
+        } else if let Some(path) = edit_marker(line).filter(|_| !in_file) {
+            rows.push(Row::Heading(format!("▸ {path} (edit)")));
+            (in_block, seen, wrapped, depth) = (true, false, false, 0);
+            in_snippet = false;
+        } else if end_marker(line) || (!in_file && line.trim_end() == EDIT_END) {
+            if in_block {
+                rows.push(Row::End);
+            }
+            (in_block, in_file) = (false, false);
+        } else if !complete && (line.starts_with("===") || partial_fence(line)) {
+            // A marker or fence line still streaming stays hidden until complete.
+        } else if fence_line(line)
+            && hides_fence(in_block, &mut seen, &mut wrapped, &mut depth, line)
+        {
+            if !in_block {
+                if in_snippet {
+                    rows.push(Row::End);
+                }
+                in_snippet = !in_snippet;
+            }
+        } else {
+            if in_block && !line.trim().is_empty() {
+                seen = true;
+            }
+            let kind = if in_block {
+                Kind::Block
+            } else if in_snippet {
+                Kind::Snippet
+            } else {
+                Kind::Prose
+            };
+            rows.push(Row::Text(line, kind));
+        }
+    }
+    rows
+}
+
 /// Streamed model text for live display: FILE markers become `▸ path` headings,
 /// END markers and markdown fence lines are hidden. Inside a FILE block only the
 /// fence wrapping the whole file is hidden; the file's own fences are content.
 /// Display only: `parse_answer` reads the raw text.
 pub fn display_output(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
-    // Inside a FILE block: content seen yet, a wrapper fence was hidden, and the
-    // depth of the file's own fences within it.
-    let (mut in_block, mut seen, mut wrapped, mut depth) = (false, false, false, 0usize);
-    // Inside a FILE block EDIT marker lines are file content, not markers.
-    let mut in_file = false;
-    for line in text.split_inclusive('\n') {
-        let complete = line.ends_with('\n');
-        if let Some(path) = file_marker(line) {
-            let _ = writeln!(shown, "▸ {path}");
-            (in_block, in_file, seen, wrapped, depth) = (true, true, false, false, 0);
-        } else if let Some(path) = edit_marker(line).filter(|_| !in_file) {
-            let _ = writeln!(shown, "▸ {path} (edit)");
-            (in_block, seen, wrapped, depth) = (true, false, false, 0);
-        } else if end_marker(line) || (!in_file && line.trim_end() == EDIT_END) {
-            (in_block, in_file) = (false, false);
-        } else if (!complete && (line.starts_with("===") || partial_fence(line)))
-            || (fence_line(line)
-                && hides_fence(in_block, &mut seen, &mut wrapped, &mut depth, line))
-        {
-            // A marker or fence line still streaming stays hidden until complete.
-        } else {
-            if in_block && !line.trim().is_empty() {
-                seen = true;
+    for row in display_rows(text) {
+        match row {
+            Row::Heading(heading) => {
+                let _ = writeln!(shown, "{heading}");
             }
-            shown.push_str(line);
+            Row::End => {}
+            Row::Text(line, _) => shown.push_str(line),
         }
+    }
+    shown
+}
+
+/// [`display_output`] with each FILE or EDIT block, and each fenced snippet in the
+/// prose, folded to one `▸ path · N lines` row (`N lines so far` while it is still
+/// open). The model's prose stays as written. `cut` says the text is a tail whose
+/// start was dropped: lines before the first heading then fold into one
+/// `… N earlier lines` row, since they may be the middle of a file.
+/// Display only: `parse_answer` reads the raw text.
+pub fn folded_output(text: &str, cut: bool) -> String {
+    fn count(lines: usize) -> String {
+        match lines {
+            1 => "1 line".into(),
+            lines => format!("{lines} lines"),
+        }
+    }
+    fn fold(shown: &mut String, (heading, lines): (String, usize), open: bool) {
+        let so_far = if open { " so far" } else { "" };
+        let _ = writeln!(shown, "{heading} · {}{so_far}", count(lines));
+    }
+    let rows = display_rows(text);
+    // A tail with no heading at all cannot be told apart from prose: shown as is.
+    let mut leading = cut && rows.iter().any(|row| matches!(row, Row::Heading(_)));
+    let mut shown = String::new();
+    // The block or snippet being folded: its heading and line count.
+    let mut current: Option<(String, usize)> = None;
+    let mut earlier = 0usize;
+    for row in rows {
+        match row {
+            Row::Heading(heading) => {
+                if let Some(open) = current.take() {
+                    fold(&mut shown, open, true);
+                }
+                if std::mem::take(&mut leading) && earlier > 0 {
+                    let plural = if earlier == 1 { "" } else { "s" };
+                    let _ = writeln!(shown, "… {earlier} earlier line{plural}");
+                }
+                current = Some((heading, 0));
+            }
+            Row::End if leading => {}
+            Row::End => {
+                if let Some(closed) = current.take() {
+                    fold(&mut shown, closed, false);
+                }
+            }
+            Row::Text(..) if leading => earlier += 1,
+            Row::Text(_, Kind::Block | Kind::Snippet) => match current.as_mut() {
+                Some((_, lines)) => *lines += 1,
+                None => current = Some(("▸ code".into(), 1)),
+            },
+            Row::Text(line, Kind::Prose) => shown.push_str(line),
+        }
+    }
+    if let Some(open) = current {
+        fold(&mut shown, open, true);
     }
     shown
 }

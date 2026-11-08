@@ -1603,6 +1603,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             work.tasks.planner.raw = !work.tasks.planner.raw;
                         }
+                        // Task detail: Ctrl+O shows streamed files in full or folds them.
+                        KeyCode::Char('o')
+                            if ctrl && work.tasks.visible && work.tasks.agent_shown().is_none() =>
+                        {
+                            work.tasks.code_expanded = !work.tasks.code_expanded;
+                        }
                         // Chat view: Ctrl+O shows every tool result in full (issue #258).
                         KeyCode::Char('o') if ctrl && !work.tasks.visible => {
                             work.app.sessions[index].toggle_tool_results();

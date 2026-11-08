@@ -28,8 +28,8 @@ use tokio::{
 
 mod answer;
 pub use answer::{
-    display_output, parse_answer, parse_answer_for, render_blocks, resolve_answer, EditBlock,
-    FileEdit, FilePlan,
+    display_output, folded_output, parse_answer, parse_answer_for, render_blocks, resolve_answer,
+    EditBlock, FileEdit, FilePlan,
 };
 use answer::{
     prior_blocks, DIVIDER_MARKER, EDIT_END, EDIT_START, FILE_END, FILE_START, FILE_START_END,

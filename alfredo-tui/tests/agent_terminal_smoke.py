@@ -232,7 +232,9 @@ class AgentTerminalSmoke(unittest.TestCase):
         terminal.send('\r')
         self.screen_has('Agent · worker #1 · running')
         self.screen_has('To worker #1 · Enter send · Esc back')
-        self.screen_has('▸ calc.py')
+        # The streamed file is folded to one row; Ctrl+O shows its code.
+        self.screen_has('▸ calc.py · 1 line so far')
+        terminal.send(b'\x0f')
         self.screen_has('def answer():')
 
         terminal.send(f'{STEER}\r')
