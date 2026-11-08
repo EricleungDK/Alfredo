@@ -7828,6 +7828,112 @@ fn folded_output_of_a_cut_tail_folds_the_lines_before_the_first_file() {
 }
 
 #[test]
+fn folded_heading_shows_bidi_zero_width_and_tag_characters_visibly() {
+    let text = "=== FILE: src/a\u{202E}sr.txt\u{200B}\u{E0041} ===\nx\n=== END FILE ===\n";
+    for shown in [
+        alfredo_tui::worker::folded_output(&alfredo_tui::dashboard::safe(text), false),
+        alfredo_tui::worker::display_output(&alfredo_tui::dashboard::safe(text)),
+    ] {
+        let heading = shown
+            .lines()
+            .find(|l| l.starts_with("▸ "))
+            .expect("a ▸ row");
+        assert!(
+            !heading.chars().any(|c| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{E0000}'..='\u{E007F}')),
+            "heading draws format characters raw: {heading:?}"
+        );
+        assert!(heading.contains("<U+202E>"), "{heading:?}");
+        assert!(heading.contains("<U+200B>"), "{heading:?}");
+        assert!(heading.contains("<U+E0041>"), "{heading:?}");
+    }
+}
+
+#[test]
+fn prose_line_forging_a_path_row_shows_hidden_characters_visibly() {
+    // No marker: a prose line that starts `▸ ` is drawn as a Path row by the agent view.
+    let forged = "▸ src/a\u{202E}sr.txt · 1 line\n";
+    assert_eq!(
+        worker::folded_output(&alfredo_tui::dashboard::safe(forged), false),
+        "▸ src/a<U+202E>sr.txt · 1 line\n"
+    );
+    assert_eq!(
+        worker::display_output(&alfredo_tui::dashboard::safe(forged)),
+        "▸ src/a<U+202E>sr.txt · 1 line\n"
+    );
+    // Prose that does not start a path row keeps its emoji joiners as written.
+    let emoji = "family 👨\u{200D}👩 here\n";
+    assert_eq!(
+        worker::folded_output(&alfredo_tui::dashboard::safe(emoji), false),
+        emoji
+    );
+}
+
+#[test]
+fn leading_control_before_a_path_arrow_shows_hidden_characters_visibly() {
+    // `safe` drops a control before `▸`, which would leave a path-styled row with a raw
+    // U+202E. The line is decided on its safe text and shown visibly, so no control
+    // survives to be dropped later.
+    for lead in ["\u{1}", "\u{1b}", "\u{7f}", "\u{85}", "\u{9b}", "\0", "\r"] {
+        let shown_lead = format!("<U+{:04X}>", lead.chars().next().unwrap() as u32);
+        let line = format!("{lead}▸ src/a\u{202E}sr.txt · 1 line\n");
+        let file = format!("=== FILE: a.txt ===\n{line}=== END FILE ===\n");
+        let snippet = format!("```\n{line}```\n");
+        for (case, raw_shown) in [
+            ("prose folded", worker::folded_output(&line, false)),
+            ("prose expanded", worker::display_output(&line)),
+            ("file expanded", worker::display_output(&file)),
+            ("snippet expanded", worker::display_output(&snippet)),
+        ] {
+            let shown = alfredo_tui::dashboard::safe(&raw_shown);
+            assert!(
+                !shown.contains('\u{202E}'),
+                "{case} {lead:?}: raw U+202E survives in {shown:?}"
+            );
+            assert!(
+                shown.contains(&format!("{shown_lead}▸ src/a<U+202E>sr.txt")),
+                "{case} {lead:?}: {shown:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn folded_edit_heading_shows_format_characters_visibly() {
+    let text = "=== EDIT: src/a\u{202E}sr.py ===\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n=== END EDIT ===\n";
+    // The unclosed U+202E must not reorder the line count suffix.
+    assert_eq!(
+        worker::folded_output(&alfredo_tui::dashboard::safe(text), false),
+        "▸ src/a<U+202E>sr.py (edit) · 5 lines\n"
+    );
+    let expanded = worker::display_output(&alfredo_tui::dashboard::safe(text));
+    assert_eq!(expanded.lines().next(), Some("▸ src/a<U+202E>sr.py (edit)"));
+}
+
+#[test]
+fn folded_heading_path_with_line_separators_stays_one_row() {
+    // U+2028 and U+2029 are line breaks to a log or a prompt: they show as text.
+    let text = "=== FILE: a\u{2028}b\u{2029}c.txt ===\nx\n=== END FILE ===\n";
+    assert_eq!(
+        worker::folded_output(&alfredo_tui::dashboard::safe(text), false),
+        "▸ a<U+2028>b<U+2029>c.txt · 1 line\n"
+    );
+    assert_eq!(
+        worker::display_output(&alfredo_tui::dashboard::safe(text)),
+        "▸ a<U+2028>b<U+2029>c.txt\nx\n"
+    );
+}
+
+#[test]
+fn folded_heading_path_shows_a_tab_visibly() {
+    // A raw tab draws as nothing in a heading, so the path would read shorter than it is.
+    let text = "=== FILE: a\tb.txt ===\nx\n=== END FILE ===\n";
+    assert_eq!(
+        worker::folded_output(&alfredo_tui::dashboard::safe(text), false),
+        "▸ a<U+0009>b.txt · 1 line\n"
+    );
+}
+
+#[test]
 fn fold_matches_folded_output_of_the_whole_stream_at_any_chunking() {
     let samples = [
         "Here you go:\n```python\nx = 1\ny = 2\n```\nThen:\n```\nz\n",
@@ -8381,4 +8487,21 @@ async fn edit_of_a_crlf_file_commits_a_one_line_diff() {
         git(&["diff", "--numstat", &before, &candidate]),
         "1\t1\tcalc.py\n"
     );
+}
+
+#[test]
+fn live_fold_shows_hidden_characters_in_paths_like_folded_output() {
+    // The incremental fold must draw paths and forged `▸ ` prose as `folded_output` does.
+    let text = "=== FILE: src/a\u{202E}sr\tx.txt ===\nx\n=== END FILE ===\n\
+                === EDIT: b\u{200B}.py ===\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n=== END EDIT ===\n\
+                ▸ f\u{202E}orged · 1 line\n";
+    let safe = alfredo_tui::dashboard::safe(text);
+    let mut fold = worker::Fold::default();
+    for chunk in safe.as_bytes().chunks(5) {
+        fold.push(&String::from_utf8_lossy(chunk));
+    }
+    let shown = fold.render();
+    assert_eq!(shown, worker::folded_output(&safe, false));
+    assert!(shown.contains("<U+202E>") && shown.contains("<U+0009>") && shown.contains("<U+200B>"));
+    assert!(!shown.contains('\u{202E}') && !shown.contains('\u{200B}'));
 }
