@@ -7827,6 +7827,61 @@ fn folded_output_of_a_cut_tail_folds_the_lines_before_the_first_file() {
     assert_eq!(worker::folded_output("x\ny\n", true), "x\ny\n");
 }
 
+#[test]
+fn folded_heading_shows_bidi_zero_width_and_tag_characters_visibly() {
+    let text = "=== FILE: src/a\u{202E}sr.txt\u{200B}\u{E0041} ===\nx\n=== END FILE ===\n";
+    for shown in [
+        alfredo_tui::worker::folded_output(&alfredo_tui::dashboard::safe(text), false),
+        alfredo_tui::worker::display_output(&alfredo_tui::dashboard::safe(text)),
+    ] {
+        let heading = shown
+            .lines()
+            .find(|l| l.starts_with("▸ "))
+            .expect("a ▸ row");
+        assert!(
+            !heading.chars().any(|c| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{E0000}'..='\u{E007F}')),
+            "heading draws format characters raw: {heading:?}"
+        );
+        assert!(heading.contains("<U+202E>"), "{heading:?}");
+    }
+}
+
+#[test]
+fn folded_edit_heading_shows_format_characters_visibly() {
+    let text = "=== EDIT: src/a\u{202E}sr.py ===\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n=== END EDIT ===\n";
+    // The unclosed U+202E must not reorder the line count suffix.
+    assert_eq!(
+        worker::folded_output(&alfredo_tui::dashboard::safe(text), false),
+        "▸ src/a<U+202E>sr.py (edit) · 5 lines\n"
+    );
+    let expanded = worker::display_output(&alfredo_tui::dashboard::safe(text));
+    assert_eq!(expanded.lines().next(), Some("▸ src/a<U+202E>sr.py (edit)"));
+}
+
+#[test]
+fn folded_heading_path_with_line_separators_stays_one_row() {
+    // U+2028 and U+2029 are line breaks to a log or a prompt: they show as text.
+    let text = "=== FILE: a\u{2028}b\u{2029}c.txt ===\nx\n=== END FILE ===\n";
+    assert_eq!(
+        worker::folded_output(&alfredo_tui::dashboard::safe(text), false),
+        "▸ a<U+2028>b<U+2029>c.txt · 1 line\n"
+    );
+    assert_eq!(
+        worker::display_output(&alfredo_tui::dashboard::safe(text)),
+        "▸ a<U+2028>b<U+2029>c.txt\nx\n"
+    );
+}
+
+#[test]
+fn folded_heading_path_shows_a_tab_visibly() {
+    // A raw tab draws as nothing in a heading, so the path would read shorter than it is.
+    let text = "=== FILE: a\tb.txt ===\nx\n=== END FILE ===\n";
+    assert_eq!(
+        worker::folded_output(&alfredo_tui::dashboard::safe(text), false),
+        "▸ a<U+0009>b.txt · 1 line\n"
+    );
+}
+
 /// Worker fixture that streams `content` as one non-final frame, then holds the
 /// connection open until the returned sender fires (or drops).
 fn serve_partial(content: &str) -> (Ollama, thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {

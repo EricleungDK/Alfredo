@@ -316,6 +316,24 @@ fn titles_name_the_current_attempt() {
 }
 
 #[test]
+fn worker_turn_shows_format_characters_in_a_file_path_visibly() {
+    let mut first = attempt(1, TaskStatus::Accepted);
+    let mut rec = recorded(true);
+    rec.answer = Some("=== FILE: src/a\u{202E}sr.txt ===\nx\n=== END FILE ===\n".into());
+    first.recorded = Some(Ok(rec));
+    let worker = |turns: &[Turn]| turns.iter().find(|t| t.label == "Worker").unwrap().clone();
+    // The path heading is a Path row that draws the bidi override as <U+202E>.
+    let turns = agent_view::project(std::slice::from_ref(&first), &[], false);
+    assert_eq!(
+        worker(&turns).lines,
+        [("▸ src/a<U+202E>sr.txt · 1 line".into(), Tone::Path)]
+    );
+    let turns = agent_view::project(&[first], &[], true);
+    assert_eq!(text(&worker(&turns)), ["▸ src/a<U+202E>sr.txt", "x"]);
+    assert_eq!(worker(&turns).lines[0].1, Tone::Path);
+}
+
+#[test]
 fn worker_turn_folds_files_and_expanded_hides_fences_but_keeps_code_under_headings() {
     let mut first = attempt(1, TaskStatus::Failed);
     let mut rec = recorded(false);
