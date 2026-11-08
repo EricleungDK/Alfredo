@@ -7875,6 +7875,173 @@ fn serve_partial(content: &str) -> (Ollama, thread::JoinHandle<()>, std::sync::m
     )
 }
 
+/// Like [`serve_partial`], but each of `frames` is its own non-final stream frame.
+fn serve_frames(
+    frames: Vec<String>,
+) -> (Ollama, thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let job = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut header = Vec::new();
+        let mut byte = [0];
+        while !header.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        let length: usize = String::from_utf8(header)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.to_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(str::to_string)
+            })
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut request = vec![0; length];
+        stream.read_exact(&mut request).unwrap();
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n",
+        );
+        for content in frames {
+            let frame = serde_json::json!({"message":{"content":content},"done":false});
+            let _ = stream.write_all(format!("{frame}\n").as_bytes());
+            let _ = stream.flush();
+            thread::sleep(Duration::from_millis(40));
+        }
+        let _ = released.recv_timeout(Duration::from_secs(30));
+    });
+    (
+        Ollama::new(&endpoint, Duration::from_secs(30)).unwrap(),
+        job,
+        release,
+    )
+}
+
+/// What the task detail and the agent view are given for task 1 while a worker holds
+/// its stream open after `frames`: (folded, expanded) model output of each view.
+async fn live_views(frames: Vec<String>) -> [(String, String); 2] {
+    use alfredo_tui::task_control::TaskControl;
+    let total: usize = frames.iter().map(String::len).sum();
+    let fixture = Fixture::new();
+    fixture.permit();
+    let (provider, server, release) = serve_frames(frames);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let store = fixture.store.clone();
+    let (observer, mut progress) = worker::Observer::channel();
+    let running = tokio::spawn(async move {
+        worker::start_observed(store, 1, "live".into(), 3, provider, flag, observer).await
+    });
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while progress.borrow().received_bytes < total {
+            progress.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("stream received");
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.attach_progress(1, progress.clone(), Arc::new(AtomicBool::new(false)));
+    // The task detail folds `model_output` with `cut`; Ctrl+O shows `display_output`.
+    let views = |control: &TaskControl| {
+        let detail = control.worker_live(1).unwrap();
+        let agent = control.agent_live(1).unwrap();
+        let detail_text = if control.code_expanded {
+            worker::display_output(&detail.model_output)
+        } else {
+            worker::folded_output(&detail.model_output, detail.cut)
+        };
+        let agent_text = if control.code_expanded {
+            worker::display_output(&agent.output)
+        } else {
+            worker::folded_output(&agent.output, agent.cut)
+        };
+        (detail_text, agent_text)
+    };
+    let (folded_detail, folded_agent) = views(&control);
+    control.code_expanded = true;
+    let (open_detail, open_agent) = views(&control);
+    cancel.store(true, Ordering::SeqCst);
+    let _ = tokio::time::timeout(Duration::from_secs(60), running).await;
+    release.send(()).unwrap();
+    server.join().unwrap();
+    [(folded_detail, open_detail), (folded_agent, open_agent)]
+}
+
+fn padded_file(path: &str, lines: usize) -> String {
+    let mut text = format!("=== FILE: {path} ===\n");
+    for line in 0..lines {
+        text.push_str(&format!("# line {line:04} padding padding padding\n"));
+    }
+    text
+}
+
+#[tokio::test]
+async fn live_fold_counts_a_file_streamed_past_the_output_tail() {
+    // About 21 KiB: far past the 8 KiB tail, and no end marker yet.
+    let code = padded_file("calc.py", 600);
+    assert!(code.len() > 16 * 1024);
+    for (folded, expanded) in live_views(vec![code]).await {
+        assert_eq!(folded, "▸ calc.py · 600 lines so far\n");
+        assert!(!folded.contains("# line"), "{folded}");
+        // Ctrl+O: the retained tail code sits under the open file's heading.
+        assert!(expanded.starts_with("▸ calc.py\n# line "), "{expanded}");
+        assert!(expanded.contains("# line 0599 padding"), "{expanded}");
+    }
+}
+
+#[tokio::test]
+async fn live_fold_keeps_a_finished_file_and_the_open_one_after_the_tail_was_cut() {
+    let mut code = padded_file("calc.py", 700);
+    code.push_str("=== END FILE ===\n=== FILE: util.py ===\ndef helper():\n");
+    for (folded, _) in live_views(vec![code]).await {
+        assert_eq!(folded, "▸ calc.py · 700 lines\n▸ util.py · 1 line so far\n");
+    }
+}
+
+#[tokio::test]
+async fn live_fold_handles_a_heading_split_across_stream_chunks() {
+    let frames = vec![
+        padded_file("calc.py", 400) + "=== END FILE ===\n=== FI",
+        "LE: ut".to_string(),
+        "il.py ===\nx = 1\ny = 2\n".to_string(),
+    ];
+    for (folded, _) in live_views(frames).await {
+        assert_eq!(
+            folded,
+            "▸ calc.py · 400 lines\n▸ util.py · 2 lines so far\n"
+        );
+    }
+}
+
+#[tokio::test]
+async fn live_fold_stays_bounded_and_collapses_the_oldest_files() {
+    let mut code = String::new();
+    for index in 0..300 {
+        code.push_str(&format!(
+            "=== FILE: f{index:03}.py ===\nx = {index}\n=== END FILE ===\n"
+        ));
+    }
+    for (folded, _) in live_views(vec![code]).await {
+        let rows: Vec<&str> = folded.lines().collect();
+        assert!(rows.len() <= 100, "{} rows", rows.len());
+        let earlier: usize = rows[0]
+            .strip_prefix("… ")
+            .and_then(|rest| rest.strip_suffix(" earlier files"))
+            .unwrap_or_else(|| panic!("{}", rows[0]))
+            .parse()
+            .unwrap();
+        assert_eq!(earlier + rows.len() - 1, 300);
+        assert_eq!(rows[rows.len() - 1], "▸ f299.py · 1 line");
+    }
+}
+
 /// Run task 1 until `partial` has streamed, then cancel it (a steer).
 async fn steer_after_streaming(fixture: &Fixture, partial: &str) -> worker::Evidence {
     let (provider, server, release) = serve_partial(partial);
