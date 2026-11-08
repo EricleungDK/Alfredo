@@ -1304,6 +1304,7 @@ impl TaskControl {
     /// Current live worker view for a task, if a local worker is observed.
     pub fn worker_live(&self, task: u64) -> Option<crate::dashboard::Live> {
         let progress = self.progress.get(&task)?.borrow();
+        let (model_output, cut) = live_output(&progress, self.code_expanded);
         let stage = progress
             .queue
             .as_ref()
@@ -1319,8 +1320,8 @@ impl TaskControl {
                 .workers
                 .get(&task)
                 .is_some_and(|flag| flag.load(Ordering::SeqCst)),
-            model_output: progress.model_output.clone(),
-            cut: progress.received_bytes > progress.model_output.len(),
+            model_output,
+            cut,
             stdout: String::from_utf8_lossy(&progress.check_stdout).into_owned(),
             stderr: String::from_utf8_lossy(&progress.check_stderr).into_owned(),
         })
@@ -1399,6 +1400,8 @@ impl TaskControl {
     /// Live worker observation for the agent view.
     pub fn agent_live(&self, task: u64) -> Option<crate::agent_view::Live> {
         let progress = self.progress.get(&task)?.borrow();
+        let expanded = self.agent.as_ref().is_some_and(|view| view.expanded);
+        let (output, cut) = live_output(&progress, expanded);
         let stage = if progress.queue.is_some() {
             "queued"
         } else {
@@ -1409,8 +1412,8 @@ impl TaskControl {
         Some(crate::agent_view::Live {
             stage: stage.into(),
             prompt: progress.request.as_deref().map(str::to_owned),
-            output: progress.model_output.clone(),
-            cut: progress.received_bytes > progress.model_output.len(),
+            output,
+            cut,
             check_output: format!("{stdout}{stderr}"),
             checking: progress.stage == "Running approved check",
             cancelling: self
@@ -2860,5 +2863,21 @@ mod refusal_notice_tests {
         assert_eq!(control.notice, "Unknown task 9; the task panel lists ids");
         assert!(control.retry.is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+/// The model output a live view is given, and whether it is a tail whose start was
+/// dropped. Past the tail the exact fold (collapsed) or the tail under its open file's
+/// heading (`expanded`, Ctrl+O) stands in for it.
+fn live_output(progress: &crate::worker::Progress, expanded: bool) -> (String, bool) {
+    let cut = progress.received_bytes > progress.model_output.len();
+    if !cut || !progress.fold.tracked() {
+        return (progress.model_output.clone(), cut);
+    }
+    if expanded {
+        (progress.fold.expanded(&progress.model_output), true)
+    } else {
+        // Already folded: the views leave plain rows as they are.
+        (progress.fold.render(), false)
     }
 }

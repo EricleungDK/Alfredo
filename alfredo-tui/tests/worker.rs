@@ -7827,6 +7827,76 @@ fn folded_output_of_a_cut_tail_folds_the_lines_before_the_first_file() {
     assert_eq!(worker::folded_output("x\ny\n", true), "x\ny\n");
 }
 
+#[test]
+fn fold_matches_folded_output_of_the_whole_stream_at_any_chunking() {
+    let samples = [
+        "Here you go:\n```python\nx = 1\ny = 2\n```\nThen:\n```\nz\n",
+        "=== FILE: a.py ===\n```python\ndef a():\n    pass\n```\n=== END FILE ===\nDone.\n",
+        "=== FILE: a.py ===\n1\n2\n=== END FILE ===\n=== FILE: b.py ===\n3\n",
+        "=== EDIT: a.py ===\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n=== END EDIT ===\n",
+        "=== FILE: é.py ===\nnaïve = \"ü\"\n=== END FILE ===\n=== FILE: c.py ===\n",
+        "plain prose only\nsecond line\n",
+    ];
+    for sample in samples {
+        for size in [1, 2, 3, 7, 64, sample.len()] {
+            let mut fold = worker::Fold::default();
+            let mut rest = sample;
+            while !rest.is_empty() {
+                let mut at = size.min(rest.len());
+                while !rest.is_char_boundary(at) {
+                    at += 1;
+                }
+                fold.push(&rest[..at]);
+                rest = &rest[at..];
+            }
+            assert_eq!(
+                fold.render(),
+                worker::folded_output(sample, false),
+                "{sample:?} in chunks of {size}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fold_counts_a_streaming_line_and_bounds_a_very_long_one() {
+    let mut fold = worker::Fold::default();
+    fold.push("=== FILE: a.py ===\npartial");
+    assert_eq!(fold.render(), "▸ a.py · 1 line so far\n");
+    fold.push(" line\nnext\n");
+    assert_eq!(fold.render(), "▸ a.py · 2 lines so far\n");
+    // One line far past the line buffer counts once, however its chunks fall.
+    for _ in 0..50 {
+        fold.push(&"x".repeat(1000));
+    }
+    fold.push("\nafter\n=== END FILE ===\n");
+    assert_eq!(fold.render(), "▸ a.py · 4 lines\n");
+}
+
+#[test]
+fn fold_collapses_the_oldest_files_and_keeps_the_open_one() {
+    let mut fold = worker::Fold::default();
+    for index in 0..1000 {
+        fold.push(&format!("=== FILE: f{index}.py ===\nx\n=== END FILE ===\n"));
+    }
+    fold.push("=== FILE: open.py ===\ny\n");
+    let shown = fold.render();
+    let rows: Vec<&str> = shown.lines().collect();
+    assert!(rows.len() <= 70, "{} rows", rows.len());
+    assert_eq!(
+        rows[rows.len() - 2..],
+        ["▸ f999.py · 1 line", "▸ open.py · 1 line so far"]
+    );
+    let earlier: usize = rows[0]
+        .strip_prefix("… ")
+        .unwrap()
+        .strip_suffix(" earlier files")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(earlier + rows.len() - 1, 1001);
+}
+
 /// Worker fixture that streams `content` as one non-final frame, then holds the
 /// connection open until the returned sender fires (or drops).
 fn serve_partial(content: &str) -> (Ollama, thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
@@ -7948,6 +8018,13 @@ async fn live_views(frames: Vec<String>) -> [(String, String); 2] {
     .expect("stream received");
     let mut control = TaskControl::new(fixture.store.clone());
     control.attach_progress(1, progress.clone(), Arc::new(AtomicBool::new(false)));
+    control.snapshot = Some(fixture.store.snapshot().unwrap());
+    let mut app = alfredo_tui::model::App::new("fixture".into());
+    alfredo_tui::agent_view::open(
+        &mut app,
+        &mut control,
+        alfredo_tui::agent_view::Target::Task(1),
+    );
     // The task detail folds `model_output` with `cut`; Ctrl+O shows `display_output`.
     let views = |control: &TaskControl| {
         let detail = control.worker_live(1).unwrap();
@@ -7957,7 +8034,7 @@ async fn live_views(frames: Vec<String>) -> [(String, String); 2] {
         } else {
             worker::folded_output(&detail.model_output, detail.cut)
         };
-        let agent_text = if control.code_expanded {
+        let agent_text = if control.agent.as_ref().unwrap().expanded {
             worker::display_output(&agent.output)
         } else {
             worker::folded_output(&agent.output, agent.cut)
@@ -7966,6 +8043,7 @@ async fn live_views(frames: Vec<String>) -> [(String, String); 2] {
     };
     let (folded_detail, folded_agent) = views(&control);
     control.code_expanded = true;
+    control.agent.as_mut().unwrap().expanded = true;
     let (open_detail, open_agent) = views(&control);
     cancel.store(true, Ordering::SeqCst);
     let _ = tokio::time::timeout(Duration::from_secs(60), running).await;

@@ -33,12 +33,16 @@ CHECK_NOTES = ['/usr/bin/python3', '-B', '-c',
                "from pathlib import Path; assert 'ok' in Path('notes.txt').read_text()"]
 
 
+BIG_LINES = 600
+
+
 def chunk(content, done=False):
     return (json.dumps({'message': {'content': content}, 'done': done}) + '\n').encode()
 
 
 class AgentServer:
-    def __init__(self):
+    def __init__(self, big_file=False):
+        self.big_file = big_file
         self.lock = threading.Lock()
         self.requests = []
         self.bodies = {}
@@ -108,7 +112,15 @@ class AgentServer:
                         ]}), True))
                     elif marker == 'CALC':
                         # Stream the start of an answer, then hold until the client leaves.
-                        self.wfile.write(chunk('=== FILE: calc.py ===\ndef answer():\n'))
+                        if fixture.big_file:
+                            # 600 lines (about 21 KiB, far past the 8 KiB output tail), no end marker.
+                            self.wfile.write(chunk('=== FILE: calc.py ===\n'))
+                            for first in range(0, BIG_LINES, 100):
+                                self.wfile.write(chunk(''.join(
+                                    f'# line {number:04d} padding padding padding\n'
+                                    for number in range(first, first + 100))))
+                        else:
+                            self.wfile.write(chunk('=== FILE: calc.py ===\ndef answer():\n'))
                         self.wfile.flush()
                         deadline = time.monotonic() + 90
                         while not self.closed():
@@ -210,6 +222,48 @@ class AgentTerminalSmoke(unittest.TestCase):
 
     def highlighted(self, text):
         return any(line.startswith('│›') and text in line for line in self.terminal.screen().splitlines())
+
+    def test_a_file_past_the_output_tail_stays_one_counted_row_and_ctrl_o_shows_its_tail(self):
+        self.fixture.close()
+        self.fixture = AgentServer(big_file=True)
+        self.addCleanup(self.fixture.close)
+        self.terminal = terminal = Terminal(self.binary, self.fixture.endpoint, self.workspace,
+                                            self.state, 'agents', height=36, width=140)
+        self.screen_has('ALFREDO')
+        terminal.send('/go Make answer return 42 and write notes\r')
+        self.wait_until('first generation streaming', lambda: 'CALC' in self.fixture.markers())
+        terminal.send(b'\x1b[17~')
+        self.screen_has('Enter open')
+        for _ in range(8):
+            if self.highlighted('#1 Make answer'):
+                break
+            terminal.send(b'\x1b[B')
+            time.sleep(0.05)
+            terminal.pump()
+        self.wait_until('task #1 row highlighted', lambda: self.highlighted('#1 Make answer'), 5)
+        terminal.send('\r')
+        self.screen_has('Agent · worker #1 · running')
+        # The whole file is one exact row, never the raw code of its tail.
+        self.screen_has(f'▸ calc.py · {BIG_LINES} lines so far')
+        self.assertNotIn('# line', terminal.screen())
+        self.assertNotIn('earlier lines', terminal.screen())
+        # Ctrl+O: the retained tail code sits under the open file's heading.
+        terminal.send(b'\x0f')
+        self.screen_has(f'# line {BIG_LINES - 1:04d} padding')
+        # The pane follows the tail; page up to the top of the retained code.
+        for _ in range(60):
+            if '▸ calc.py' in terminal.screen():
+                break
+            terminal.send(b'\x1b[5~')
+            time.sleep(0.05)
+            terminal.pump()
+        self.screen_has('▸ calc.py')
+        self.assertIn('# line ', terminal.screen())
+        self.assertNotIn('lines so far', terminal.screen())
+        # A second Ctrl+O folds it back.
+        terminal.send(b'\x0f')
+        self.screen_has(f'▸ calc.py · {BIG_LINES} lines so far')
+        self.assertNotIn('# line', terminal.screen())
 
     def test_steer_a_streaming_worker_and_repair_a_failed_one_from_the_agent_view(self):
         head = self.git('rev-parse', 'HEAD')
