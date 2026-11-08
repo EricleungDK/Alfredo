@@ -104,6 +104,9 @@ pub struct TaskControl {
     pub writing: bool,
     pub notice: String,
     pub visible: bool,
+    /// Task detail shows streamed files and snippets in full (Ctrl+O) rather than
+    /// one folded row each. View state only: not saved.
+    pub code_expanded: bool,
     pub scroll: usize,
     pub(crate) scroll_max: std::cell::Cell<usize>,
     pub(crate) scroll_height: std::cell::Cell<u16>,
@@ -234,6 +237,7 @@ impl TaskControl {
             writing: false,
             notice: "Loading task queue".into(),
             visible: false,
+            code_expanded: false,
             scroll: 0,
             scroll_max: Default::default(),
             scroll_height: Default::default(),
@@ -1316,6 +1320,7 @@ impl TaskControl {
                 .get(&task)
                 .is_some_and(|flag| flag.load(Ordering::SeqCst)),
             model_output: progress.model_output.clone(),
+            cut: progress.received_bytes > progress.model_output.len(),
             stdout: String::from_utf8_lossy(&progress.check_stdout).into_owned(),
             stderr: String::from_utf8_lossy(&progress.check_stderr).into_owned(),
         })
@@ -1405,6 +1410,7 @@ impl TaskControl {
             stage: stage.into(),
             prompt: progress.request.as_deref().map(str::to_owned),
             output: progress.model_output.clone(),
+            cut: progress.received_bytes > progress.model_output.len(),
             check_output: format!("{stdout}{stderr}"),
             checking: progress.stage == "Running approved check",
             cancelling: self
