@@ -7869,6 +7869,35 @@ fn prose_line_forging_a_path_row_shows_hidden_characters_visibly() {
 }
 
 #[test]
+fn leading_control_before_a_path_arrow_shows_hidden_characters_visibly() {
+    // `safe` drops a control before `▸`, which would leave a path-styled row with a raw
+    // U+202E. The line is decided on its safe text and shown visibly, so no control
+    // survives to be dropped later.
+    for lead in ["\u{1}", "\u{1b}", "\u{7f}", "\u{85}", "\u{9b}", "\0", "\r"] {
+        let shown_lead = format!("<U+{:04X}>", lead.chars().next().unwrap() as u32);
+        let line = format!("{lead}▸ src/a\u{202E}sr.txt · 1 line\n");
+        let file = format!("=== FILE: a.txt ===\n{line}=== END FILE ===\n");
+        let snippet = format!("```\n{line}```\n");
+        for (case, raw_shown) in [
+            ("prose folded", worker::folded_output(&line, false)),
+            ("prose expanded", worker::display_output(&line)),
+            ("file expanded", worker::display_output(&file)),
+            ("snippet expanded", worker::display_output(&snippet)),
+        ] {
+            let shown = alfredo_tui::dashboard::safe(&raw_shown);
+            assert!(
+                !shown.contains('\u{202E}'),
+                "{case} {lead:?}: raw U+202E survives in {shown:?}"
+            );
+            assert!(
+                shown.contains(&format!("{shown_lead}▸ src/a<U+202E>sr.txt")),
+                "{case} {lead:?}: {shown:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn folded_edit_heading_shows_format_characters_visibly() {
     let text = "=== EDIT: src/a\u{202E}sr.py ===\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n=== END EDIT ===\n";
     // The unclosed U+202E must not reorder the line count suffix.

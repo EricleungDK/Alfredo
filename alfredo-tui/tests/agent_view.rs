@@ -349,6 +349,31 @@ fn worker_turn_path_shows_a_carriage_return_like_task_detail() {
 }
 
 #[test]
+fn control_before_a_path_arrow_never_draws_a_hidden_character_in_a_path_row() {
+    for expanded in [false, true] {
+        let mut first = attempt(1, TaskStatus::Accepted);
+        let mut rec = recorded(true);
+        rec.answer = Some("\u{1}▸ src/a\u{202E}sr.txt · 1 line\n".into());
+        first.recorded = Some(Ok(rec));
+        let turns = agent_view::project(&[first], &[], expanded);
+        let worker = turns.iter().find(|t| t.label == "Worker").unwrap();
+        for (line, tone) in &worker.lines {
+            if *tone == Tone::Path {
+                assert!(!line.contains('\u{202E}'), "raw U+202E in {line:?}");
+            }
+        }
+        assert!(
+            worker
+                .lines
+                .iter()
+                .any(|(line, _)| line.contains("<U+202E>")),
+            "{:?}",
+            worker.lines
+        );
+    }
+}
+
+#[test]
 fn worker_turn_folds_files_and_expanded_hides_fences_but_keeps_code_under_headings() {
     let mut first = attempt(1, TaskStatus::Failed);
     let mut rec = recorded(false);
