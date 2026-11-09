@@ -6595,6 +6595,19 @@ fn unapproved_path_with_format_characters_is_shown_as_code_points() {
 }
 
 #[test]
+fn unapproved_path_cut_to_200_chars_and_line_break_shows_as_space() {
+    let policy = shown_policy();
+    let long = "a".repeat(300);
+    let err = worker::validate_plan(&plan_of(&long), &policy).unwrap_err();
+    assert!(
+        err.contains(&"a".repeat(200)) && !err.contains(&"a".repeat(201)),
+        "{err}"
+    );
+    let err = worker::validate_plan(&plan_of("x\ny.py"), &policy).unwrap_err();
+    assert!(err.contains("Returned unapproved file x y.py;"), "{err}");
+}
+
+#[test]
 fn parse_failures_show_format_characters_in_paths_as_code_points() {
     let raw = |text: &str| {
         text.chars().any(|c| {
