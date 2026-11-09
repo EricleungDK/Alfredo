@@ -90,10 +90,14 @@ impl Fixture {
             .unwrap();
     }
     fn permit(&self) {
+        self.permit_calc("calc.py");
+    }
+
+    fn permit_calc(&self, calc: &str) {
         self.action(Action::Permit {
             task: 1,
             policy: WorkPolicy {
-                files: vec!["calc.py".into(), "notes.txt".into()],
+                files: vec![calc.into(), "notes.txt".into()],
                 check: vec![
                     "/usr/bin/python3".into(),
                     "-B".into(),
@@ -669,11 +673,15 @@ async fn unreachable_model_server_on_a_repair_attempt_gets_the_typed_code_for_th
 }
 
 async fn run_with_calc_of(bytes: usize) -> (worker::Evidence, String) {
+    run_with_file_of("calc.py", bytes).await
+}
+
+async fn run_with_file_of(name: &str, bytes: usize) -> (worker::Evidence, String) {
     let fixture = Fixture::new();
     let mut text = "x = 1\n".repeat(bytes / 6);
     text.push_str(&"#".repeat(bytes - text.len()));
     assert_eq!(text.len(), bytes);
-    fs::write(fixture.workspace.join("calc.py"), &text).unwrap();
+    fs::write(fixture.workspace.join(name), &text).unwrap();
     for args in [
         vec!["add", "."],
         vec!["-c", "core.hooksPath=/dev/null", "commit", "-qm", "edge"],
@@ -686,7 +694,7 @@ async fn run_with_calc_of(bytes: usize) -> (worker::Evidence, String) {
             .unwrap()
             .success());
     }
-    fixture.permit();
+    fixture.permit_calc(name);
     let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
     let (snapshot, _) = worker::start(
         fixture.store.clone(),
@@ -6642,6 +6650,100 @@ fn parse_failures_show_format_characters_in_paths_as_code_points() {
     }
     let err = worker::parse_answer("=== FILE: src/a\u{202E}gnp.exe ===\nx\n").unwrap_err();
     assert!(err.contains("<U+202E>") && !raw(&err), "{err}");
+}
+
+/// Issue #638: a policy path over the bound reaches the task failure detail as code points.
+#[tokio::test]
+async fn file_too_large_failure_shows_format_characters_in_the_path_as_code_points() {
+    let (evidence, detail) = run_with_file_of("a\u{202E}b\u{200B}c.py", 64 * 1024 + 1).await;
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::FILE_TOO_LARGE),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("a<U+202E>b<U+200B>c.py is 65 KiB"),
+        "{detail}"
+    );
+    assert!(
+        !detail.contains('\u{202E}') && !detail.contains('\u{200B}'),
+        "{detail:?}"
+    );
+}
+
+/// Issue #638: `file_too_large` is the one place both the worker failure and the plan lint
+/// get the path from, so it shows the visible form, one line, at most 200 characters.
+#[test]
+fn file_too_large_message_shows_the_path_visibly_and_cut() {
+    let msg = worker::file_too_large("src/a\u{202E}gnp.py", 70_000);
+    assert!(msg.contains("src/a<U+202E>gnp.py is 69 KiB"), "{msg}");
+    assert!(!msg.contains('\u{202E}'), "{msg:?}");
+    let msg = worker::file_too_large(&format!("{}\nz.py", "a".repeat(300)), 70_000);
+    assert!(msg.starts_with(&format!("{} is", "a".repeat(200))), "{msg}");
+    assert_eq!(
+        worker::file_too_large("calc.py", 70_000),
+        "calc.py is 69 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand."
+    );
+}
+
+/// Issue #638: the SEARCH excerpt in "not found" shows format characters as code points,
+/// is still the first line cut at 60 characters, and the failure text stays one line.
+#[test]
+fn edit_search_not_found_excerpt_shows_format_characters_as_code_points() {
+    let err = resolve_with(
+        &edit_block("calc.py", &[("x\u{202E}y\u{200B}z\n", "q\n")]),
+        "a = 1\n",
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("(\"x<U+202E>y<U+200B>z\")")
+            && !err.contains('\u{202E}')
+            && !err.contains('\u{200B}'),
+        "{err}"
+    );
+    for (raw, shown) in [
+        ("a\u{3164}b", "a<U+3164>b"),
+        ("a\u{890}b\u{891}", "a<U+0890>b<U+0891>"),
+    ] {
+        let err = resolve_with(
+            &edit_block("calc.py", &[(&format!("{raw}\n"), "q\n")]),
+            "a = 1\n",
+        )
+        .unwrap_err();
+        assert!(err.contains(&format!("(\"{shown}\")")), "{err}");
+        assert!(!err.contains(raw), "{err:?}");
+    }
+    // Only the first SEARCH line shows, and the cut is 60 characters of the shown text.
+    let err = resolve_with(
+        &edit_block("calc.py", &[("first\nsecond\n", "q\n")]),
+        "a = 1\n",
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("(\"first\")") && !err.contains("second"),
+        "{err}"
+    );
+    let long = "b".repeat(80);
+    let err = resolve_with(
+        &edit_block("calc.py", &[(&format!("{long}\n"), "q\n")]),
+        "a = 1\n",
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(&format!("(\"{}\")", "b".repeat(60))) && !err.contains(&"b".repeat(61)),
+        "{err}"
+    );
+    // The cut counts shown characters: 7 whole code points (56) plus 4 of the 8th.
+    let marks = "\u{200B}".repeat(30);
+    let err = resolve_with(
+        &edit_block("calc.py", &[(&format!("{marks}\n"), "q\n")]),
+        "a = 1\n",
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(&format!("(\"{}\")", "<U+200B>".repeat(7) + "<U+2")),
+        "{err}"
+    );
 }
 
 /// EDIT blocks (issue #366): `=== EDIT: path ===` with SEARCH/REPLACE pairs.

@@ -320,10 +320,11 @@ fn apply_edit(block: &EditBlock, current: &str) -> Result<String> {
                 "EDIT for {shown} pair {number} has an empty SEARCH"
             ));
         }
-        let excerpt: String = crate::dashboard::single_line(search.lines().next().unwrap_or(""))
-            .chars()
-            .take(60)
-            .collect();
+        let excerpt: String =
+            crate::dashboard::single_line_visible(search.lines().next().unwrap_or(""))
+                .chars()
+                .take(60)
+                .collect();
         match occurrences(&content, search) {
             1 => content = content.replacen(search.as_str(), replace, 1),
             0 => {
@@ -447,6 +448,7 @@ fn single_fence(answer: &str) -> Option<String> {
 }
 
 /// FILE blocks for `plan`, the inverse of `parse_answer`.
+#[must_use]
 pub fn render_blocks(plan: &FilePlan) -> String {
     plan.files
         .iter()
@@ -661,6 +663,7 @@ pub struct Fold {
 
 impl Fold {
     /// Whether any text was folded (a progress built without the stream has none).
+    #[must_use]
     pub fn tracked(&self) -> bool {
         self.total > 0
     }
@@ -750,6 +753,7 @@ impl Fold {
 
     /// The fold as [`folded_output`] shows the whole stream, with files dropped for
     /// the row cap as `… N earlier files`.
+    #[must_use]
     pub fn render(&self) -> String {
         let mut fold = self.clone();
         if !fold.pending.is_empty() {
@@ -785,6 +789,7 @@ impl Fold {
     /// open block's heading was dropped from it, its marker line goes in front, so the
     /// code shows under the file it belongs to. The tail's first line is dropped then,
     /// as the tail usually starts in the middle of it.
+    #[must_use]
     pub fn expanded(&self, tail: &str) -> String {
         match &self.open {
             Some((marker, start)) if *start < self.total.saturating_sub(tail.len()) => {
@@ -800,6 +805,7 @@ impl Fold {
 /// END markers and markdown fence lines are hidden. Inside a FILE block only the
 /// fence wrapping the whole file is hidden; the file's own fences are content.
 /// Display only: `parse_answer` reads the raw text.
+#[must_use]
 pub fn display_output(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
     for row in display_rows(text) {

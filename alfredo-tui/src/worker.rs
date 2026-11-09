@@ -950,6 +950,7 @@ fn kib(bytes: u64) -> u64 {
 
 /// The one message a worker run, a manual `/run` and the planning lint share.
 pub fn file_too_large(path: &str, bytes: u64) -> String {
+    let path = answer::shown_path(path);
     format!(
         "{path} is {} KiB; workers can edit files up to {} KiB. Split the file, or edit it by hand.",
         kib(bytes),

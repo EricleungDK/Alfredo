@@ -446,6 +446,26 @@ fn committed_file_over_the_worker_bound_is_rejected_with_the_worker_message() {
     );
 }
 
+/// Issue #638: the size finding shows the policy path with format characters as code points.
+#[test]
+fn oversized_file_finding_shows_format_characters_in_the_path_as_code_points() {
+    let large = plan(vec![step(
+        &["src/a\u{202E}b\u{200B}c.py"],
+        &["python3", "-c", "print(1)"],
+        &[],
+    )]);
+    let all = |_: &str| true;
+    let big = |_: &str| Some(156_697);
+    let findings = plan_lint::lint(&large, &all, &all, &big);
+    assert_eq!(
+        findings,
+        vec!["src/a<U+202E>b<U+200B>c.py is 154 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand.".to_string()]
+    );
+    assert!(findings
+        .iter()
+        .all(|f| !f.contains('\u{202E}') && !f.contains('\u{200B}')));
+}
+
 #[test]
 fn file_the_plan_creates_is_not_sized_and_is_not_flagged() {
     // `size` answers only for committed blobs; a new file has none at the baseline.

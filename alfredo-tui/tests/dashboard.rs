@@ -1003,3 +1003,14 @@ fn autopilot_commands_keep_the_readers_scroll_position() {
     };
     assert_eq!(body(&before), body(&after));
 }
+
+/// Issue #638: U+0890 and U+0891 (Arabic pound and piastre mark above, Cf, Unicode 14)
+/// are format characters like the rest of the Arabic number signs.
+#[test]
+fn arabic_number_marks_above_are_hidden_and_shown_as_code_points() {
+    use alfredo_tui::dashboard::{hidden, safe_visible, single_line_visible};
+    assert!(hidden('\u{0890}') && hidden('\u{0891}'));
+    assert!(!hidden('\u{088F}') && !hidden('\u{0892}'));
+    assert_eq!(safe_visible("a\u{890}b"), "a<U+0890>b");
+    assert_eq!(single_line_visible("a\u{891}b"), "a<U+0891>b");
+}
