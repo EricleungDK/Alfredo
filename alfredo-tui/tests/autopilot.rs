@@ -1488,16 +1488,22 @@ fn plan_approving_a_file_over_the_bound_is_rejected_at_lint_with_no_repairs() {
     assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 0);
 }
 
-fn oversized_approved_set(max_repairs: u32) {
+fn oversized_approved_set_at_worker(max_repairs: u32) {
     let fixture = Fixture::new();
-    // Each file fits the per-file bound; together they pass the 96 KiB context bound,
-    // which the planning lint does not see.
-    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    // The planning lint sees baseline sizes (10 KB + 42 KB) and passes; task 1 grows a.py,
+    // so task 2's approved set passes the 96 KiB context bound at the worker (#646).
+    commit_files(&fixture, &[("a.py", 10_000), ("b.py", 42_000)]);
     let server = Server::new(|request, _| {
         if planner(request) {
-            return files_plan(&["a.py", "b.py"]);
+            return json!({"tasks": [
+                {"title": "Grow a.py", "acceptance": ["a.py is larger"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["a.py"], "check": check("print(1)")}},
+                {"title": "Edit a.py again", "acceptance": ["a.py is edited"], "model": "fixture",
+                 "dependencies": [1], "policy": {"files": ["a.py", "b.py"], "check": check("print(1)")}},
+            ]})
+            .to_string();
         }
-        good_calc()
+        files("a.py", &format!("{}\n", "#".repeat(58_000)))
     });
     let runtime = Runtime::new().unwrap();
     let mut control = control(&fixture, &server, &runtime);
@@ -1516,9 +1522,9 @@ fn oversized_approved_set(max_repairs: u32) {
     assert_eq!(status.state, RunState::Failed);
     assert_eq!(status.repairs, 0);
     let snapshot = fixture.store.snapshot().unwrap();
-    assert_eq!(snapshot.tasks.len(), 1, "no repair task is created");
+    assert_eq!(snapshot.tasks.len(), 2, "no repair task is created");
     let evidence: alfredo_tui::worker::Evidence =
-        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+        serde_json::from_str(&fixture.store.evidence(2).unwrap()).unwrap();
     assert_eq!(
         evidence.failure_code.as_deref(),
         Some(alfredo_tui::worker::FILE_TOO_LARGE)
@@ -1541,6 +1547,55 @@ fn oversized_approved_set(max_repairs: u32) {
         !server.prompts().iter().any(|p| p.contains("Repair")),
         "{:?}",
         server.prompts()
+    );
+}
+
+#[test]
+fn oversized_approved_set_at_worker_stops_autopilot_without_repairs_or_model_advice() {
+    oversized_approved_set_at_worker(3);
+}
+
+#[test]
+fn oversized_approved_set_at_worker_stops_cleanly_with_no_repair_budget() {
+    oversized_approved_set_at_worker(0);
+}
+
+fn oversized_approved_set(max_repairs: u32) {
+    let fixture = Fixture::new();
+    // Each file fits the per-file bound; together they pass the 96 KiB context bound,
+    // which the planning lint now catches before any task starts (issue #646).
+    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return files_plan(&["a.py", "b.py"]);
+        }
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", max_repairs, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "too-large-lint-set",
+        finished,
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert_eq!(status.repairs, 0);
+    let report = autopilot.report().unwrap();
+    assert!(report.contains("Approved files total"), "{report}");
+    assert!(report.contains("Planning failed 3 times"), "{report}");
+    assert!(!report.contains("larger model"), "{report}");
+    assert!(!report.contains("repair budget exhausted"), "{report}");
+    assert_eq!(
+        fixture.store.snapshot().unwrap().tasks.len(),
+        0,
+        "no task starts"
     );
 }
 
@@ -2006,12 +2061,21 @@ fn reentrant_run_names_the_dependent_task_when_it_is_the_one_that_stopped() {
 #[test]
 fn repair_after_a_too_large_stop_does_not_resume_the_loop() {
     let fixture = Fixture::new();
-    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    // The planning lint (baseline sizes) passes both tasks; task 1 then grows a.py, so task
+    // 2's approved set passes the 96 KiB context bound and stops at the worker's own
+    // backstop (issue #646).
+    commit_files(&fixture, &[("a.py", 10_000), ("b.py", 42_000)]);
     let server = Server::new(|request, _| {
         if planner(request) {
-            return files_plan(&["a.py", "b.py"]);
+            return json!({"tasks": [
+                {"title": "Grow a.py", "acceptance": ["a.py is larger"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["a.py"], "check": check("print(1)")}},
+                {"title": "Edit a.py again", "acceptance": ["a.py is edited"], "model": "fixture",
+                 "dependencies": [1], "policy": {"files": ["a.py", "b.py"], "check": check("print(1)")}},
+            ]})
+            .to_string();
         }
-        good_calc()
+        files("a.py", &format!("{}\n", "#".repeat(58_000)))
     });
     let runtime = Runtime::new().unwrap();
     let mut control = control(&fixture, &server, &runtime);
@@ -2027,7 +2091,13 @@ fn repair_after_a_too_large_stop_does_not_resume_the_loop() {
         finished,
     );
     assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
-    let repair = owner_repair(&mut control, &runtime, 1, "again");
+    let evidence: alfredo_tui::worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(2).unwrap()).unwrap();
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(alfredo_tui::worker::FILE_TOO_LARGE)
+    );
+    let repair = owner_repair(&mut control, &runtime, 2, "again");
     for _ in 0..80 {
         control.poll();
         assert!(autopilot.tick(&runtime, &mut control).is_none());
@@ -4704,6 +4774,27 @@ fn bare_go_refuses_a_plan_that_fails_unattended_lint_and_leaves_it_untouched() {
         .iter()
         .all(|task| task.status == TaskStatus::Proposed));
     assert!(autopilot.status(&control).is_none());
+}
+
+#[test]
+fn bare_go_refuses_a_plan_whose_approved_files_exceed_the_context_bound() {
+    let fixture = Fixture::new();
+    // Each file fits 64 KiB; together with the worker's framing they pass 96 KiB (#646).
+    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let server = Server::new(|_, _| files_plan(&["a.py", "b.py"]));
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    let before = control.planner.checkpoint().unwrap();
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap_err();
+    assert!(error.contains("cannot run unattended"), "{error}");
+    assert!(error.contains("Approved files total"), "{error}");
+    assert_eq!(control.planner.checkpoint().unwrap().plan, before.plan);
+    assert!(autopilot.status(&control).is_none());
+    assert!(fixture.store.snapshot().unwrap().tasks.is_empty());
 }
 
 #[test]

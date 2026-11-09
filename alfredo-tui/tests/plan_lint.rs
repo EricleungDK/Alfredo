@@ -446,6 +446,51 @@ fn committed_file_over_the_worker_bound_is_rejected_with_the_worker_message() {
     );
 }
 
+/// Issue #646: the worker frames each approved file as `\nFILE {path}\n{content}\n`, so
+/// the lint adds `path.len() + 8` bytes per file to the committed size.
+fn framed_lint(content: u64) -> Vec<String> {
+    let all = |_: &str| true;
+    let sized = move |_: &str| Some(content);
+    let plan = plan(vec![step(&["a.py", "b.py"], &["true"], &[])]);
+    plan_lint::lint(&plan, &all, &all, &sized)
+}
+
+#[test]
+fn approved_files_that_each_fit_but_together_exceed_the_context_bound_are_flagged() {
+    let findings = framed_lint(50_000);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("Approved files total"), "{findings:?}");
+    assert!(findings[0].contains("96 KiB"), "{findings:?}");
+}
+
+#[test]
+fn framed_approved_total_is_checked_against_the_context_bound_on_both_sides() {
+    // 2 * (49_140 + "a.py".len() + 8) == 96 KiB exactly: the worker accepts it.
+    assert_eq!(framed_lint(49_140), Vec::<String>::new());
+    // One byte more in one file is over.
+    let all = |_: &str| true;
+    let sized = |path: &str| Some(if path == "b.py" { 49_141 } else { 49_140 });
+    let plan = plan(vec![step(&["a.py", "b.py"], &["true"], &[])]);
+    let findings = plan_lint::lint(&plan, &all, &all, &sized);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].contains("Approved files total"), "{findings:?}");
+}
+
+#[test]
+fn context_total_counts_only_the_files_of_each_task_and_skips_uncommitted_files() {
+    let all = |_: &str| true;
+    let plan = plan(vec![
+        step(&["a.py"], &["true"], &[]),
+        step(&["b.py"], &["true"], &[]),
+        step(&["c.py", "new.py"], &["true"], &[]),
+    ]);
+    let sized = |path: &str| (path != "new.py").then_some(50_000);
+    assert_eq!(
+        plan_lint::lint(&plan, &all, &all, &sized),
+        Vec::<String>::new()
+    );
+}
+
 /// Issue #638: the size finding shows the policy path with format characters as code points.
 #[test]
 fn oversized_file_finding_shows_format_characters_in_the_path_as_code_points() {
