@@ -1491,7 +1491,7 @@ fn plan_approving_a_file_over_the_bound_is_rejected_at_lint_with_no_repairs() {
 fn oversized_approved_set(max_repairs: u32) {
     let fixture = Fixture::new();
     // Each file fits the per-file bound; together they pass the 96 KiB context bound,
-    // which the planning lint does not see.
+    // which the planning lint now catches before any task starts (issue #646).
     commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
     let server = Server::new(|request, _| {
         if planner(request) {
@@ -1509,38 +1509,21 @@ fn oversized_approved_set(max_repairs: u32) {
         &mut autopilot,
         &mut control,
         &runtime,
-        "too-large-worker",
+        "too-large-lint-set",
         finished,
     );
     let status = autopilot.status(&control).unwrap();
     assert_eq!(status.state, RunState::Failed);
     assert_eq!(status.repairs, 0);
-    let snapshot = fixture.store.snapshot().unwrap();
-    assert_eq!(snapshot.tasks.len(), 1, "no repair task is created");
-    let evidence: alfredo_tui::worker::Evidence =
-        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
-    assert_eq!(
-        evidence.failure_code.as_deref(),
-        Some(alfredo_tui::worker::FILE_TOO_LARGE)
-    );
     let report = autopilot.report().unwrap();
     assert!(report.contains("Approved files total"), "{report}");
     assert!(report.contains("Repairs   0"), "{report}");
-    assert!(
-        report.contains("Next      Approve fewer or smaller files, or edit them by hand."),
-        "{report}"
-    );
-    assert!(
-        autopilot.notice().contains("0 repairs"),
-        "{}",
-        autopilot.notice()
-    );
     assert!(!report.contains("larger model"), "{report}");
     assert!(!report.contains("repair budget exhausted"), "{report}");
-    assert!(
-        !server.prompts().iter().any(|p| p.contains("Repair")),
-        "{:?}",
-        server.prompts()
+    assert_eq!(
+        fixture.store.snapshot().unwrap().tasks.len(),
+        0,
+        "no task starts"
     );
 }
 
