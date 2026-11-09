@@ -53,6 +53,13 @@ class EvalSmoke(unittest.TestCase):
             for trial in document['trials']:
                 self.assertEqual(0, trial['exit_code'], trial['task'])
                 self.assertFalse(trial['panic'], trial['task'])
+            for trial in (t for t in document['trials'] if t['mode'] != 'chat'):
+                self.assertIsInstance(trial['rss_anon_kb'], int, trial['task'])
+                self.assertGreater(trial['rss_anon_kb'], 0, trial['task'])
+                self.assertLessEqual(trial['rss_anon_kb'], trial['rss_kb'], trial['task'])
+            anon = document['metrics']['M16']['secondary']['rss_anon_kb']
+            self.assertIsInstance(anon, (int, float))
+            self.assertGreater(anon, 0)
             self.assertIsNotNone(document['metrics']['M6']['value'], 'fixture token counts are synthetic but present')
             self.assertEqual(0, document['metrics']['M12']['value'])
             repaired = next(t for t in document['trials'] if t['task'].startswith('T2-'))

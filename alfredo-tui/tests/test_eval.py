@@ -184,6 +184,17 @@ class SchemaTests(unittest.TestCase):
     def test_valid_document_passes(self):
         self.assertEqual([], schema_check.validate(self.document()))
 
+    def test_rss_anon_kb_is_accepted_as_integer_or_null_and_not_negative(self):
+        for value in (800, None):
+            document = self.document()
+            for trial in document['trials']:
+                trial['rss_anon_kb'] = value
+            document['metrics']['M16']['secondary']['rss_anon_kb'] = value
+            self.assertEqual([], schema_check.validate(document), value)
+        document = self.document()
+        document['trials'][0]['rss_anon_kb'] = -1
+        self.assertTrue(any('minimum' in p for p in schema_check.validate(document)))
+
     def test_violations_are_reported(self):
         for mutate, fragment in [
             (lambda d: d.pop('metrics'), "missing required 'metrics'"),
@@ -393,6 +404,24 @@ class AggregateTests(unittest.TestCase):
                 self.assertEqual(4, metrics['M16']['secondary']['binary_kb'])
                 self.assertEqual(release_kb, metrics['M16']['secondary']['release_binary_kb'])
 
+    def test_m16_secondary_holds_the_median_anonymous_rss_and_value_stays_vmhwm(self):
+        tasks = [{'id': 'A', 'kind': 'positive'}]
+        trials = []
+        for hwm, anon in ((13000, 800), (13400, 900), (12800, 700)):
+            trial = good_trial('A')
+            trial.update({'rss_kb': hwm, 'rss_anon_kb': anon})
+            trials.append(trial)
+        _s, metrics, _w, _b = self.run_aggregate(trials, tasks, count=3)
+        self.assertEqual(13000, metrics['M16']['value'])
+        self.assertEqual(800, metrics['M16']['secondary']['rss_anon_kb'])
+        self.assertIn('RssAnon', metrics['M16']['note'])
+
+    def test_m16_anonymous_rss_is_null_when_no_trial_has_it(self):
+        _s, metrics, _w, _b = self.run_aggregate([good_trial('A')], [{'id': 'A', 'kind': 'positive'}], count=1)
+        self.assertEqual(24000, metrics['M16']['value'])
+        self.assertIn('rss_anon_kb', metrics['M16']['secondary'])
+        self.assertIsNone(metrics['M16']['secondary']['rss_anon_kb'])
+
     def test_missing_binary_gives_null_sizes(self):
         _s, metrics, _w, _b = self.run_aggregate([good_trial('A')], [{'id': 'A', 'kind': 'positive'}], count=1)
         self.assertIsNone(metrics['M16']['secondary']['binary_kb'])
@@ -418,6 +447,59 @@ def probe_results(**override):
     }
     results.update(override)
     return results
+
+
+class RssTests(unittest.TestCase):
+    """M16 reads VmHWM (headline) and RssAnon (code-sensitive figure) from /proc/PID/status (issue #641)."""
+
+    STATUS = 'Name:\talfredo-tui\nVmPeak:\t   90000 kB\nVmHWM:\t   13000 kB\nVmRSS:\t   12900 kB\n' \
+             'RssAnon:\t     800 kB\nRssFile:\t   12200 kB\nRssShmem:\t       0 kB\n'
+
+    def proc_with(self, text):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        (Path(directory.name) / '4242').mkdir()
+        (Path(directory.name) / '4242' / 'status').write_text(text)
+        return directory.name
+
+    def test_rss_anon_is_read_separately(self):
+        proc = self.proc_with(self.STATUS)
+        status = run_eval.read_status(4242, proc)
+        self.assertEqual(800, status['RssAnon'])
+        self.assertEqual(12200, status['RssFile'])
+        self.assertEqual(13000, status['VmHWM'])
+        self.assertEqual(13000, run_eval.peak_rss_kb(4242, proc))
+
+    def test_unreadable_status_gives_none_values(self):
+        proc = self.proc_with(self.STATUS)
+        self.assertEqual({'VmHWM': None, 'RssAnon': None, 'RssFile': None}, run_eval.read_status(9, proc))
+        self.assertIsNone(run_eval.peak_rss_kb(9, proc))
+
+    def test_sampling_keeps_the_peak_of_each_figure(self):
+        peak = {}
+        for hwm, anon in ((13000, 800), (13000, 950), (13100, 900)):
+            proc = self.proc_with(self.STATUS.replace('13000', str(hwm)).replace('800 kB', f'{anon} kB'))
+            run_eval.sample_rss(4242, peak, proc)
+        self.assertEqual({'rss_kb': 13100, 'rss_anon_kb': 950}, peak)
+
+    def test_missing_rss_anon_line_is_null_with_a_reason_and_no_crash(self):
+        old = ''.join(line for line in self.STATUS.splitlines(True) if not line.startswith('RssAnon'))
+        peak = {}
+        run_eval.sample_rss(4242, peak, self.proc_with(old))
+        trial = run_eval.blank_trial({'id': 'A', 'kind': 'positive'}, 1)
+        run_eval.record_rss(trial, peak)
+        self.assertEqual(13000, trial['rss_kb'])
+        self.assertIsNone(trial['rss_anon_kb'])
+        self.assertIn('rss_anon_kb', trial['unavailable'])
+        self.assertNotIn('rss_kb', trial['unavailable'])
+
+    def test_recorded_trial_carries_both_figures_and_passes_the_schema(self):
+        peak = {}
+        run_eval.sample_rss(4242, peak, self.proc_with(self.STATUS))
+        trial = good_trial('A')
+        run_eval.record_rss(trial, peak)
+        self.assertEqual((13000, 800), (trial['rss_kb'], trial['rss_anon_kb']))
+        self.assertEqual({'ttft_ms': 'fixture'}, trial['unavailable'])
 
 
 class ProbeTests(unittest.TestCase):

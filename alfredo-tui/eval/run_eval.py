@@ -511,15 +511,42 @@ def planner_token_mismatch(server, saved):
     return f'planner tokens: the server counted {server}, Alfredo saved {saved if saved is not None else "none"}'
 
 
-def peak_rss_kb(pid):
-    """Peak resident set (VmHWM) of one process; None when /proc cannot be read."""
+RSS_FIELDS = ('VmHWM', 'RssAnon', 'RssFile')
+
+
+def read_status(pid, proc='/proc'):
+    """VmHWM, RssAnon and RssFile (kB) of one process; a field is None when its line is missing or unreadable."""
+    status = dict.fromkeys(RSS_FIELDS)
     try:
-        for line in Path(f'/proc/{pid}/status').read_text().splitlines():
-            if line.startswith('VmHWM:'):
-                return int(line.split()[1])
-    except (OSError, ValueError):
+        for line in Path(proc, str(pid), 'status').read_text().splitlines():
+            name, _, rest = line.partition(':')
+            if name in status:
+                status[name] = int(rest.split()[0])
+    except (OSError, ValueError, IndexError):
         pass
-    return None
+    return status
+
+
+def peak_rss_kb(pid, proc='/proc'):
+    """Peak resident set (VmHWM) of one process; None when /proc cannot be read."""
+    return read_status(pid, proc)['VmHWM']
+
+
+def sample_rss(pid, peak, proc='/proc'):
+    """Fold one /proc sample into peak: VmHWM (kernel high-water mark) and the highest RssAnon seen."""
+    status = read_status(pid, proc)
+    for key, field in (('rss_kb', 'VmHWM'), ('rss_anon_kb', 'RssAnon')):
+        if status[field] is not None:
+            peak[key] = max(peak.get(key, 0), status[field])
+
+
+def record_rss(trial, peak):
+    """Copy the sampled peaks into the trial; a figure that was never read is null with a reason."""
+    for key, reason in (('rss_kb', '/proc/PID/status was not readable'),
+                        ('rss_anon_kb', '/proc/PID/status has no readable RssAnon line')):
+        trial[key] = peak.get(key)
+        if trial[key] is None:
+            trial['unavailable'][key] = reason
 
 
 # ----------------------------------------------------------------------------- trials
@@ -531,7 +558,7 @@ def blank_trial(task, index):
         'tokens': {'prompt': None, 'eval': None, 'planner': None, 'peak_ctx': None},
         'errors': {'malformed': None, 'refused': None, 'sandbox': None}, 'repairs': None, 'repairs_accepted': None,
         'tasks_accepted': None, 'enter_to_request_ms': None, 'wall_s': 0.0,
-        'cold_start_ms': None, 'overhead_s': None, 'ttft_ms': None, 'rss_kb': None, 'exit_code': None,
+        'cold_start_ms': None, 'overhead_s': None, 'ttft_ms': None, 'rss_kb': None, 'rss_anon_kb': None, 'exit_code': None,
         'panic': False, 'unavailable': {}, 'notes': [],
     }
 
@@ -574,10 +601,10 @@ def alfredo_trial(task, index, options):
         started = time.monotonic()
         terminal.send(f'/go {goal}\r')  # Enter is the last byte sent
         deadline = started + options.timeout
-        rss = None
+        rss = {}
         while True:
             terminal.pump()
-            rss = peak_rss_kb(terminal.process.pid) or rss
+            sample_rss(terminal.process.pid, rss)
             screen = terminal.screen()
             if 'git switch alfredo/go-' in screen:
                 trial['outcome'] = 'done'
@@ -594,9 +621,7 @@ def alfredo_trial(task, index, options):
                 break
             time.sleep(0.03)
         trial['wall_s'] = round(time.monotonic() - started, 3)
-        trial['rss_kb'] = rss
-        if rss is None:
-            trial['unavailable']['rss_kb'] = '/proc/PID/status was not readable'
+        record_rss(trial, rss)
 
         branches = git(workspace, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/alfredo/').split()
         ref = branches[0] if trial['outcome'] == 'done' and branches else None
@@ -717,10 +742,10 @@ def chat_trial(task, index, options):
         started = time.monotonic()
         process = subprocess.Popen(argv, cwd=workspace, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
-        rss = None
+        rss = {}
         out = err = ''
         while True:
-            rss = peak_rss_kb(process.pid) or rss
+            sample_rss(process.pid, rss)
             try:
                 out, err = process.communicate(timeout=0.1)
                 break
@@ -731,11 +756,9 @@ def chat_trial(task, index, options):
                     trial['outcome'] = 'timeout'
                     break
         trial['wall_s'] = round(time.monotonic() - started, 3)
-        trial['rss_kb'] = rss
+        record_rss(trial, rss)
         trial['exit_code'] = process.returncode
         trial['panic'] = 'panicked at' in err or process.returncode == 101
-        if rss is None:
-            trial['unavailable']['rss_kb'] = '/proc/PID/status was not readable'
         try:
             result = json.loads(out.strip().splitlines()[-1]) if out.strip() else None
         except ValueError:
@@ -931,9 +954,9 @@ def claude_trial(task, index, options):
             thread.start()
         process.stdin.write(task['goal'] + '\n')
         process.stdin.close()
-        rss, timed_out = None, False
+        rss, timed_out = {}, False
         while process.poll() is None:
-            rss = peak_rss_kb(process.pid) or rss
+            sample_rss(process.pid, rss)
             if time.monotonic() - spawned > options.timeout:
                 timed_out = True
                 process.kill()
@@ -943,7 +966,7 @@ def claude_trial(task, index, options):
         for thread in threads:
             thread.join(timeout=5)
         trial['wall_s'] = round(time.monotonic() - spawned, 3)
-        trial['rss_kb'] = rss
+        record_rss(trial, rss)
         trial['exit_code'] = process.returncode
         if first:
             trial['cold_start_ms'] = round((first[0] - spawned) * 1000, 1)
@@ -1229,11 +1252,14 @@ def aggregate(trials, tasks, config, probes_result=None, code_health_result=None
                             'the smoke suites are not included')
     value, reason = over('rss_kb', statistics.median)
     chat_value, _ = over('rss_kb', statistics.median, pool=chat_positives)
+    anon_value, _ = over('rss_anon_kb', statistics.median)
     metrics['M16'] = metric(
         'M16', value, reason, digits=0,
         secondary={'binary_kb': binary_kb, 'release_binary_kb': binary_kb if profile == 'release' else None,
+                   'rss_anon_kb': anon_value,
                    **chat_block(chat_value)},
-        note='main process VmHWM only (process-tree peak is not sampled); binary_kb is the size of the binary '
+        note='main process VmHWM only (process-tree peak is not sampled); VmHWM includes the binary\'s file pages '
+             '(RssFile), so secondary.rss_anon_kb (sampled peak of RssAnon) is the code-sensitive figure; binary_kb is the size of the binary '
              'under test (config.binary), release_binary_kb the same only for a release build'
              + (f'; {debug_note}' if debug_note else ''))
     for key, why in FIXED_NULL.items():
