@@ -696,6 +696,16 @@ mod visible_tests {
         assert!(hidden('\u{2028}') && hidden('\u{2029}') && hidden('\u{85}'));
     }
 
+    /// Issue #638: U+0890 and U+0891 (Arabic pound and piastre mark above, Cf, Unicode 14)
+    /// are format characters like the rest of the Arabic number signs.
+    #[test]
+    fn arabic_number_marks_above_are_hidden_and_shown_as_code_points() {
+        assert!(hidden('\u{0890}') && hidden('\u{0891}'));
+        assert!(!hidden('\u{088F}') && !hidden('\u{0892}'));
+        assert_eq!(safe_visible("a\u{890}b"), "a<U+0890>b");
+        assert_eq!(single_line_visible("a\u{891}b"), "a<U+0891>b");
+    }
+
     /// Issue #361: the bidi isolates, marks and Arabic letter mark stay covered by `hidden`.
     #[test]
     fn bidi_isolates_and_marks_are_hidden() {

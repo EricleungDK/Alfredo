@@ -1783,7 +1783,15 @@ fn empty_policy_files_name_the_task() {
 #[test]
 fn plan_rejects_hidden_characters_naming_field_and_code_point() {
     type Edit = fn(&mut Plan);
-    let cases: [(Edit, &str); 5] = [
+    let cases: [(Edit, &str); 7] = [
+        (
+            |p| p.tasks[0].title = "Title\u{890}".into(),
+            "Plan task 1 title contains hidden character U+0890",
+        ),
+        (
+            |p| p.prompt = "Goal\u{891}".into(),
+            "Plan prompt contains hidden character U+0891",
+        ),
         (
             |p| p.tasks[1].policy.check[2] = "unit\u{202E}test".into(),
             "Plan task 2 check argument 3 contains hidden character U+202E",
