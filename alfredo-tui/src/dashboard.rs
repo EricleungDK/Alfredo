@@ -32,6 +32,7 @@ pub fn hidden(c: char) -> bool {
                 | '\u{061C}'
                 | '\u{06DD}'
                 | '\u{070F}'
+                | '\u{0890}'..='\u{0891}' // Cf, added in Unicode 14
                 | '\u{08E2}'
                 | '\u{180E}'
                 | '\u{200B}'..='\u{200F}'

@@ -320,10 +320,11 @@ fn apply_edit(block: &EditBlock, current: &str) -> Result<String> {
                 "EDIT for {shown} pair {number} has an empty SEARCH"
             ));
         }
-        let excerpt: String = crate::dashboard::single_line(search.lines().next().unwrap_or(""))
-            .chars()
-            .take(60)
-            .collect();
+        let excerpt: String =
+            crate::dashboard::single_line_visible(search.lines().next().unwrap_or(""))
+                .chars()
+                .take(60)
+                .collect();
         match occurrences(&content, search) {
             1 => content = content.replacen(search.as_str(), replace, 1),
             0 => {
