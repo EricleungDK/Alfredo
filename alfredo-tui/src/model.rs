@@ -394,6 +394,31 @@ pub struct Session {
     key_times: (Option<std::time::Instant>, Option<std::time::Instant>),
 }
 
+/// True when the submitted text is exactly the `/scope-clear` command.
+#[must_use]
+pub fn is_scope_clear(text: &str) -> bool {
+    text == "/scope-clear"
+}
+
+/// Notice for a `/scope-clear` attempt. `Ok` means the Wayfinder flow was left and the
+/// draft is consumed; `Err` keeps the text visible as a rejected draft (issue #642).
+pub fn scope_clear_outcome<E: std::fmt::Display>(
+    result: Result<(), E>,
+    session: &mut Session,
+) -> String {
+    match result {
+        Ok(()) => {
+            session.remember_submission();
+            session.clear_draft();
+            "Left Wayfinder: chat tools are back; scope receipts are kept (/scope)".into()
+        }
+        Err(error) => {
+            session.reject_draft();
+            format!("/scope-clear: {error}")
+        }
+    }
+}
+
 impl Session {
     pub fn new(model: String) -> Self {
         Self {

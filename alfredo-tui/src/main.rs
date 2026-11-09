@@ -2156,21 +2156,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         .into();
                                 continue;
                             }
-                            if text == "/scope-clear" {
-                                work.app.notice = match work
+                            if alfredo_tui::model::is_scope_clear(&text) {
+                                let cleared = work
                                     .tasks
                                     .store()
                                     .understanding()
                                     .clear_flow()
-                                {
-                                    Ok(state) => {
-                                        work.tasks.observe_scope(state);
-                                        work.app.sessions[index].remember_submission();
-                                        work.app.sessions[index].clear_draft();
-                                        "Left Wayfinder: chat tools are back; scope receipts are kept (/scope)".into()
-                                    }
-                                    Err(error) => format!("/scope-clear: {error}"),
-                                };
+                                    .map(|state| work.tasks.observe_scope(state));
+                                work.app.notice = alfredo_tui::model::scope_clear_outcome(
+                                    cleared,
+                                    &mut work.app.sessions[index],
+                                );
                                 continue;
                             }
                             let prepared = if let Some(selector) =
