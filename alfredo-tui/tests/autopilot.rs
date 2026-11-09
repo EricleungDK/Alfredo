@@ -4705,6 +4705,27 @@ fn bare_go_refuses_a_plan_that_fails_unattended_lint_and_leaves_it_untouched() {
 }
 
 #[test]
+fn bare_go_refuses_a_plan_whose_approved_files_exceed_the_context_bound() {
+    let fixture = Fixture::new();
+    // Each file fits 64 KiB; together with the worker's framing they pass 96 KiB (#646).
+    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let server = Server::new(|_, _| files_plan(&["a.py", "b.py"]));
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    let before = control.planner.checkpoint().unwrap();
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap_err();
+    assert!(error.contains("cannot run unattended"), "{error}");
+    assert!(error.contains("Approved files total"), "{error}");
+    assert_eq!(control.planner.checkpoint().unwrap().plan, before.plan);
+    assert!(autopilot.status(&control).is_none());
+    assert!(fixture.store.snapshot().unwrap().tasks.is_empty());
+}
+
+#[test]
 fn go_goal_with_an_open_draft_names_bare_go_as_the_way_to_run_it() {
     let fixture = Fixture::new();
     let server = plan_server();

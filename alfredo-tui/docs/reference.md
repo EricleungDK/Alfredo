@@ -98,7 +98,10 @@ approved files totalling over 96 KiB) fails the run before any model call with a
 Split the file, or edit it by hand.` The same text shows after a manual `/run`. Autopilot
 does not repair it (no repair spent, no larger-model or `--max-repairs` advice) and the
 summary adds a `Next` row. The planning lint rejects a draft that approves a committed file
-over 64 KiB with the same message, so the failure comes at plan time. The same lint also rejects a task whose committed approved files, with the worker's per-file `FILE <path>` framing, total over 96 KiB, with the worker's `Approved files total` message (read-only reference files do not count).
+over 64 KiB with the same message, so the failure comes at plan time.
+The same lint also rejects a task whose committed approved files, with the worker's
+per-file `FILE <path>` framing, total over 96 KiB, with the worker's `Approved files
+total` message (read-only reference files do not count).
 
 A worker, repair or review request that cannot reach Ollama (connection refused, or the
 connection dropped before the reply) is also an environment failure, not a code failure: the
