@@ -1805,8 +1805,8 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   each workspace file it matches fails with `Permission denied` when opened and each matching directory appears empty, so
   no approved command, including one an always-allow rule covers, returns a secret's contents
   (issue #469). See **Sandboxed (default)** under `run_command` for the limits. The workspace's
-  root `.git` is not masked: `.git/config` and committed history stay visible to sandboxed
-  commands (a known limit). The three exact template names `.env.example`, `.env.sample` and
+  root `.git` is hidden from sandboxed commands as a whole (issue #622), so `.git/config` and
+  committed history are not readable there either. The three exact template names `.env.example`, `.env.sample` and
   `.env.template` are the one exception: a sandboxed `run_command` can read them (issue #598).
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
   tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
@@ -2114,9 +2114,13 @@ default the repository root; same confinement as the read tools), `escalate` (bo
 default false), `timeout_seconds` (1–600, default 120).
 
 - **Sandboxed (default).** Runs in the same bubblewrap Sandbox as worker checks: network
-  off, the Coding Workspace writable, `.git` and system roots read-only, `HOME=/tmp`,
-  tools under `/usr` and `/bin`. A linked worktree's shared Git directory is mounted
-  read-only so `git` reads work. If `~/.cargo` / `~/.rustup` exist, only their toolchain
+  off, the Coding Workspace writable, the root `.git` hidden, system roots read-only,
+  `HOME=/tmp`, tools under `/usr` and `/bin`. The root `.git` is never mounted, not even
+  read-only (issue #622): its object store, its config and a linked worktree's shared Git
+  directory hold committed history, so git finds no repository in the sandbox. `git status`,
+  `git diff`, `git log` and the other git commands fail there with `not a git repository`;
+  use the chat git tools (`git_status`, `git_branch`, `git_log`, `git_diff`) instead. An
+  `escalate: true` run is on the host and is not affected. If `~/.cargo` / `~/.rustup` exist, only their toolchain
   entries are mounted read-only (`~/.cargo/bin`, `registry`, `git`, `~/.rustup/toolchains`
   and `settings.toml`), never the whole homes, so `~/.cargo/credentials.toml` and
   `config.toml` stay unreadable. Symlinked toolchain entries are skipped, and
@@ -2134,21 +2138,21 @@ default false), `timeout_seconds` (1–600, default 120).
   Secret files are masked in every sandboxed run, including one an always-allow rule covers
   (issue #469). Before the run the workspace is scanned with the secret list (see **Secret
   files** above), git-ignored files included, without following symbolic links. Only the
-  workspace's root `.git` is skipped; a nested `.git` directory or file is masked like any
-  secret entry, so git inside a nested repository fails in the sandbox. Each matching file is
+  workspace's root `.git` is skipped here, because it is hidden as described above; a nested
+  `.git` directory or file is masked like any secret entry, so git inside a nested repository
+  fails in the sandbox. Each matching file is
   bound over with `/dev/null`: it fails with `Permission denied` when opened (`cat .env` prints an error, not the contents) and cannot be
   written. Each matching directory is bound over with an empty read-only directory: `ls .ssh`
   lists nothing, and a path inside it reports `No such file or directory`. The run is refused,
   with `nothing ran` and the reason, rather than started unmasked, when the scan cannot finish:
   more than 128 masks, more than 1,000,000 entries (the refusal names the top-level directory with the most entries), nesting past 64 directories, a name that is not UTF-8 and matches the list, or a symbolic link whose own name
-  matches the list (remove or rename it). A non-secret directory the scan cannot list (permission denied) does not refuse: it is bound over with the empty read-only directory like a secret one, so it looks empty and counts toward the 128 masks (issue #581). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them` (a count only, never names). Not covered:
+  matches the list (remove or rename it), or a root `.git` that is a symbolic link (issue #622;
+  replace it with a real directory or gitfile). A non-secret directory the scan cannot list (permission denied) does not refuse: it is bound over with the empty read-only directory like a secret one, so it looks empty and counts toward the 128 masks (issue #581). With more than 128 masks, remove or rename them, or move them out of the Coding Workspace. A link to a masked file fails the same way. When a run has at least one mask, its result carries one line, `note: N secret file(s)/directory(ies) are hidden in this sandbox and are not readable: a hidden file fails with Permission denied and a hidden directory looks empty (its contents report No such file or directory); they need the owner, do not retry on the host to read them` (a count only, never names). A run that fails, or one that names `git` and succeeds, also
+  carries a note that git history is not available in the sandbox and that the chat git
+  tools should be used instead (issue #622). Not covered:
   a file the command creates during the run; an `escalate: true` run, which is on the host and
   unmasked (its card says it runs outside the sandbox); a non-secret name hard-linked to a
-  secret, which the read tools also allow; and the workspace's root `.git` directory, which
-  stays read-only and readable, so `.git/config` and committed history stay visible to
-  sandboxed commands, as before this change. `git show <rev>:.env` inside the sandbox can
-  print a secret that was committed and later removed, although the git read tools check the
-  paths they are given against the list. This is a known limit, open for the owner to decide.
+  secret, which the read tools also allow.
   Every capability is dropped (`--cap-drop ALL`), so even as root the sandbox cannot remount
   a read-only bind and write `.git` or the host (#517).
   Env templates (issue #598): a regular file named exactly `.env.example`, `.env.sample` or
