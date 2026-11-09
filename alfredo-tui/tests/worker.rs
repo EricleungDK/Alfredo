@@ -6556,6 +6556,94 @@ fn file_blocks_parse_verbatim_code_and_refuse_truncated_or_missing_blocks() {
     assert!(worker::validate_plan(&binary, &policy).is_err());
 }
 
+/// Issue #636: paths named in worker rejections never carry raw Unicode format
+/// characters (Cf); they show as `<U+XXXX>` like every other untrusted text.
+fn shown_policy() -> WorkPolicy {
+    WorkPolicy {
+        files: vec!["calc.py".into(), "notes.txt".into()],
+        check: vec!["true".into()],
+    }
+}
+
+fn plan_of(path: &str) -> FilePlan {
+    FilePlan {
+        files: vec![FileEdit {
+            path: path.into(),
+            content: "x\n".into(),
+        }],
+    }
+}
+
+#[test]
+fn unapproved_path_with_format_characters_is_shown_as_code_points() {
+    let policy = shown_policy();
+    for (path, shown) in [
+        ("calc\u{200b}.py", "calc<U+200B>.py"),
+        ("src/a\u{202e}gnp.exe", "src/a<U+202E>gnp.exe"),
+        ("t\u{e0041}.py", "t<U+E0041>.py"),
+        ("a\u{2066}b.py", "a<U+2066>b.py"),
+    ] {
+        let err = worker::validate_plan(&plan_of(path), &policy).unwrap_err();
+        assert!(err.contains(shown), "{err}");
+        assert!(
+            !err.chars().any(|c| matches!(c,
+                '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                | '\u{e0000}'..='\u{e007f}')),
+            "raw format character in {err:?}"
+        );
+    }
+}
+
+#[test]
+fn unapproved_path_cut_to_200_chars_and_line_break_shows_as_space() {
+    let policy = shown_policy();
+    let long = "a".repeat(300);
+    let err = worker::validate_plan(&plan_of(&long), &policy).unwrap_err();
+    assert!(
+        err.contains(&"a".repeat(200)) && !err.contains(&"a".repeat(201)),
+        "{err}"
+    );
+    let err = worker::validate_plan(&plan_of("x\ny.py"), &policy).unwrap_err();
+    assert!(err.contains("Returned unapproved file x y.py;"), "{err}");
+}
+
+#[test]
+fn parse_failures_show_format_characters_in_paths_as_code_points() {
+    let raw = |text: &str| {
+        text.chars().any(|c| {
+            matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                | '\u{e0000}'..='\u{e007f}')
+        })
+    };
+    let policy = shown_policy();
+    let current = |_: &str| Some("a\n".to_string());
+    let cases: Vec<(String, &str)> = vec![
+        // truncated FILE
+        ("=== FILE: src/a\u{202E}gnp.exe ===\nx\n".into(), "<U+202E>"),
+        // truncated EDIT
+        ("=== EDIT: a\u{200b}.py ===\n".into(), "<U+200B>"),
+        // malformed FILE (nested marker)
+        (
+            "=== FILE: a\u{2066}.py ===\nx\n=== FILE: b.py ===\n".into(),
+            "<U+2066>",
+        ),
+        // malformed EDIT (no pairs)
+        ("=== EDIT: a\u{e0041}.py ===\n=== END EDIT ===\n".into(), "<U+E0041>"),
+        // FILE and EDIT for the same path
+        (
+            "=== FILE: a\u{200d}.py ===\nx\n=== END FILE ===\n=== EDIT: a\u{200d}.py ===\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n=== END EDIT ===\n".into(),
+            "<U+200D>",
+        ),
+    ];
+    for (answer, shown) in cases {
+        let err = worker::resolve_answer(&answer, &policy, &current).unwrap_err();
+        assert!(err.contains(shown), "{err}");
+        assert!(!raw(&err), "raw format character in {err:?}");
+    }
+    let err = worker::parse_answer("=== FILE: src/a\u{202E}gnp.exe ===\nx\n").unwrap_err();
+    assert!(err.contains("<U+202E>") && !raw(&err), "{err}");
+}
+
 /// EDIT blocks (issue #366): `=== EDIT: path ===` with SEARCH/REPLACE pairs.
 fn edit_block(path: &str, pairs: &[(&str, &str)]) -> String {
     let body: String = pairs

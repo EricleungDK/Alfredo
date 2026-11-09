@@ -53,8 +53,10 @@ fn end_marker(line: &str) -> bool {
     line.trim_end() == FILE_END
 }
 
-fn shown_path(path: &str) -> String {
-    crate::dashboard::single_line(path)
+/// A path as shown in a rejection: one line, Unicode format characters as `<U+XXXX>`,
+/// at most 200 characters.
+pub(crate) fn shown_path(path: &str) -> String {
+    crate::dashboard::single_line_visible(path)
         .chars()
         .take(200)
         .collect()
