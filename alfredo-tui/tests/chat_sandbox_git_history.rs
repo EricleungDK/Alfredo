@@ -7,6 +7,7 @@ use alfredo_tui::{chat_tools, model::ToolCall};
 use serde_json::json;
 use std::{
     fs,
+    ops::Deref,
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
@@ -16,16 +17,32 @@ static ID: AtomicU64 = AtomicU64::new(0);
 
 const SECRET: &str = "s3cr3t";
 
-/// A fresh canonical directory for one test, removed by the caller.
-fn workspace(tag: &str) -> PathBuf {
+/// A fresh canonical directory for one test. It is removed when the test ends, pass or
+/// fail, so a failed assertion leaves no fixture behind.
+struct Workspace(PathBuf);
+
+impl Deref for Workspace {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn workspace(tag: &str) -> Workspace {
     let root = std::env::temp_dir().join(format!(
         "alfredo-hist-{tag}-{}-{}",
         std::process::id(),
         ID.fetch_add(1, Ordering::Relaxed)
     ));
-    let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
-    root.canonicalize().unwrap()
+    Workspace(root.canonicalize().unwrap())
 }
 
 /// Runs `git` in `root` with the fixture settings the runbook requires (no background gc or
@@ -83,7 +100,6 @@ fn a_committed_then_removed_secret_is_not_readable_from_git_history_in_the_sandb
     git(&root, &["init", "-q"]);
     commit_then_remove_secret(&root);
     let out = run(&root, "cat .env; git show HEAD~1:.env; echo END");
-    let _ = fs::remove_dir_all(&root);
     assert!(out.contains("END"), "the command did not run: {out}");
     assert!(
         !out.contains(SECRET),
@@ -97,7 +113,6 @@ fn git_log_patch_does_not_show_a_removed_secret_in_the_sandbox() {
     git(&root, &["init", "-q"]);
     commit_then_remove_secret(&root);
     let out = run(&root, "git log -p --all; echo END");
-    let _ = fs::remove_dir_all(&root);
     assert!(out.contains("END"), "the command did not run: {out}");
     assert!(
         !out.contains(SECRET),
@@ -126,7 +141,6 @@ fn a_secret_blob_is_not_readable_by_id_in_the_sandbox() {
             "{command}: a removed secret blob was readable: {out}"
         );
     }
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -153,7 +167,6 @@ fn a_stash_holding_a_secret_is_not_readable_in_the_sandbox() {
             "{command}: a stashed secret was readable: {out}"
         );
     }
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -165,7 +178,6 @@ fn a_linked_worktree_does_not_show_its_common_repository_history_in_the_sandbox(
     git(&main, &["worktree", "add", "-q", "-b", "wt", "../wt"]);
     let wt = base.join("wt");
     let out = run(&wt, "git show HEAD~1:.env; git log -p --all; echo END");
-    let _ = fs::remove_dir_all(&base);
     assert!(out.contains("END"), "the command did not run: {out}");
     assert!(
         !out.contains(SECRET),
@@ -207,7 +219,6 @@ fn git_under_a_parent_repository_cannot_reach_the_parent_history() {
         &ws,
         "git rev-parse --git-dir; git log -p --all; git show HEAD~1:.env; echo END",
     );
-    let _ = fs::remove_dir_all(&parent);
     assert!(own.contains("END"), "the command did not run: {own}");
     assert!(!own.contains(SECRET), "a parent repository leaked: {own}");
     assert!(
@@ -248,7 +259,6 @@ fn an_owner_git_directory_is_left_unchanged_by_sandboxed_commands() {
             "{command}: {out}"
         );
     }
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// Issue #622: the owner's gitfile in a linked worktree is hidden too, and the repository it
@@ -278,7 +288,6 @@ fn an_owner_gitfile_is_left_unchanged_by_sandboxed_commands() {
             "{command}: {out}"
         );
     }
-    let _ = fs::remove_dir_all(&base);
 }
 
 /// Issue #622: a `.git` symbolic link to another repository's git directory is not followed
@@ -296,8 +305,6 @@ fn a_root_git_symlink_to_another_repository_refuses_the_run() {
         &root,
         "git log -p --all; git show HEAD~1:.env; cat .git/config; echo END",
     );
-    let _ = fs::remove_dir_all(&root);
-    let _ = fs::remove_dir_all(&other);
     assert!(out.starts_with("error: "), "the run was not refused: {out}");
     assert!(!out.contains("END"), "the command ran: {out}");
     assert!(
@@ -313,7 +320,6 @@ fn a_successful_git_command_says_git_history_is_hidden_in_the_sandbox() {
     let root = workspace("git-note");
     git(&root, &["init", "-q"]);
     let out = run(&root, "git --version; echo END");
-    let _ = fs::remove_dir_all(&root);
     assert!(out.contains("END"), "the command did not run: {out}");
     assert!(
         out.contains("git history and git commands are not available in this sandbox"),
