@@ -2113,7 +2113,8 @@ Approval. Arguments: `command` (required, at most 8 KiB), `cwd` (relative direct
 default the repository root; same confinement as the read tools), `escalate` (boolean,
 default false), `timeout_seconds` (1–600, default 120).
 
-- **Sandboxed (default).** Runs in the same bubblewrap Sandbox as worker checks: network
+- **Sandboxed (default).** Runs in the same bubblewrap Sandbox as worker checks, except that
+  worker checks bind the workspace's `.git` read-only and this run hides it: network
   off, the Coding Workspace writable, the root `.git` hidden, system roots read-only,
   `HOME=/tmp`, tools under `/usr` and `/bin`. The root `.git` is never mounted, not even
   read-only (issue #622): its object store, its config and a linked worktree's shared Git
