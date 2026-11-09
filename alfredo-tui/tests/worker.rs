@@ -677,7 +677,19 @@ async fn run_with_calc_of(bytes: usize) -> (worker::Evidence, String) {
 }
 
 async fn run_with_file_of(name: &str, bytes: usize) -> (worker::Evidence, String) {
+    run_with_files(name, bytes, None).await
+}
+
+/// Like `run_with_file_of`, optionally also giving the approved `notes.txt` that many bytes.
+async fn run_with_files(
+    name: &str,
+    bytes: usize,
+    notes: Option<usize>,
+) -> (worker::Evidence, String) {
     let fixture = Fixture::new();
+    if let Some(notes) = notes {
+        fs::write(fixture.workspace.join("notes.txt"), "n".repeat(notes)).unwrap();
+    }
     let mut text = "x = 1\n".repeat(bytes / 6);
     text.push_str(&"#".repeat(bytes - text.len()));
     assert_eq!(text.len(), bytes);
@@ -712,6 +724,26 @@ async fn run_with_file_of(name: &str, bytes: usize) -> (worker::Evidence, String
         evidence,
         snapshot.tasks[0].run.as_ref().unwrap().detail.clone(),
     )
+}
+
+/// Issue #646: the runtime check stays as the backstop behind the planning lint, with the
+/// text the lint reuses.
+#[tokio::test]
+async fn approved_files_over_the_context_bound_fail_the_worker_with_the_shared_message() {
+    let (evidence, detail) = run_with_files("calc.py", 50_000, Some(50_000)).await;
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::FILE_TOO_LARGE),
+        "{detail}"
+    );
+    assert_eq!(
+        detail,
+        "Approved files total 98 KiB; workers can read up to 96 KiB of approved files. Approve fewer or smaller files, or edit them by hand."
+    );
+    assert_eq!(
+        worker::context_too_large(100_000),
+        "Approved files total 98 KiB; workers can read up to 96 KiB of approved files. Approve fewer or smaller files, or edit them by hand."
+    );
 }
 
 #[tokio::test]

@@ -1517,7 +1517,7 @@ fn oversized_approved_set(max_repairs: u32) {
     assert_eq!(status.repairs, 0);
     let report = autopilot.report().unwrap();
     assert!(report.contains("Approved files total"), "{report}");
-    assert!(report.contains("Repairs   0"), "{report}");
+    assert!(report.contains("Planning failed 3 times"), "{report}");
     assert!(!report.contains("larger model"), "{report}");
     assert!(!report.contains("repair budget exhausted"), "{report}");
     assert_eq!(
