@@ -1989,12 +1989,21 @@ fn reentrant_run_names_the_dependent_task_when_it_is_the_one_that_stopped() {
 #[test]
 fn repair_after_a_too_large_stop_does_not_resume_the_loop() {
     let fixture = Fixture::new();
-    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    // The planning lint (baseline sizes) passes both tasks; task 1 then grows a.py, so task
+    // 2's approved set passes the 96 KiB context bound and stops at the worker's own
+    // backstop (issue #646).
+    commit_files(&fixture, &[("a.py", 10_000), ("b.py", 42_000)]);
     let server = Server::new(|request, _| {
         if planner(request) {
-            return files_plan(&["a.py", "b.py"]);
+            return json!({"tasks": [
+                {"title": "Grow a.py", "acceptance": ["a.py is larger"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["a.py"], "check": check("print(1)")}},
+                {"title": "Edit a.py again", "acceptance": ["a.py is edited"], "model": "fixture",
+                 "dependencies": [1], "policy": {"files": ["a.py", "b.py"], "check": check("print(1)")}},
+            ]})
+            .to_string();
         }
-        good_calc()
+        files("a.py", &format!("{}\n", "#".repeat(58_000)))
     });
     let runtime = Runtime::new().unwrap();
     let mut control = control(&fixture, &server, &runtime);
@@ -2010,7 +2019,13 @@ fn repair_after_a_too_large_stop_does_not_resume_the_loop() {
         finished,
     );
     assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
-    let repair = owner_repair(&mut control, &runtime, 1, "again");
+    let evidence: alfredo_tui::worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(2).unwrap()).unwrap();
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(alfredo_tui::worker::FILE_TOO_LARGE)
+    );
+    let repair = owner_repair(&mut control, &runtime, 2, "again");
     for _ in 0..80 {
         control.poll();
         assert!(autopilot.tick(&runtime, &mut control).is_none());
