@@ -78,6 +78,7 @@
           "overhead_s": {"type": ["number", "null"], "minimum": 0},
           "ttft_ms": {"type": ["number", "null"], "minimum": 0},
           "rss_kb": {"type": ["integer", "null"], "minimum": 0},
+          "rss_anon_kb": {"type": ["integer", "null"], "minimum": 0},
           "exit_code": {"type": ["integer", "null"]},
           "panic": {"type": "boolean"},
           "unavailable": {"type": "object", "additionalProperties": {"type": "string"}},
