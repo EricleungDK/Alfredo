@@ -259,10 +259,26 @@ fn an_owner_git_directory_is_left_unchanged_by_sandboxed_commands() {
             "{command}: {out}"
         );
     }
+    // The #522 guarantees hold with an owner's `.git` too: none of these may succeed.
+    for command in [
+        "git init -q . ; echo rc=$?",
+        "mkdir .git ; echo rc=$?",
+        "ln -s /nonexistent .git ; echo rc=$?",
+        "echo x > .git/HEAD ; echo rc=$?",
+    ] {
+        let out = run(&root, command);
+        assert!(
+            out.contains("rc=") && !out.contains("rc=0"),
+            "{command} succeeded: {out}"
+        );
+    }
+    assert_eq!(fs::read_to_string(root.join(".git/HEAD")).unwrap(), head);
 }
 
 /// Issue #622: the owner's gitfile in a linked worktree is hidden too, and the repository it
-/// points to is left unchanged by sandboxed commands.
+/// points to is left unchanged by sandboxed commands. The gitfile is bound over with
+/// `/dev/null`, so a write to it may exit 0 and go to `/dev/null`; what must hold is that the
+/// host gitfile is byte-identical and git inside the sandbox still finds no repository.
 #[test]
 fn an_owner_gitfile_is_left_unchanged_by_sandboxed_commands() {
     let base = workspace("owner-gitfile");
@@ -288,6 +304,21 @@ fn an_owner_gitfile_is_left_unchanged_by_sandboxed_commands() {
             "{command}: {out}"
         );
     }
+    for command in [
+        "echo 'gitdir: /tmp/x' > .git ; echo rc=$?",
+        "git init -q . ; echo rc=$?",
+        "mkdir .git ; echo rc=$?",
+        "git log -p --all ; echo rc=$?",
+    ] {
+        let out = run(&wt, command);
+        assert!(
+            out.contains("rc=") && !out.contains("rc=0"),
+            "{command} succeeded: {out}"
+        );
+    }
+    let found = run(&wt, "git rev-parse --git-dir ; echo rc=$?");
+    assert!(found.contains("not a git repository"), "{found}");
+    assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), gitfile);
 }
 
 /// Issue #622: a `.git` symbolic link to another repository's git directory is not followed
@@ -323,4 +354,18 @@ fn a_successful_git_command_is_not_told_that_git_is_unavailable() {
     let out = run(&root, "git --version; echo END");
     assert!(out.contains("END"), "the command did not run: {out}");
     assert!(!out.contains("git commands are not available"), "{out}");
+}
+
+/// Issue #622: a sandboxed git command that fails carries the guidance to use the chat git
+/// tools, because git history is not available in the sandbox (the failure note).
+#[test]
+fn a_failing_git_command_points_to_the_chat_git_tools() {
+    let root = workspace("git-fail");
+    git(&root, &["init", "-q"]);
+    let out = run(&root, "git log");
+    assert!(out.starts_with("exit code 128"), "{out}");
+    assert!(
+        out.contains("use the git_status, git_branch, git_log and git_diff tools"),
+        "{out}"
+    );
 }
