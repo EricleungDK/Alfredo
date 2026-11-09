@@ -394,6 +394,12 @@ pub struct Session {
     key_times: (Option<std::time::Instant>, Option<std::time::Instant>),
 }
 
+/// True when the submitted text is exactly the `/scope-clear` command.
+#[must_use]
+pub fn is_scope_clear(text: &str) -> bool {
+    text == "/scope-clear"
+}
+
 /// Notice for a `/scope-clear` attempt. `Ok` means the Wayfinder flow was left and the
 /// draft is consumed; `Err` keeps the text visible as a rejected draft (issue #642).
 pub fn scope_clear_outcome<E: std::fmt::Display>(

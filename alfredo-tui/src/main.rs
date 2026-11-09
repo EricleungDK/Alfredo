@@ -2156,7 +2156,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         .into();
                                 continue;
                             }
-                            if text == "/scope-clear" {
+                            if alfredo_tui::model::is_scope_clear(&text) {
                                 let cleared = work
                                     .tasks
                                     .store()

@@ -1,4 +1,4 @@
-use alfredo_tui::model::{scope_clear_outcome, App, Session, MAX_DRAFT};
+use alfredo_tui::model::{is_scope_clear, scope_clear_outcome, App, Session, MAX_DRAFT};
 use alfredo_tui::ui;
 use ratatui::{backend::TestBackend, Terminal};
 use unicode_width::UnicodeWidthStr;
@@ -276,6 +276,21 @@ fn scope_clear_without_a_flow_is_rejected_and_the_next_command_replaces_it() {
         }
         assert!(!session.replace_pending(), "edit {edit}");
         assert!(session.draft.starts_with("/scope-cle"), "edit {edit}");
+    }
+}
+
+#[test]
+fn only_the_exact_scope_clear_command_is_dispatched_as_scope_clear() {
+    assert!(is_scope_clear("/scope-clear"));
+    for other in [
+        "/scope",
+        "/scope-clearX",
+        "/scope-clear ",
+        "scope-clear",
+        "/foo",
+        "",
+    ] {
+        assert!(!is_scope_clear(other), "{other:?}");
     }
 }
 
