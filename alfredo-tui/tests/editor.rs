@@ -1,4 +1,4 @@
-use alfredo_tui::model::{App, Session, MAX_DRAFT};
+use alfredo_tui::model::{scope_clear_outcome, App, Session, MAX_DRAFT};
 use alfredo_tui::ui;
 use ratatui::{backend::TestBackend, Terminal};
 use unicode_width::UnicodeWidthStr;
@@ -250,6 +250,43 @@ fn newline_insert_respects_the_draft_limit_and_motions_clear_a_rejection() {
         }
         assert!(!session.replace_pending(), "edit {edit}");
     }
+}
+
+#[test]
+fn scope_clear_without_a_flow_is_rejected_and_the_next_command_replaces_it() {
+    let mut session = Session::new("fixture".into());
+    session.insert("/scope-clear");
+    let notice = scope_clear_outcome(Err("No Wayfinder flow to clear"), &mut session);
+    assert_eq!(notice, "/scope-clear: No Wayfinder flow to clear");
+    assert_eq!(session.draft, "/scope-clear");
+    assert!(session.replace_pending());
+    for ch in "/foo".chars() {
+        session.type_char(ch);
+    }
+    assert_eq!(session.draft, "/foo");
+
+    for edit in 0..2 {
+        let mut session = Session::new("fixture".into());
+        session.insert("/scope-clear");
+        scope_clear_outcome(Err("No Wayfinder flow to clear"), &mut session);
+        if edit == 0 {
+            session.left();
+        } else {
+            session.backspace();
+        }
+        assert!(!session.replace_pending(), "edit {edit}");
+        assert!(session.draft.starts_with("/scope-cle"), "edit {edit}");
+    }
+}
+
+#[test]
+fn scope_clear_with_a_flow_clears_the_draft_and_says_so() {
+    let mut session = Session::new("fixture".into());
+    session.insert("/scope-clear");
+    let notice = scope_clear_outcome(Ok::<(), String>(()), &mut session);
+    assert!(notice.starts_with("Left Wayfinder: "), "{notice}");
+    assert_eq!(session.draft, "");
+    assert!(!session.replace_pending());
 }
 
 #[test]
