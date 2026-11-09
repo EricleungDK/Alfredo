@@ -52,6 +52,14 @@ class EvalSmoke(unittest.TestCase):
                 self.assertEqual(len(chat_tasks), document['metrics'][key]['secondary']['chat']['trials'], key)
             for trial in document['trials']:
                 self.assertEqual(0, trial['exit_code'], trial['task'])
+            go_trials = [t for t in document['trials'] if t['mode'] != 'chat']
+            for trial in go_trials:
+                self.assertIsInstance(trial['rss_anon_kb'], int, trial['task'])
+                self.assertGreater(trial['rss_anon_kb'], 0, trial['task'])
+                self.assertLessEqual(trial['rss_anon_kb'], trial['rss_kb'], trial['task'])
+            anon = document['metrics']['M16']['secondary']['rss_anon_kb']
+            self.assertIsInstance(anon, (int, float))
+            self.assertGreater(anon, 0)
                 self.assertFalse(trial['panic'], trial['task'])
             self.assertIsNotNone(document['metrics']['M6']['value'], 'fixture token counts are synthetic but present')
             self.assertEqual(0, document['metrics']['M12']['value'])
