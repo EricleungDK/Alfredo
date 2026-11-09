@@ -172,7 +172,7 @@ const SANDBOX_NOTE: &str = "note: ran sandboxed (network off; only the Coding Wo
 pub const RUN_COMMAND: Tool = Tool {
     name: "run_command",
     tier: Tier::Mutating,
-    description: "Run one shell command (sh -c) in the Coding Workspace, such as tests or a build. Needs the owner's approval each call; the owner sees the exact command and cwd. Runs sandboxed by default: network off, only the working tree writable, and the root .git hidden, so git history and git commands do not work there: use the git_status, git_branch, git_log and git_diff tools instead. Set escalate: true only when the command needs the network or the real host (git push, installing packages); the owner sees a host warning and may deny. Returns the exit code and output.",
+    description: "Run one shell command (sh -c) in the Coding Workspace, such as tests or a build. Needs the owner's approval each call; the owner sees the exact command and cwd. Runs sandboxed by default: network off, only the working tree writable, root .git hidden. Set escalate: true only when the command needs the network or the real host (git push, installing packages); the owner sees a host warning and may deny. Returns the exit code and output.",
     parameters: || {
         json!({
             "type": "object",
