@@ -216,17 +216,25 @@ pub fn lint(
                 "Task {number} lists no policy files; every task must write at least one file."
             ));
         }
+        let mut context_bytes = 0u64;
         for file in &step.policy.files {
-            if let Some(bytes) =
-                size(file).filter(|bytes| *bytes > crate::worker::MAX_APPROVED_FILE)
-            {
-                findings.push(crate::worker::file_too_large(file, bytes));
+            match size(file) {
+                Some(bytes) if bytes > crate::worker::MAX_APPROVED_FILE => {
+                    findings.push(crate::worker::file_too_large(file, bytes));
+                }
+                Some(bytes) => {
+                    context_bytes += crate::worker::framed_file_len(file, bytes);
+                }
+                None => {}
             }
             if runtime_data(file) && !tracked(file) {
                 findings.push(format!(
                     "Task {number} lists runtime data file {file}. Files a program writes when it runs become tracked work, and a later check that rewrites them is refused as modifying files outside approved paths. Do not list it: have the code and tests create it in a temp dir (or have the check use a temp path) and list only source, test and config files."
                 ));
             }
+        }
+        if crate::worker::exceeds_source_context(context_bytes) {
+            findings.push(crate::worker::context_too_large(context_bytes as usize));
         }
         if let Some(name) = step.policy.check.first() {
             if name.chars().any(char::is_whitespace) {

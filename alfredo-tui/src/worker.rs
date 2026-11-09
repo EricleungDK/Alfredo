@@ -988,7 +988,28 @@ pub fn too_large_advice(detail: &str) -> Option<(&str, &str)> {
     Some((reason, next))
 }
 
-fn context_too_large(bytes: usize) -> String {
+/// Bytes the worker's request holds for one approved file: the `FILE {path}`
+/// header and its newlines around `content_len` bytes of content. Shared with
+/// the planning lint so both compute the same total.
+pub fn framed_file_len(path: &str, content_len: u64) -> u64 {
+    let mut frame = String::new();
+    push_file_frame(&mut frame, path, "");
+    frame.len() as u64 + content_len
+}
+
+/// Appends one approved file to the worker's source context.
+fn push_file_frame(context: &mut String, path: &str, content: &str) {
+    let _ = write!(context, "\nFILE {path}\n{content}\n");
+}
+
+/// Whether `bytes` of approved-file context exceeds what a worker reads.
+pub fn exceeds_source_context(bytes: u64) -> bool {
+    bytes > SOURCE_CONTEXT as u64
+}
+
+/// The one message a worker run and the planning lint share for an approved
+/// file set beyond the source context bound.
+pub fn context_too_large(bytes: usize) -> String {
     format!(
         "Approved files total {} KiB; workers can read up to {} KiB of approved files. Approve fewer or smaller files, or edit them by hand.",
         kib(bytes as u64),
@@ -1998,11 +2019,11 @@ async fn perform(
         } else {
             "(new file)".into()
         };
-        let _ = write!(context, "\nFILE {path}\n{content}\n");
+        push_file_frame(&mut context, path, &content);
         if file.exists() {
             baselines.insert(path.clone(), content);
         }
-        if context.len() > SOURCE_CONTEXT {
+        if exceeds_source_context(context.len() as u64) {
             evidence.failure_code = Some(FILE_TOO_LARGE.into());
             return Err(context_too_large(context.len()));
         }
