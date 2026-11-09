@@ -168,9 +168,6 @@ const ESCALATE_HINT: &str = "note: ran sandboxed (network off; only the Coding W
 /// [`ESCALATE_HINT`] without its advice, for a run that hides secret files: the hidden-files
 /// note says not to retry on the host, so the two must not give opposite next steps.
 const SANDBOX_NOTE: &str = "note: ran sandboxed (network off; only the Coding Workspace is writable; the workspace's .git is hidden, so git history and git commands are not available here: use the git_status, git_branch, git_log and git_diff tools instead).";
-/// Shown after a sandboxed run that names `git` and exits 0, which `git` in the sandbox
-/// usually does not (issue #622).
-const GIT_NOTE: &str = "note: git history and git commands are not available in this sandbox (the workspace's .git is hidden): use the git_status, git_branch, git_log and git_diff tools instead.";
 
 pub const RUN_COMMAND: Tool = Tool {
     name: "run_command",
@@ -381,7 +378,8 @@ struct Hold(PathBuf);
 /// bubblewrap can bind it read-only and `git init`, `mkdir .git` or `ln -s` inside the
 /// sandbox fail with the file in place (issue #522). When `git` is absent, this writes the
 /// placeholder; when it is already a placeholder held by a concurrent run, this joins that
-/// hold. `None` when the owner's own `.git` is there, which is bound as before.
+/// hold. `None` when the owner's own `.git` is there; the caller hides that entry instead
+/// (`secret_masks::git_mask`, issue #622), and never binds it.
 fn hold_placeholder(git: &Path) -> Result<Option<Hold>, String> {
     let mut held = PLACEHOLDERS
         .lock()
@@ -668,14 +666,6 @@ fn toolchain_binds(home: Option<&Path>) -> Toolchain {
     toolchain
 }
 
-/// Whether `command` names `git` as a word (`git log`, `cd sub && /usr/bin/git status`), so
-/// a sandboxed result can say that git is not available there (issue #622).
-fn names_git(command: &str) -> bool {
-    command
-        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
-        .any(|word| word == "git")
-}
-
 /// Run on the host (owner-approved escalation): the owner's environment, network on.
 fn on_host(plan: &Plan, stop: &Stop) -> Result<String, String> {
     let cwd = plan.cwd.to_string_lossy().into_owned();
@@ -770,9 +760,6 @@ fn report(plan: &Plan, ran: Ran, hidden: usize) -> Result<String, String> {
                 } else {
                     ESCALATE_HINT
                 });
-            } else if !plan.escalate && names_git(&plan.command) {
-                text.push('\n');
-                text.push_str(GIT_NOTE);
             }
             if hidden > 0 {
                 text.push('\n');
