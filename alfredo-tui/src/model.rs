@@ -406,7 +406,10 @@ pub fn scope_clear_outcome<E: std::fmt::Display>(
             session.clear_draft();
             "Left Wayfinder: chat tools are back; scope receipts are kept (/scope)".into()
         }
-        Err(error) => format!("/scope-clear: {error}"),
+        Err(error) => {
+            session.reject_draft();
+            format!("/scope-clear: {error}")
+        }
     }
 }
 
