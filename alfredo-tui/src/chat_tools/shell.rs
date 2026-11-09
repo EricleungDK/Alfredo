@@ -1,14 +1,14 @@
 //! Mutating tier (issue #236, ADR 0004): run_command runs one shell command after
 //! owner Approval. By default it runs in the bubblewrap Sandbox shared with worker
-//! checks ([`crate::worker::sandbox_argv`]): Coding Workspace writable, `.git` and
-//! system roots read-only, network off. `escalate: true` runs it on the host
-//! (network on) behind a visibly different card. Both run in their own process
+//! checks ([`crate::worker::sandbox_argv`]): Coding Workspace writable, the root `.git`
+//! hidden (issue #622), system roots read-only, network off. `escalate: true` runs it on
+//! the host (network on) behind a visibly different card. Both run in their own process
 //! group: a timeout kills the whole tree; output is capped. Secret files and directories
 //! in the workspace are masked inside the sandbox (issue #469, [`secret_masks`]); a run
 //! that cannot mask them all is refused. A sandbox that cannot start is reported with a
 //! suggestion to escalate; nothing is retried on the host.
 use super::secret_masks;
-use super::{display, git_read, needed_terminal, resolve, text_arg, Tier, Tool};
+use super::{display, needed_terminal, resolve, text_arg, Tier, Tool};
 use crate::execution::{
     self, ControlSignal, ExecutionAuthority, ExecutionCallbacks, ExecutionLimits, ExecutionRequest,
     ExecutionSandbox, ProcessOutcomeStatus, RustExecutionProvider,
@@ -164,15 +164,18 @@ const OUTPUT_LIMIT: usize = 1024 * 1024;
 /// Shown to the model when a host command fails because it wanted a terminal prompt.
 const TERMINAL_HINT: &str = "note: host commands run without a terminal, so a command that needs a terminal prompt (sudo password, ssh host key or passphrase, git credentials) cannot run here; use ssh-agent or a credential helper, or ask the owner to run it themselves.";
 /// Shown to the model when a sandboxed command fails.
-const ESCALATE_HINT: &str = "note: ran sandboxed (network off; only the Coding Workspace is writable; .git and tools outside /usr are not available). If it failed for that reason, call run_command again with escalate: true; the owner must approve running it on the host.";
+const ESCALATE_HINT: &str = "note: ran sandboxed (network off; only the Coding Workspace is writable; the workspace's .git is hidden and tools outside /usr are not available; git history and git commands do not work here, so use the git_status, git_branch, git_log and git_diff tools instead). If it failed because the command needs the network or a tool outside /usr, call run_command again with escalate: true (not to read git history); the owner must approve running it on the host.";
 /// [`ESCALATE_HINT`] without its advice, for a run that hides secret files: the hidden-files
 /// note says not to retry on the host, so the two must not give opposite next steps.
-const SANDBOX_NOTE: &str = "note: ran sandboxed (network off; only the Coding Workspace is writable; .git and tools outside /usr are not available).";
+const SANDBOX_NOTE: &str = "note: ran sandboxed (network off; only the Coding Workspace is writable; the workspace's .git is hidden, so git history and git commands are not available here: use the git_status, git_branch, git_log and git_diff tools instead).";
+/// Shown after a sandboxed run that names `git` and exits 0, which `git` in the sandbox
+/// usually does not (issue #622).
+const GIT_NOTE: &str = "note: git history and git commands are not available in this sandbox (the workspace's .git is hidden): use the git_status, git_branch, git_log and git_diff tools instead.";
 
 pub const RUN_COMMAND: Tool = Tool {
     name: "run_command",
     tier: Tier::Mutating,
-    description: "Run one shell command (sh -c) in the Coding Workspace, such as tests or a build. Needs the owner's approval each call; the owner sees the exact command and cwd. Runs sandboxed by default: network off, only the working tree writable, .git read-only. Set escalate: true only when the command needs the network or the real host (git push, installing packages); the owner sees a host warning and may deny. Returns the exit code and output.",
+    description: "Run one shell command (sh -c) in the Coding Workspace, such as tests or a build. Needs the owner's approval each call; the owner sees the exact command and cwd. Runs sandboxed by default: network off, only the working tree writable, and the root .git hidden, so git history and git commands do not work there: use the git_status, git_branch, git_log and git_diff tools instead. Set escalate: true only when the command needs the network or the real host (git push, installing packages); the owner sees a host warning and may deny. Returns the exit code and output.",
     parameters: || {
         json!({
             "type": "object",
@@ -476,24 +479,34 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
     let hidden = masks.len();
     let mounts = masks.mounts().map_err(hide_refusal)?;
     let git = root.join(".git");
+    let git_text = git.to_string_lossy().into_owned();
     // Held until this function returns, on every path, so the placeholder is removed after
     // the run (issue #522).
     let hold = hold_placeholder(&git).map_err(|error| {
         format!("the Coding Workspace's .git could not be reserved for the sandbox ({error}); nothing ran")
     })?;
-    let gitfile = match hold {
-        Some(_) => Some(git.to_string_lossy().into_owned()),
-        None => git.exists().then(|| git.to_string_lossy().into_owned()),
+    // The owner's root `.git` is never bound into the sandbox: its object store, config and a
+    // linked worktree's common directory hold secrets that were committed and then removed
+    // (issue #622). It is hidden instead, so git there finds no repository at all.
+    let git_mask = match hold {
+        Some(_) => None,
+        None => Some(
+            secret_masks::git_mask(&git)
+                .map_err(|error| {
+                    format!("the Coding Workspace's .git could not be hidden from the sandbox ({error}); nothing ran")
+                })?
+                .ok_or("the Coding Workspace's .git changed while the run was prepared; nothing ran")?,
+        ),
     };
+    // The placeholder this run holds, when there is no `.git` (issue #522), is bound over
+    // itself read-only.
+    let placeholder = hold.as_ref().map(|_| git_text.clone());
     let mut argv =
-        crate::worker::sandbox_argv(&root_text, gitfile.as_deref(), &limits(plan.timeout));
+        crate::worker::sandbox_argv(&root_text, placeholder.as_deref(), &limits(plan.timeout));
     argv[0] = bwrap.to_string();
-    // Read-only extras outside the workspace: a linked worktree's Git directory, and
-    // the owner's offline toolchain (only the entries it needs, see `toolchain_binds`).
+    // Read-only extras outside the workspace: the owner's offline toolchain (only the entries
+    // it needs, see `toolchain_binds`).
     let mut extras: Vec<String> = Vec::new();
-    if hold.is_none() && git.is_file() {
-        extras.extend(git_common_dir(&root));
-    }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let toolchain = toolchain_binds(home.as_deref());
     extras.extend(toolchain.binds.iter().cloned());
@@ -516,6 +529,15 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
             .iter()
             .flat_map(|(source, dest)| ["--ro-bind".to_string(), source.clone(), dest.clone()]),
     );
+    // The root `.git` mask (issue #622) is bound over the writable workspace bind above.
+    let git_pair = git_mask
+        .as_ref()
+        .map(|mask| (mask.source().to_string(), git_text.clone()));
+    binds.extend(
+        git_pair
+            .iter()
+            .flat_map(|(source, dest)| ["--ro-bind".to_string(), source.clone(), dest.clone()]),
+    );
     argv.splice(at..at, binds);
     argv.extend([
         "/bin/sh".into(),
@@ -527,10 +549,11 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<Strin
         cargo_home.clone().unwrap_or_else(|| "-".into()),
         rustup_home.clone().unwrap_or_else(|| "-".into()),
     ]);
-    let readonly: Vec<(String, String)> = gitfile
+    let readonly: Vec<(String, String)> = placeholder
         .iter()
-        .chain(&extras)
         .map(|p| (p.clone(), p.clone()))
+        .chain(git_pair)
+        .chain(extras.iter().map(|p| (p.clone(), p.clone())))
         .chain(mounts.pairs.iter().cloned())
         .collect();
     let mut request = request(
@@ -645,13 +668,12 @@ fn toolchain_binds(home: Option<&Path>) -> Toolchain {
     toolchain
 }
 
-/// The shared Git directory of a linked worktree (holds its per-worktree gitdir too), only
-/// when the workspace's repository verifies as one of its own (issue #359). Nothing when it
-/// does not: the sandbox then has no extra bind and git inside it cannot reach another
-/// repository.
-fn git_common_dir(root: &Path) -> Option<String> {
-    let verified = git_read::verified_git_dir(root, git_read::Config::Hardened).ok()?;
-    verified.common_dir.to_str().map(str::to_string)
+/// Whether `command` names `git` as a word (`git log`, `cd sub && /usr/bin/git status`), so
+/// a sandboxed result can say that git is not available there (issue #622).
+fn names_git(command: &str) -> bool {
+    command
+        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        .any(|word| word == "git")
 }
 
 /// Run on the host (owner-approved escalation): the owner's environment, network on.
@@ -748,6 +770,9 @@ fn report(plan: &Plan, ran: Ran, hidden: usize) -> Result<String, String> {
                 } else {
                     ESCALATE_HINT
                 });
+            } else if !plan.escalate && names_git(&plan.command) {
+                text.push('\n');
+                text.push_str(GIT_NOTE);
             }
             if hidden > 0 {
                 text.push('\n');
