@@ -1,0 +1,371 @@
+//! Issue #622: a sandboxed `run_command` must never read a secret through git's object
+//! store. Before this fix the workspace's root `.git` was bound read-only into the sandbox,
+//! so a secret committed and later removed (or stashed, or only in a linked worktree's
+//! common Git directory) was readable with `git show`, `git log -p`, `git cat-file` or
+//! `git stash show`, although the same file was masked in the working tree (#469).
+use alfredo_tui::{chat_tools, model::ToolCall};
+use serde_json::json;
+use std::{
+    fs,
+    ops::Deref,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+static ID: AtomicU64 = AtomicU64::new(0);
+
+const SECRET: &str = "s3cr3t";
+
+/// A fresh canonical directory for one test. It is removed when the test ends, pass or
+/// fail, so a failed assertion leaves no fixture behind.
+struct Workspace(PathBuf);
+
+impl Deref for Workspace {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn workspace(tag: &str) -> Workspace {
+    let root = std::env::temp_dir().join(format!(
+        "alfredo-hist-{tag}-{}-{}",
+        std::process::id(),
+        ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).unwrap();
+    Workspace(root.canonicalize().unwrap())
+}
+
+/// Runs `git` in `root` with the fixture settings the runbook requires (no background gc or
+/// maintenance that could prune objects mid-test), and returns its standard output.
+fn git(root: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+        ])
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Commits `.env` with the secret, then removes it from the index: the secret is no longer
+/// in HEAD but is still in the object store.
+fn commit_then_remove_secret(root: &Path) {
+    fs::write(root.join(".env"), format!("API_TOKEN={SECRET}\n")).unwrap();
+    git(root, &["add", "-f", ".env"]);
+    git(root, &["commit", "-qm", "oops"]);
+    git(root, &["rm", "-q", "--cached", ".env"]);
+    git(root, &["commit", "-qm", "remove"]);
+}
+
+/// Runs `command` through the chat tool dispatch, as an approved call would.
+fn run(root: &Path, command: &str) -> String {
+    chat_tools::dispatch(
+        root,
+        &ToolCall {
+            name: "run_command".into(),
+            arguments: json!({ "command": command }),
+        },
+    )
+}
+
+#[test]
+fn a_committed_then_removed_secret_is_not_readable_from_git_history_in_the_sandbox() {
+    let root = workspace("repro");
+    git(&root, &["init", "-q"]);
+    commit_then_remove_secret(&root);
+    let out = run(&root, "cat .env; git show HEAD~1:.env; echo END");
+    assert!(out.contains("END"), "the command did not run: {out}");
+    assert!(
+        !out.contains(SECRET),
+        "a committed secret leaked from .git history: {out}"
+    );
+}
+
+#[test]
+fn git_log_patch_does_not_show_a_removed_secret_in_the_sandbox() {
+    let root = workspace("log-patch");
+    git(&root, &["init", "-q"]);
+    commit_then_remove_secret(&root);
+    let out = run(&root, "git log -p --all; echo END");
+    assert!(out.contains("END"), "the command did not run: {out}");
+    assert!(
+        !out.contains(SECRET),
+        "git log -p leaked a removed secret: {out}"
+    );
+}
+
+#[test]
+fn a_secret_blob_is_not_readable_by_id_in_the_sandbox() {
+    let root = workspace("blob");
+    git(&root, &["init", "-q"]);
+    commit_then_remove_secret(&root);
+    let blob = git(&root, &["rev-parse", "HEAD~1:.env"]).trim().to_string();
+    let commands = [
+        format!("git cat-file -p {blob}; echo END"),
+        "git cat-file -p HEAD~1:.env; echo END".to_string(),
+    ];
+    for command in commands {
+        let out = run(&root, &command);
+        assert!(
+            out.contains("END"),
+            "{command}: the command did not run: {out}"
+        );
+        assert!(
+            !out.contains(SECRET),
+            "{command}: a removed secret blob was readable: {out}"
+        );
+    }
+}
+
+#[test]
+fn a_stash_holding_a_secret_is_not_readable_in_the_sandbox() {
+    let root = workspace("stash");
+    git(&root, &["init", "-q"]);
+    fs::write(root.join(".env"), "API_TOKEN=placeholder\n").unwrap();
+    git(&root, &["add", "-f", ".env"]);
+    git(&root, &["commit", "-qm", "base"]);
+    fs::write(root.join(".env"), format!("API_TOKEN={SECRET}\n")).unwrap();
+    git(&root, &["stash", "-q"]);
+    let commands = [
+        "git stash show -p; echo END",
+        "git show refs/stash; echo END",
+    ];
+    for command in commands {
+        let out = run(&root, command);
+        assert!(
+            out.contains("END"),
+            "{command}: the command did not run: {out}"
+        );
+        assert!(
+            !out.contains(SECRET),
+            "{command}: a stashed secret was readable: {out}"
+        );
+    }
+}
+
+#[test]
+fn a_linked_worktree_does_not_show_its_common_repository_history_in_the_sandbox() {
+    let base = workspace("linked");
+    git(&base, &["init", "-q", "-b", "main", "main"]);
+    let main = base.join("main");
+    commit_then_remove_secret(&main);
+    git(&main, &["worktree", "add", "-q", "-b", "wt", "../wt"]);
+    let wt = base.join("wt");
+    let out = run(&wt, "git show HEAD~1:.env; git log -p --all; echo END");
+    assert!(out.contains("END"), "the command did not run: {out}");
+    assert!(
+        !out.contains(SECRET),
+        "a linked worktree leaked its common repository's history: {out}"
+    );
+}
+
+#[test]
+fn git_under_a_parent_repository_cannot_reach_the_parent_history() {
+    let parent = workspace("parent");
+    git(&parent, &["init", "-q"]);
+    commit_then_remove_secret(&parent);
+    let ws = parent.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join("notes.txt"), "plain\n").unwrap();
+    // Variant one: the workspace has no repository of its own.
+    let no_repo = run(
+        &ws,
+        "git rev-parse --git-dir; git log -p --all; git show HEAD~1:.env; echo END",
+    );
+    assert!(
+        no_repo.contains("END"),
+        "the command did not run: {no_repo}"
+    );
+    assert!(
+        !no_repo.contains(SECRET),
+        "a parent repository leaked: {no_repo}"
+    );
+    assert!(
+        !no_repo.contains(&format!("{}/.git", parent.display())),
+        "git found the parent repository: {no_repo}"
+    );
+    // Variant two: the workspace has its own repository.
+    git(&ws, &["init", "-q"]);
+    fs::write(ws.join("notes.txt"), "plain\n").unwrap();
+    git(&ws, &["add", "notes.txt"]);
+    git(&ws, &["commit", "-qm", "own"]);
+    let own = run(
+        &ws,
+        "git rev-parse --git-dir; git log -p --all; git show HEAD~1:.env; echo END",
+    );
+    assert!(own.contains("END"), "the command did not run: {own}");
+    assert!(!own.contains(SECRET), "a parent repository leaked: {own}");
+    assert!(
+        !own.contains(&format!("{}/.git", parent.display())),
+        "git found the parent repository: {own}"
+    );
+}
+
+/// Issue #622: the owner's `.git` is hidden, not bound writable or read-only, so a sandboxed
+/// command cannot replace, move, link or write it. Git's own state stays exactly as it was.
+#[test]
+fn an_owner_git_directory_is_left_unchanged_by_sandboxed_commands() {
+    let root = workspace("owner-untouched");
+    git(&root, &["init", "-q"]);
+    commit_then_remove_secret(&root);
+    let head = fs::read_to_string(root.join(".git/HEAD")).unwrap();
+    let before = git(&root, &["rev-parse", "HEAD"]);
+    for command in [
+        "git init -q . ; echo END",
+        "rm -rf .git ; echo END",
+        "mv .git moved ; echo END",
+        "ln -sfn /nonexistent .git ; echo END",
+        "echo x > .git/HEAD ; echo END",
+    ] {
+        let out = run(&root, command);
+        assert!(
+            out.contains("END"),
+            "{command}: the command did not run: {out}"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".git/HEAD")).unwrap(),
+            head,
+            "{command}: {out}"
+        );
+        assert_eq!(
+            git(&root, &["rev-parse", "HEAD"]),
+            before,
+            "{command}: {out}"
+        );
+    }
+    // The #522 guarantees hold with an owner's `.git` too: none of these may succeed.
+    for command in [
+        "git init -q . ; echo rc=$?",
+        "mkdir .git ; echo rc=$?",
+        "ln -s /nonexistent .git ; echo rc=$?",
+        "echo x > .git/HEAD ; echo rc=$?",
+    ] {
+        let out = run(&root, command);
+        assert!(
+            out.contains("rc=") && !out.contains("rc=0"),
+            "{command} succeeded: {out}"
+        );
+    }
+    assert_eq!(fs::read_to_string(root.join(".git/HEAD")).unwrap(), head);
+}
+
+/// Issue #622: the owner's gitfile in a linked worktree is hidden too, and the repository it
+/// points to is left unchanged by sandboxed commands. The gitfile is bound over with
+/// `/dev/null`, so a write to it may exit 0 and go to `/dev/null`; what must hold is that the
+/// host gitfile is byte-identical and git inside the sandbox still finds no repository.
+#[test]
+fn an_owner_gitfile_is_left_unchanged_by_sandboxed_commands() {
+    let base = workspace("owner-gitfile");
+    git(&base, &["init", "-q", "-b", "main", "main"]);
+    let main = base.join("main");
+    commit_then_remove_secret(&main);
+    git(&main, &["worktree", "add", "-q", "-b", "wt", "../wt"]);
+    let wt = base.join("wt");
+    let gitfile = fs::read_to_string(wt.join(".git")).unwrap();
+    for command in [
+        "rm -f .git ; echo END",
+        "echo 'gitdir: /tmp/x' > .git ; echo END",
+        "mv .git moved ; echo END",
+    ] {
+        let out = run(&wt, command);
+        assert!(
+            out.contains("END"),
+            "{command}: the command did not run: {out}"
+        );
+        assert_eq!(
+            fs::read_to_string(wt.join(".git")).unwrap(),
+            gitfile,
+            "{command}: {out}"
+        );
+    }
+    for command in [
+        "echo 'gitdir: /tmp/x' > .git ; echo rc=$?",
+        "git init -q . ; echo rc=$?",
+        "mkdir .git ; echo rc=$?",
+        "git log -p --all ; echo rc=$?",
+    ] {
+        let out = run(&wt, command);
+        assert!(
+            out.contains("rc=") && !out.contains("rc=0"),
+            "{command} succeeded: {out}"
+        );
+    }
+    let found = run(&wt, "git rev-parse --git-dir ; echo rc=$?");
+    assert!(found.contains("not a git repository"), "{found}");
+    assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), gitfile);
+}
+
+/// Issue #622: a `.git` symbolic link to another repository's git directory is not followed
+/// into that repository. The sandbox cannot hide a link safely, so the run is refused and
+/// nothing runs, and no secret is printed.
+#[test]
+fn a_root_git_symlink_to_another_repository_refuses_the_run() {
+    let other = workspace("symlink-other");
+    git(&other, &["init", "-q"]);
+    commit_then_remove_secret(&other);
+    let root = workspace("symlink-root");
+    fs::write(root.join("notes.txt"), "plain\n").unwrap();
+    std::os::unix::fs::symlink(other.join(".git"), root.join(".git")).unwrap();
+    let out = run(
+        &root,
+        "git log -p --all; git show HEAD~1:.env; cat .git/config; echo END",
+    );
+    assert!(out.starts_with("error: "), "the run was not refused: {out}");
+    assert!(!out.contains("END"), "the command ran: {out}");
+    assert!(
+        !out.contains(SECRET),
+        "a symlinked .git leaked another repository's history: {out}"
+    );
+}
+
+/// Issue #622: a sandboxed git command that succeeds (`git --version` needs no repository)
+/// must not be told that git commands are unavailable: that claim is false for it. The
+/// guidance belongs on the failure path (see `a_failing_git_command_points_to_the_chat_git_tools`).
+#[test]
+fn a_successful_git_command_is_not_told_that_git_is_unavailable() {
+    let root = workspace("git-note");
+    git(&root, &["init", "-q"]);
+    let out = run(&root, "git --version; echo END");
+    assert!(out.contains("END"), "the command did not run: {out}");
+    assert!(!out.contains("git commands are not available"), "{out}");
+}
+
+/// Issue #622: a sandboxed git command that fails carries the guidance to use the chat git
+/// tools, because git history is not available in the sandbox (the failure note).
+#[test]
+fn a_failing_git_command_points_to_the_chat_git_tools() {
+    let root = workspace("git-fail");
+    git(&root, &["init", "-q"]);
+    let out = run(&root, "git log");
+    assert!(out.starts_with("exit code 128"), "{out}");
+    assert!(
+        out.contains("use the git_status, git_branch, git_log and git_diff tools"),
+        "{out}"
+    );
+}
