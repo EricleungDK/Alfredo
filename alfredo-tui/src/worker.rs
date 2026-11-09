@@ -651,10 +651,7 @@ async fn refuse_gitlink_listing(root: &Path, source: &str, args: &[&str]) -> Res
     let Some(path) = first_gitlink(root, args).await? else {
         return Ok(());
     };
-    let path: String = crate::dashboard::single_line(&path)
-        .chars()
-        .take(200)
-        .collect();
+    let path = answer::shown_path(&path);
     Err(format!(
         "Alfredo does not support submodules: {source} contains a gitlink at \"{path}\"; the run is refused. Remove the submodule from the repository and run /go again"
     ))
@@ -894,10 +891,7 @@ pub fn validate_plan(plan: &FilePlan, policy: &WorkPolicy) -> Result<()> {
     }
     let mut unapproved: Vec<String> = Vec::new();
     for file in &plan.files {
-        let path = crate::dashboard::single_line(&file.path)
-            .chars()
-            .take(200)
-            .collect::<String>();
+        let path = answer::shown_path(&file.path);
         if !policy.files.contains(&file.path) && !unapproved.contains(&path) {
             unapproved.push(path);
         }
