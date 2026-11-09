@@ -313,20 +313,14 @@ fn a_root_git_symlink_to_another_repository_refuses_the_run() {
     );
 }
 
-/// Issue #622: a sandboxed command that runs git and succeeds still says that git history
-/// is not available there, so the model uses the chat git tools instead.
+/// Issue #622: a sandboxed git command that succeeds (`git --version` needs no repository)
+/// must not be told that git commands are unavailable: that claim is false for it. The
+/// guidance belongs on the failure path (see `a_failing_git_command_points_to_the_chat_git_tools`).
 #[test]
-fn a_successful_git_command_says_git_history_is_hidden_in_the_sandbox() {
+fn a_successful_git_command_is_not_told_that_git_is_unavailable() {
     let root = workspace("git-note");
     git(&root, &["init", "-q"]);
     let out = run(&root, "git --version; echo END");
     assert!(out.contains("END"), "the command did not run: {out}");
-    assert!(
-        out.contains("git history and git commands are not available in this sandbox"),
-        "{out}"
-    );
-    assert!(
-        out.contains("use the git_status, git_branch, git_log and git_diff tools"),
-        "{out}"
-    );
+    assert!(!out.contains("git commands are not available"), "{out}");
 }
