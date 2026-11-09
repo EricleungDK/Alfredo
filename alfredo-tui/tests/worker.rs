@@ -8021,6 +8021,184 @@ fn folded_heading_path_shows_a_tab_visibly() {
     );
 }
 
+#[test]
+fn fold_matches_folded_output_of_the_whole_stream_at_any_chunking() {
+    let samples = [
+        "Here you go:\n```python\nx = 1\ny = 2\n```\nThen:\n```\nz\n",
+        "=== FILE: a.py ===\n```python\ndef a():\n    pass\n```\n=== END FILE ===\nDone.\n",
+        "=== FILE: a.py ===\n1\n2\n=== END FILE ===\n=== FILE: b.py ===\n3\n",
+        "=== EDIT: a.py ===\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n=== END EDIT ===\n",
+        "=== FILE: é.py ===\nnaïve = \"ü\"\n=== END FILE ===\n=== FILE: c.py ===\n",
+        "plain prose only\nsecond line\n",
+    ];
+    for sample in samples {
+        for size in [1, 2, 3, 7, 64, sample.len()] {
+            let mut fold = worker::Fold::default();
+            let mut rest = sample;
+            while !rest.is_empty() {
+                let mut at = size.min(rest.len());
+                while !rest.is_char_boundary(at) {
+                    at += 1;
+                }
+                fold.push(&rest[..at]);
+                rest = &rest[at..];
+            }
+            assert_eq!(
+                fold.render(),
+                worker::folded_output(sample, false),
+                "{sample:?} in chunks of {size}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fold_counts_a_streaming_line_and_bounds_a_very_long_one() {
+    let mut fold = worker::Fold::default();
+    fold.push("=== FILE: a.py ===\npartial");
+    assert_eq!(fold.render(), "▸ a.py · 1 line so far\n");
+    fold.push(" line\nnext\n");
+    assert_eq!(fold.render(), "▸ a.py · 2 lines so far\n");
+    // One line far past the line buffer counts once, however its chunks fall.
+    for _ in 0..50 {
+        fold.push(&"x".repeat(1000));
+    }
+    fold.push("\nafter\n=== END FILE ===\n");
+    assert_eq!(fold.render(), "▸ a.py · 4 lines\n");
+}
+
+#[test]
+fn fold_offsets_stay_exact_after_an_over_long_line_is_skipped() {
+    let mut fold = worker::Fold::default();
+    let mut text = String::from("=== FILE: a.py ===\n");
+    fold.push(&text);
+    let long = "x".repeat(3000);
+    fold.push(&long);
+    let rest = "yy\n=== FILE: b.py ===\nz\n";
+    fold.push(rest);
+    text.push_str(&long);
+    text.push_str(rest);
+    // The tail starts 4 bytes before `b.py`'s marker: it still holds the heading, so
+    // nothing is put in front of it.
+    let tail = &text[text.len() - 25..];
+    assert!(tail.contains("=== FILE: b.py ==="));
+    assert_eq!(fold.expanded(tail), tail);
+    // A tail that starts inside the previous line lacks the heading: the marker returns.
+    let tail = &text[text.len() - 15..];
+    assert_eq!(
+        fold.expanded(tail),
+        format!("=== FILE: b.py ===\n{}", "z\n")
+    );
+}
+
+#[test]
+fn fold_counts_a_blank_first_line_and_still_hides_the_wrapper_fence() {
+    // A blank line is not content yet: the fence after it still wraps the file.
+    let text = "=== FILE: a.py ===\n\n```python\nx\n```\n=== END FILE ===\n";
+    let mut fold = worker::Fold::default();
+    fold.push(text);
+    assert_eq!(fold.render(), "▸ a.py · 2 lines\n");
+    assert_eq!(worker::folded_output(text, false), "▸ a.py · 2 lines\n");
+}
+
+#[test]
+fn fold_offsets_add_up_across_several_lines() {
+    let mut fold = worker::Fold::default();
+    let text = "aaa\n=== FILE: b.py ===\nz\n";
+    fold.push(text);
+    // The tail starts 2 bytes into the stream: the heading at byte 4 is inside it.
+    let tail = &text[2..];
+    assert_eq!(fold.expanded(tail), tail);
+    // From byte 6 on it is not: the marker goes in front, minus the partial line.
+    assert_eq!(fold.expanded(&text[6..]), "=== FILE: b.py ===\nz\n");
+}
+
+#[test]
+fn fold_stops_reading_a_line_once_it_passes_the_line_buffer() {
+    // The streaming line is judged as it stands (a `===` line is still hidden) and its
+    // rest is skipped, so it does not turn into a counted line when its newline comes.
+    let mut fold = worker::Fold::default();
+    fold.push("=== FILE: a.py ===\n");
+    fold.push(&format!("=== {}", "x".repeat(3000)));
+    fold.push("\nafter\n");
+    assert_eq!(fold.render(), "▸ a.py · 1 line so far\n");
+}
+
+#[test]
+fn fold_starts_a_code_row_for_a_snippet_after_a_closed_block() {
+    let text = "=== FILE: a.py ===\nx\n=== END FILE ===\n```\ncode\n```\n";
+    let mut fold = worker::Fold::default();
+    fold.push(text);
+    assert_eq!(fold.render(), "▸ a.py · 1 line\n▸ code · 1 line\n");
+    assert_eq!(fold.render(), worker::folded_output(text, false));
+}
+
+#[test]
+fn fold_marks_only_prose_lines_longer_than_the_cap_as_cut() {
+    let render = |text: &str| {
+        let mut fold = worker::Fold::default();
+        fold.push(text);
+        fold.render()
+    };
+    let line = |count: usize| "p".repeat(count);
+    // Exactly at the cap, with or without its newline: nothing is cut.
+    assert_eq!(
+        render(&format!("{}\n", line(240))),
+        format!("{}\n", line(240))
+    );
+    assert_eq!(render(&line(240)), format!("{}\n", line(240)));
+    assert_eq!(render("short"), "short\n");
+    // One over: cut at the cap and marked.
+    assert_eq!(
+        render(&format!("{}\n", line(241))),
+        format!("{}…\n", line(240))
+    );
+}
+
+#[test]
+fn fold_keeps_exactly_the_row_cap_before_collapsing_a_file() {
+    let render = |files: usize| {
+        let mut fold = worker::Fold::default();
+        for index in 0..files {
+            fold.push(&format!("=== FILE: f{index}.py ===\nx\n=== END FILE ===\n"));
+        }
+        fold.render()
+    };
+    let full = render(64);
+    assert_eq!(full.lines().count(), 64);
+    assert!(full.starts_with("▸ f0.py · 1 line\n"), "{full}");
+    let over = render(65);
+    assert_eq!(over.lines().count(), 65);
+    assert!(
+        over.starts_with("… 1 earlier file\n▸ f1.py · 1 line\n"),
+        "{over}"
+    );
+}
+
+#[test]
+fn fold_collapses_the_oldest_files_and_keeps_the_open_one() {
+    let mut fold = worker::Fold::default();
+    for index in 0..1000 {
+        fold.push(&format!("=== FILE: f{index}.py ===\nx\n=== END FILE ===\n"));
+    }
+    fold.push("=== FILE: open.py ===\ny\n");
+    let shown = fold.render();
+    let rows: Vec<&str> = shown.lines().collect();
+    assert!(rows.len() <= 70, "{} rows", rows.len());
+    assert_eq!(
+        rows[rows.len() - 2..],
+        ["▸ f999.py · 1 line", "▸ open.py · 1 line so far"]
+    );
+    let earlier: usize = rows[0]
+        .strip_prefix("… ")
+        .unwrap()
+        .strip_suffix(" earlier files")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(earlier + rows.len() - 1, 1001);
+}
+
 /// Worker fixture that streams `content` as one non-final frame, then holds the
 /// connection open until the returned sender fires (or drops).
 fn serve_partial(content: &str) -> (Ollama, thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
@@ -8067,6 +8245,181 @@ fn serve_partial(content: &str) -> (Ollama, thread::JoinHandle<()>, std::sync::m
         job,
         release,
     )
+}
+
+/// Like [`serve_partial`], but each of `frames` is its own non-final stream frame.
+fn serve_frames(
+    frames: Vec<String>,
+) -> (Ollama, thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let job = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut header = Vec::new();
+        let mut byte = [0];
+        while !header.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        let length: usize = String::from_utf8(header)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.to_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(str::to_string)
+            })
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut request = vec![0; length];
+        stream.read_exact(&mut request).unwrap();
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n",
+        );
+        for content in frames {
+            let frame = serde_json::json!({"message":{"content":content},"done":false});
+            let _ = stream.write_all(format!("{frame}\n").as_bytes());
+            let _ = stream.flush();
+            thread::sleep(Duration::from_millis(40));
+        }
+        let _ = released.recv_timeout(Duration::from_secs(30));
+    });
+    (
+        Ollama::new(&endpoint, Duration::from_secs(30)).unwrap(),
+        job,
+        release,
+    )
+}
+
+/// What the task detail and the agent view are given for task 1 while a worker holds
+/// its stream open after `frames`: (folded, expanded) model output of each view.
+async fn live_views(frames: Vec<String>) -> [(String, String); 2] {
+    use alfredo_tui::task_control::TaskControl;
+    let total: usize = frames.iter().map(String::len).sum();
+    let fixture = Fixture::new();
+    fixture.permit();
+    let (provider, server, release) = serve_frames(frames);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let store = fixture.store.clone();
+    let (observer, mut progress) = worker::Observer::channel();
+    let running = tokio::spawn(async move {
+        worker::start_observed(store, 1, "live".into(), 3, provider, flag, observer).await
+    });
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while progress.borrow().received_bytes < total {
+            progress.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("stream received");
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.attach_progress(1, progress.clone(), Arc::new(AtomicBool::new(false)));
+    control.snapshot = Some(fixture.store.snapshot().unwrap());
+    let mut app = alfredo_tui::model::App::new("fixture".into());
+    alfredo_tui::agent_view::open(
+        &mut app,
+        &mut control,
+        alfredo_tui::agent_view::Target::Task(1),
+    );
+    // The task detail folds `model_output` with `cut`; Ctrl+O shows `display_output`.
+    let views = |control: &TaskControl| {
+        let detail = control.worker_live(1).unwrap();
+        let agent = control.agent_live(1).unwrap();
+        let detail_text = if control.code_expanded {
+            worker::display_output(&detail.model_output)
+        } else {
+            worker::folded_output(&detail.model_output, detail.cut)
+        };
+        let agent_text = if control.agent.as_ref().unwrap().expanded {
+            worker::display_output(&agent.output)
+        } else {
+            worker::folded_output(&agent.output, agent.cut)
+        };
+        (detail_text, agent_text)
+    };
+    let (folded_detail, folded_agent) = views(&control);
+    control.code_expanded = true;
+    control.agent.as_mut().unwrap().expanded = true;
+    let (open_detail, open_agent) = views(&control);
+    cancel.store(true, Ordering::SeqCst);
+    let _ = tokio::time::timeout(Duration::from_secs(60), running).await;
+    release.send(()).unwrap();
+    server.join().unwrap();
+    [(folded_detail, open_detail), (folded_agent, open_agent)]
+}
+
+fn padded_file(path: &str, lines: usize) -> String {
+    let mut text = format!("=== FILE: {path} ===\n");
+    for line in 0..lines {
+        text.push_str(&format!("# line {line:04} padding padding padding\n"));
+    }
+    text
+}
+
+#[tokio::test]
+async fn live_fold_counts_a_file_streamed_past_the_output_tail() {
+    // About 21 KiB: far past the 8 KiB tail, and no end marker yet.
+    let code = padded_file("calc.py", 600);
+    assert!(code.len() > 16 * 1024);
+    for (folded, expanded) in live_views(vec![code]).await {
+        assert_eq!(folded, "▸ calc.py · 600 lines so far\n");
+        assert!(!folded.contains("# line"), "{folded}");
+        // Ctrl+O: the retained tail code sits under the open file's heading.
+        assert!(expanded.starts_with("▸ calc.py\n# line "), "{expanded}");
+        assert!(expanded.contains("# line 0599 padding"), "{expanded}");
+    }
+}
+
+#[tokio::test]
+async fn live_fold_keeps_a_finished_file_and_the_open_one_after_the_tail_was_cut() {
+    let mut code = padded_file("calc.py", 700);
+    code.push_str("=== END FILE ===\n=== FILE: util.py ===\ndef helper():\n");
+    for (folded, _) in live_views(vec![code]).await {
+        assert_eq!(folded, "▸ calc.py · 700 lines\n▸ util.py · 1 line so far\n");
+    }
+}
+
+#[tokio::test]
+async fn live_fold_handles_a_heading_split_across_stream_chunks() {
+    let frames = vec![
+        padded_file("calc.py", 400) + "=== END FILE ===\n=== FI",
+        "LE: ut".to_string(),
+        "il.py ===\nx = 1\ny = 2\n".to_string(),
+    ];
+    for (folded, _) in live_views(frames).await {
+        assert_eq!(
+            folded,
+            "▸ calc.py · 400 lines\n▸ util.py · 2 lines so far\n"
+        );
+    }
+}
+
+#[tokio::test]
+async fn live_fold_stays_bounded_and_collapses_the_oldest_files() {
+    let mut code = String::new();
+    for index in 0..300 {
+        code.push_str(&format!(
+            "=== FILE: f{index:03}.py ===\nx = {index}\n=== END FILE ===\n"
+        ));
+    }
+    for (folded, _) in live_views(vec![code]).await {
+        let rows: Vec<&str> = folded.lines().collect();
+        assert!(rows.len() <= 100, "{} rows", rows.len());
+        let earlier: usize = rows[0]
+            .strip_prefix("… ")
+            .and_then(|rest| rest.strip_suffix(" earlier files"))
+            .unwrap_or_else(|| panic!("{}", rows[0]))
+            .parse()
+            .unwrap();
+        assert_eq!(earlier + rows.len() - 1, 300);
+        assert_eq!(rows[rows.len() - 1], "▸ f299.py · 1 line");
+    }
 }
 
 /// Run task 1 until `partial` has streamed, then cancel it (a steer).
@@ -8330,4 +8683,21 @@ async fn edit_of_a_crlf_file_commits_a_one_line_diff() {
         git(&["diff", "--numstat", &before, &candidate]),
         "1\t1\tcalc.py\n"
     );
+}
+
+#[test]
+fn live_fold_shows_hidden_characters_in_paths_like_folded_output() {
+    // The incremental fold must draw paths and forged `▸ ` prose as `folded_output` does.
+    let text = "=== FILE: src/a\u{202E}sr\tx.txt ===\nx\n=== END FILE ===\n\
+                === EDIT: b\u{200B}.py ===\n<<<<<<< SEARCH\na\n=======\nb\n>>>>>>> REPLACE\n=== END EDIT ===\n\
+                ▸ f\u{202E}orged · 1 line\n";
+    let safe = alfredo_tui::dashboard::safe(text);
+    let mut fold = worker::Fold::default();
+    for chunk in safe.as_bytes().chunks(5) {
+        fold.push(&String::from_utf8_lossy(chunk));
+    }
+    let shown = fold.render();
+    assert_eq!(shown, worker::folded_output(&safe, false));
+    assert!(shown.contains("<U+202E>") && shown.contains("<U+0009>") && shown.contains("<U+200B>"));
+    assert!(!shown.contains('\u{202E}') && !shown.contains('\u{200B}'));
 }

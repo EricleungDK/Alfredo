@@ -291,3 +291,25 @@ fn watch_and_tell_work_from_anywhere() {
     assert_eq!(control.owner.instructions()[0].note, "use the integer 42");
     assert_eq!(agent_view::console(app, control, "/tasks"), None);
 }
+
+#[test]
+fn live_output_that_exactly_fills_the_tail_is_shown_as_streamed() {
+    let raw = "=== FILE: calc.py ===\nx = 1\n";
+    let fixture = fixture("");
+    fixture.progress.send_modify(|progress| {
+        progress.model_output = raw.into();
+        progress.received_bytes = raw.len();
+        progress.fold.push(raw);
+    });
+    // Nothing was dropped from the tail, so the views fold the tail itself.
+    let live = fixture.control.worker_live(1).unwrap();
+    assert_eq!((live.model_output.as_str(), live.cut), (raw, false));
+    let live = fixture.control.agent_live(1).unwrap();
+    assert_eq!((live.output.as_str(), live.cut), (raw, false));
+    // One byte more received than kept: the exact fold stands in.
+    fixture
+        .progress
+        .send_modify(|progress| progress.received_bytes += 1);
+    let live = fixture.control.worker_live(1).unwrap();
+    assert_eq!(live.model_output, "▸ calc.py · 1 line so far\n");
+}

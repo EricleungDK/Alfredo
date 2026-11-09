@@ -528,51 +528,66 @@ enum Kind {
     Snippet,
 }
 
-/// The display rows of `text`: FILE markers become headings, END markers and
-/// markdown fence lines are hidden. Inside a FILE block only the fence wrapping
-/// the whole file is hidden; the file's own fences are content.
-fn display_rows(text: &str) -> Vec<Row<'_>> {
-    let mut rows = Vec::new();
-    // Inside a FILE block: content seen yet, a wrapper fence was hidden, and the
-    // depth of the file's own fences within it.
-    let (mut in_block, mut seen, mut wrapped, mut depth) = (false, false, false, 0usize);
-    // Inside a FILE block EDIT marker lines are file content, not markers.
-    let mut in_file = false;
-    // Between markdown fence lines outside any block.
-    let mut in_snippet = false;
-    for line in text.split_inclusive('\n') {
+/// Line-by-line state of the display rows: which block or fence the next line is in.
+#[derive(Clone, Debug, Default)]
+struct Scanner {
+    /// Inside a FILE or EDIT block.
+    in_block: bool,
+    /// Inside a FILE block EDIT marker lines are file content, not markers.
+    in_file: bool,
+    /// Inside a FILE block: content seen yet, a wrapper fence was hidden, and the
+    /// depth of the file's own fences within it.
+    seen: bool,
+    wrapped: bool,
+    depth: usize,
+    /// Between markdown fence lines outside any block.
+    in_snippet: bool,
+}
+
+impl Scanner {
+    /// The row `line` shows, if any. A line without its newline is still streaming.
+    fn line<'a>(&mut self, line: &'a str) -> Option<Row<'a>> {
         let complete = line.ends_with('\n');
         if let Some(path) = file_marker(line) {
-            rows.push(Row::Heading(format!("▸ {}", heading_path(path))));
-            (in_block, in_file, seen, wrapped, depth) = (true, true, false, false, 0);
-            in_snippet = false;
-        } else if let Some(path) = edit_marker(line).filter(|_| !in_file) {
-            rows.push(Row::Heading(format!("▸ {} (edit)", heading_path(path))));
-            (in_block, seen, wrapped, depth) = (true, false, false, 0);
-            in_snippet = false;
-        } else if end_marker(line) || (!in_file && line.trim_end() == EDIT_END) {
-            if in_block {
-                rows.push(Row::End);
-            }
-            (in_block, in_file) = (false, false);
+            *self = Self {
+                in_block: true,
+                in_file: true,
+                ..Self::default()
+            };
+            Some(Row::Heading(format!("▸ {}", heading_path(path))))
+        } else if let Some(path) = edit_marker(line).filter(|_| !self.in_file) {
+            (self.in_block, self.seen, self.wrapped, self.depth) = (true, false, false, 0);
+            self.in_snippet = false;
+            Some(Row::Heading(format!("▸ {} (edit)", heading_path(path))))
+        } else if end_marker(line) || (!self.in_file && line.trim_end() == EDIT_END) {
+            let closed = self.in_block;
+            (self.in_block, self.in_file) = (false, false);
+            closed.then_some(Row::End)
         } else if !complete && (line.starts_with("===") || partial_fence(line)) {
             // A marker or fence line still streaming stays hidden until complete.
+            None
         } else if fence_line(line)
-            && hides_fence(in_block, &mut seen, &mut wrapped, &mut depth, line)
+            && hides_fence(
+                self.in_block,
+                &mut self.seen,
+                &mut self.wrapped,
+                &mut self.depth,
+                line,
+            )
         {
-            if !in_block {
-                if in_snippet {
-                    rows.push(Row::End);
-                }
-                in_snippet = !in_snippet;
+            if self.in_block {
+                return None;
             }
+            let closes = self.in_snippet;
+            self.in_snippet = !self.in_snippet;
+            closes.then_some(Row::End)
         } else {
-            if in_block && !line.trim().is_empty() {
-                seen = true;
+            if self.in_block && !line.trim().is_empty() {
+                self.seen = true;
             }
-            let kind = if in_block {
+            let kind = if self.in_block {
                 Kind::Block
-            } else if in_snippet {
+            } else if self.in_snippet {
                 Kind::Snippet
             } else {
                 Kind::Prose
@@ -585,10 +600,200 @@ fn display_rows(text: &str) -> Vec<Row<'_>> {
             } else {
                 Cow::Borrowed(line)
             };
-            rows.push(Row::Text(line, kind));
+            Some(Row::Text(line, kind))
         }
     }
-    rows
+}
+
+/// The display rows of `text`: FILE markers become headings, END markers and
+/// markdown fence lines are hidden. Inside a FILE block only the fence wrapping
+/// the whole file is hidden; the file's own fences are content.
+fn display_rows(text: &str) -> Vec<Row<'_>> {
+    let mut scanner = Scanner::default();
+    text.split_inclusive('\n')
+        .filter_map(|line| scanner.line(line))
+        .collect()
+}
+
+/// Rows the live fold keeps; older ones collapse into `… N earlier files`.
+const FOLD_ROWS: usize = 64;
+/// A streaming line longer than this is counted as it stands and its rest skipped.
+const FOLD_LINE: usize = 2048;
+/// Characters of one prose line the live fold keeps.
+const FOLD_PROSE: usize = 240;
+
+/// One row of the live fold.
+#[derive(Clone, Debug)]
+enum FoldRow {
+    /// A FILE or EDIT block, or a fenced snippet: its heading and line count.
+    Block {
+        heading: String,
+        lines: usize,
+        closed: bool,
+    },
+    /// A line of the model's prose.
+    Prose(String),
+}
+
+/// The fold of a worker's streamed answer, kept as the text arrives so counts stay
+/// exact however much of it the output tail has dropped. Bounded: [`FOLD_ROWS`]
+/// rows, a line buffer of [`FOLD_LINE`] bytes. Display only: `parse_answer` reads
+/// the raw answer.
+#[derive(Clone, Debug, Default)]
+pub struct Fold {
+    scanner: Scanner,
+    /// The streaming line, until its newline arrives (a marker can span chunks).
+    pending: String,
+    /// Offset of `pending` in the stream.
+    pending_start: usize,
+    /// Dropping the rest of an over-long line.
+    skipping: bool,
+    rows: std::collections::VecDeque<FoldRow>,
+    /// The last row is a block still taking lines.
+    active: bool,
+    /// File and snippet rows dropped from the front.
+    earlier: usize,
+    /// The marker line of the open block and its offset in the stream.
+    open: Option<(String, usize)>,
+    /// Bytes of the stream seen.
+    total: usize,
+}
+
+impl Fold {
+    /// Whether any text was folded (a progress built without the stream has none).
+    pub fn tracked(&self) -> bool {
+        self.total > 0
+    }
+
+    /// Fold the next chunk of the stream.
+    pub fn push(&mut self, chunk: &str) {
+        let base = self.total;
+        self.total += chunk.len();
+        let mut from = 0;
+        if self.skipping {
+            match chunk.find('\n') {
+                Some(at) => (from, self.skipping) = (at + 1, false),
+                None => return,
+            }
+        }
+        if self.pending.is_empty() {
+            self.pending_start = base + from;
+        }
+        self.pending.push_str(&chunk[from..]);
+        while let Some(at) = self.pending.find('\n') {
+            let line: String = self.pending.drain(..=at).collect();
+            let start = self.pending_start;
+            self.pending_start += line.len();
+            self.line(&line, start);
+        }
+        if self.pending.len() > FOLD_LINE {
+            let line = std::mem::take(&mut self.pending);
+            self.line(&line, self.pending_start);
+            self.skipping = true;
+        }
+    }
+
+    fn line(&mut self, line: &str, start: usize) {
+        match self.scanner.line(line) {
+            None => {}
+            Some(Row::Heading(heading)) => {
+                let marker = match (file_marker(line), edit_marker(line)) {
+                    (Some(path), _) => format!("{FILE_START}{path}{FILE_START_END}\n"),
+                    (None, Some(path)) => format!("{EDIT_START}{path}{FILE_START_END}\n"),
+                    (None, None) => String::new(),
+                };
+                self.open = Some((marker, start));
+                self.rows.push_back(FoldRow::Block {
+                    heading,
+                    lines: 0,
+                    closed: false,
+                });
+                self.active = true;
+            }
+            Some(Row::End) => {
+                self.open = None;
+                if std::mem::take(&mut self.active) {
+                    if let Some(FoldRow::Block { closed, .. }) = self.rows.back_mut() {
+                        *closed = true;
+                    }
+                }
+            }
+            Some(Row::Text(_, Kind::Block | Kind::Snippet)) => {
+                match self.rows.back_mut() {
+                    Some(FoldRow::Block { lines, .. }) if self.active => *lines += 1,
+                    _ => {
+                        self.open = None;
+                        self.rows.push_back(FoldRow::Block {
+                            heading: "▸ code".into(),
+                            lines: 1,
+                            closed: false,
+                        });
+                        self.active = true;
+                    }
+                };
+            }
+            Some(Row::Text(text, Kind::Prose)) => {
+                let kept: String = text.chars().take(FOLD_PROSE).collect();
+                let cut = kept.len() < text.trim_end_matches('\n').len();
+                let end = if cut { "…" } else { "" };
+                let kept = kept.trim_end_matches('\n');
+                self.rows
+                    .push_back(FoldRow::Prose(format!("{kept}{end}\n")));
+            }
+        }
+        while self.rows.len() > FOLD_ROWS {
+            if let Some(FoldRow::Block { .. }) = self.rows.pop_front() {
+                self.earlier += 1;
+            }
+        }
+    }
+
+    /// The fold as [`folded_output`] shows the whole stream, with files dropped for
+    /// the row cap as `… N earlier files`.
+    pub fn render(&self) -> String {
+        let mut fold = self.clone();
+        if !fold.pending.is_empty() {
+            let line = std::mem::take(&mut fold.pending);
+            fold.line(&line, fold.pending_start);
+        }
+        let mut shown = String::new();
+        if fold.earlier > 0 {
+            let plural = if fold.earlier == 1 { "" } else { "s" };
+            let _ = writeln!(shown, "… {} earlier file{plural}", fold.earlier);
+        }
+        for row in &fold.rows {
+            match row {
+                FoldRow::Block {
+                    heading,
+                    lines,
+                    closed,
+                } => {
+                    let so_far = if *closed { "" } else { " so far" };
+                    let count = match lines {
+                        1 => "1 line".to_string(),
+                        lines => format!("{lines} lines"),
+                    };
+                    let _ = writeln!(shown, "{heading} · {count}{so_far}");
+                }
+                FoldRow::Prose(text) => shown.push_str(text),
+            }
+        }
+        shown
+    }
+
+    /// `tail`, the last bytes of the stream, ready for [`display_output`]: when the
+    /// open block's heading was dropped from it, its marker line goes in front, so the
+    /// code shows under the file it belongs to. The tail's first line is dropped then,
+    /// as the tail usually starts in the middle of it.
+    pub fn expanded(&self, tail: &str) -> String {
+        match &self.open {
+            Some((marker, start)) if *start < self.total.saturating_sub(tail.len()) => {
+                let whole = tail.split_once('\n').map_or("", |(_, rest)| rest);
+                format!("{marker}{whole}")
+            }
+            _ => tail.to_owned(),
+        }
+    }
 }
 
 /// Streamed model text for live display: FILE markers become `▸ path` headings,

@@ -29,7 +29,7 @@ use tokio::{
 mod answer;
 pub use answer::{
     display_output, folded_output, parse_answer, parse_answer_for, render_blocks, resolve_answer,
-    EditBlock, FileEdit, FilePlan,
+    EditBlock, FileEdit, FilePlan, Fold,
 };
 use answer::{
     prior_blocks, DIVIDER_MARKER, EDIT_END, EDIT_START, FILE_END, FILE_START, FILE_START_END,
@@ -50,6 +50,8 @@ pub struct Progress {
     pub received_bytes: usize,
     /// Bounded tail of streamed model text, for live display only.
     pub model_output: String,
+    /// The whole stream folded as it arrived, exact past the tail; display only.
+    pub fold: Fold,
     pub check_stdout: Vec<u8>,
     pub check_stderr: Vec<u8>,
     /// The worker request text once built, for the agent view only.
@@ -66,6 +68,7 @@ impl Default for Progress {
             first_content: None,
             received_bytes: 0,
             model_output: String::new(),
+            fold: Fold::default(),
             check_stdout: Vec::new(),
             check_stderr: Vec::new(),
             request: None,
@@ -138,6 +141,7 @@ impl Observer {
             }
             p.received_bytes += text.len();
             p.model_output.push_str(text);
+            p.fold.push(text);
             if p.model_output.len() > MODEL_OUTPUT_TAIL {
                 let mut start = p.model_output.len() - MODEL_OUTPUT_TAIL;
                 while !p.model_output.is_char_boundary(start) {
