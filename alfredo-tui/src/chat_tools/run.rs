@@ -677,30 +677,6 @@ fn clean_name(name: &str) -> String {
 }
 
 #[cfg(test)]
-mod name_tests {
-    use super::*;
-
-    #[test]
-    fn a_name_is_cut_on_a_char_boundary_within_the_byte_limit() {
-        // 21 three-byte chars end at byte 63, so byte 64 falls inside the 22nd.
-        let cut = clean_name(&"读".repeat(40));
-        assert_eq!(cut, "读".repeat(21));
-        assert!(cut.len() <= MAX_NAME_BYTES);
-        let step = ToolStep {
-            calls: vec![ToolCall {
-                name: cut,
-                arguments: serde_json::json!({}),
-            }],
-            results: vec!["ok".into()],
-        };
-        assert!(step.valid());
-        assert_eq!(clean_name(&"a".repeat(100)), "a".repeat(MAX_NAME_BYTES));
-        assert_eq!(clean_name("a\u{7}b\n读"), "ab读");
-        assert_eq!(clean_name("\u{7}"), "");
-    }
-}
-
-#[cfg(test)]
 mod budget_tests {
     use super::*;
     use crate::chat_tools::budget::Cancel;

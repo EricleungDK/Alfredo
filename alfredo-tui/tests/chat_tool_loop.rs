@@ -444,6 +444,41 @@ async fn names_whose_64th_byte_falls_inside_a_char_are_cut_and_the_turn_complete
     }
 }
 
+/// Issue #651: the name the loop records is the model's name without control characters,
+/// cut to exactly 64 bytes, or `unnamed` when nothing is left.
+#[tokio::test]
+async fn recorded_tool_names_drop_control_chars_and_stop_at_64_bytes() {
+    let cases = [
+        ("a".repeat(100), "a".repeat(64)),
+        ("a\u{7}b\n读".to_string(), "ab读".to_string()),
+        ("\u{7}\u{1}".to_string(), "unnamed".to_string()),
+        (format!("\u{7}{}", "读".repeat(30)), "读".repeat(21)),
+        ("😀".repeat(16) + "x", "😀".repeat(16)),
+    ];
+    for (sent, expected) in cases {
+        let root = workspace("clean-name");
+        let addr = ollama_fixture::reserve();
+        let name = sent.clone();
+        let fixture = ollama_fixture::serve(addr, move |_, index| {
+            if index == 0 {
+                tool_call(&name, json!({}))
+            } else {
+                done("ok")
+            }
+        });
+        let mut session = Session::new("fixture".into());
+        session.insert("go");
+        let messages = session.begin().unwrap();
+        finish(run(&fixture.endpoint, &root, messages).await, &mut session);
+        assert_eq!(session.status, Status::Complete, "{sent:?}");
+        let steps = session.tool_steps(1);
+        assert_eq!(steps.len(), 1, "{sent:?}");
+        assert_eq!(steps[0].calls[0].name, expected, "{sent:?}");
+        assert!(steps[0].results[0].starts_with("error: unknown tool"));
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 /// Issue #651: a saved or replayed step still needs a non-empty, control-free name of at
 /// most 64 bytes; each rule alone rejects it.
 #[test]
