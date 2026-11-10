@@ -4846,6 +4846,25 @@ fn bare_go_lint_refusal_shows_the_whole_sentence_as_a_chat_row_and_a_short_foote
 }
 
 #[test]
+fn lint_refusal_view_needs_both_the_prefix_and_the_fix_to_match() {
+    let prefix = "The plan cannot run unattended and nothing changed:";
+    let fix = "Fix it with /plan-revise (draft) or run it by hand with /approve";
+    let both = format!("{prefix} Too big. {fix}");
+    assert!(alfredo_tui::autopilot::lint_refusal_view(&both, "/go").is_some());
+    // Only the prefix, or only the fix: not a lint refusal.
+    let prefix_only = format!("{prefix} Too big.");
+    let fix_only = format!("Something else. {fix}");
+    assert_eq!(
+        alfredo_tui::autopilot::lint_refusal_view(&prefix_only, "/go"),
+        None
+    );
+    assert_eq!(
+        alfredo_tui::autopilot::lint_refusal_view(&fix_only, "/go"),
+        None
+    );
+}
+
+#[test]
 fn go_goal_with_an_open_draft_names_bare_go_as_the_way_to_run_it() {
     let fixture = Fixture::new();
     let server = plan_server();
