@@ -4176,7 +4176,10 @@ fn an_evicted_acknowledged_command_stays_refused_and_the_file_format_is_unchange
     let error = app.sessions[0]
         .submit_command("/task Acked".into(), command_intent("acked-0"))
         .unwrap_err();
-    assert!(error.contains("Retry the original command entry"), "{error}");
+    assert!(
+        error.contains("Retry the original command entry"),
+        "{error}"
+    );
     // The acknowledged set is runtime only: the saved JSON has no trace of it.
     let json = serde_json::to_string(&app.sessions[0]).unwrap();
     assert!(!json.contains("acknowledged"), "{json}");
