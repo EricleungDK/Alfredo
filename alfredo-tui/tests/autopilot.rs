@@ -4819,6 +4819,33 @@ fn bare_go_lint_refusal_text_has_no_doubled_period_and_ends_with_the_fix() {
 }
 
 #[test]
+fn bare_go_lint_refusal_shows_the_whole_sentence_as_a_chat_row_and_a_short_footer() {
+    let fixture = Fixture::new();
+    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let server = Server::new(|_, _| files_plan(&["a.py", "b.py"]));
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap_err();
+    let (notice, rows) = alfredo_tui::worker::refusal_view(&error, "/go").expect("lint refusal");
+    assert_eq!(rows, vec![format!("✗ Not started · {error}")]);
+    assert!(rows[0].contains("Approved files total"), "{rows:?}");
+    assert!(
+        rows[0].ends_with("run it by hand with /approve"),
+        "{rows:?}"
+    );
+    assert!(notice.starts_with("/go refused:"), "{notice}");
+    assert!(notice.chars().count() <= 78, "{notice}");
+    assert_eq!(
+        alfredo_tui::worker::refusal_view("Unknown task 9", "/go"),
+        None
+    );
+}
+
+#[test]
 fn go_goal_with_an_open_draft_names_bare_go_as_the_way_to_run_it() {
     let fixture = Fixture::new();
     let server = plan_server();

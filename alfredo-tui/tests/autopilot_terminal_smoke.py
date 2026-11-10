@@ -715,7 +715,8 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.wait_until('draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
 
     def assert_lint_refusal_rows(self, terminal):
-        self.screen_has(terminal, 'Fix it with /plan-revise (draft) or run it by hand with /approve')
+        # The chat row wraps, so wait on the words, not the screen text.
+        self.wait_until('lint refusal row', lambda: 'run it by hand with /approve' in self.flat(terminal))
         time.sleep(0.5)
         terminal.pump()
         flat = self.flat(terminal)

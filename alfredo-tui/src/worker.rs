@@ -466,9 +466,12 @@ pub fn config_refusal_view(message: &str) -> Option<(String, Vec<String>)> {
 }
 
 /// The chat rows and fix-first footer for a refusal the one-line footer would cut:
-/// a config refusal or a sandbox that cannot start, for the slash `command` typed (#608).
+/// a config refusal, a sandbox that cannot start, or a plan the unattended lint refuses,
+/// for the slash `command` typed (#608, #650).
 pub fn refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
-    config_refusal_view(message).or_else(|| crate::doctor::sandbox_refusal_view(message, command))
+    config_refusal_view(message)
+        .or_else(|| crate::doctor::sandbox_refusal_view(message, command))
+        .or_else(|| crate::autopilot::lint_refusal_view(message, command))
 }
 
 /// Why `workspace` cannot run coding work because of its Git config, read the bounded,
