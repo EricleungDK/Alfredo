@@ -493,3 +493,15 @@ fn collapsed_run_command_row_falls_back_to_the_other_stream_and_bare_exit() {
     assert!(row.contains("↳ exit code 0 … ("), "{row}");
     assert!(!row.contains("sandboxed"), "{row}");
 }
+
+#[test]
+fn collapsed_run_command_row_covers_a_run_killed_by_a_signal() {
+    let result =
+        "killed by a signal · sandboxed · cwd .\nstdout:\nout\nstderr:\nSegmentation fault";
+    let row = result_row("run_command", result);
+    assert!(
+        row.contains("↳ killed by a signal · Segmentation fault … (5 lines)"),
+        "{row}"
+    );
+    assert!(!row.contains("sandboxed"), "{row}");
+}
