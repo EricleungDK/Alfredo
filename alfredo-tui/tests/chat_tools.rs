@@ -359,6 +359,37 @@ fn grep_rejects_a_non_boolean_ignore_case() {
     );
 }
 
+#[test]
+fn grep_rejects_a_numeric_ignore_case() {
+    let workspace = Workspace::new();
+    for value in [json!(1), json!(0), json!("false"), json!([true])] {
+        let refused = workspace.run("grep", json!({"pattern": "demo", "ignore_case": value}));
+        assert_eq!(
+            refused.trim(),
+            "error: argument ignore_case must be true or false",
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn grep_without_or_with_null_ignore_case_stays_case_sensitive() {
+    let workspace = Workspace::new();
+    let absent = workspace.run("grep", json!({"pattern": "DEMO"}));
+    assert_eq!(absent.trim(), "no matches");
+    let null = workspace.run("grep", json!({"pattern": "DEMO", "ignore_case": null}));
+    assert_eq!(null.trim(), "no matches");
+}
+
+#[test]
+fn grep_boolean_ignore_case_is_unchanged() {
+    let workspace = Workspace::new();
+    let on = workspace.run("grep", json!({"pattern": "DEMO", "ignore_case": true}));
+    assert!(on.contains("README.md:1:# Demo"), "{on}");
+    let off = workspace.run("grep", json!({"pattern": "DEMO", "ignore_case": false}));
+    assert_eq!(off.trim(), "no matches");
+}
+
 // Issue #343: discovery honours git's ignore rules.
 
 /// A Workspace whose `.git` is a real repository (the plain one has a fake `.git`).
