@@ -81,6 +81,8 @@ plan`.
 
 In the interactive TUI, the denied-sandbox refusal of `/go` and `/run` is shown as chat rows with the whole sentence (bwrap's stderr without a trailing period, then the host-policy fix and the README Troubleshooting pointer) and a footer that leads with the fix: `/go refused: allow bubblewrap user namespaces · see README Troubleshooting`.
 
+In the interactive TUI, a bare `/go` that the unattended plan lint refuses is shown the same way: the chat rows carry the whole finding (without a doubled period) and `Fix it with /plan-revise (draft) or run it by hand with /approve`, and the footer reads `/go refused: the plan fails the unattended lint (see the chat rows above)`. From the task view (F2) `/go` returns to the chat view so the rows are visible.
+
 Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any model
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
 executable check as `--doctor`). A bwrap that exists but cannot create a sandbox (user-namespace restriction, e.g. Ubuntu 24.04 AppArmor) is refused the same way before any model call, quoting bwrap's stderr and a host-policy fix instead of the install hint: a no-op `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` runs once per process (5 s limit) for `/go`, `--go` and `/run`, and fresh in `--doctor` (`FAIL sandbox`). If the sandbox still fails to start during a run, that
@@ -619,8 +621,8 @@ found) keeps its text in the prompt so it can be corrected, but the text is mark
 replaces it, so retyping the full command never concatenates (`/go/go …`). Left, Right,
 Home, End, Backspace, Delete, Ctrl+W or the first Up drop the mark and keep the text for
 editing; the next Up continues into older prompts. Ctrl+U clears it, and Up then recalls it
-from prompt history. An unknown command such as `/help`,
-`/quit` or `/new` answers `Unknown command /NAME · F1 lists commands · /go GOAL starts
+from prompt history. An unknown command such as `/help`
+or `/new` answers `Unknown command /NAME · F1 lists commands · /go GOAL starts
 autopilot`; `/help` itself opens the F1 command picker and `/model` without a name
 answers `Usage: /model NAME (or /models)`. Footer notices wider than the terminal are
 cut at a word boundary with `…`.
