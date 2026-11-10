@@ -1540,12 +1540,14 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         Instant::now(),
         usize::from(inner.width),
     );
-    metadata.extend(timing_line(
-        session,
-        app.num_ctx
-            .or_else(|| app.health.observed_window(&session.model)),
-    )
-    .map(|text| Line::styled(text, dim())));
+    metadata.extend(
+        timing_line(
+            session,
+            app.num_ctx
+                .or_else(|| app.health.observed_window(&session.model)),
+        )
+        .map(|text| Line::styled(text, dim())),
+    );
     if !metadata.is_empty() {
         metadata.push(Line::default());
     }
