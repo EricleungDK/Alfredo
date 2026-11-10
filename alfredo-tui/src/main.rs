@@ -670,12 +670,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             for session in &mut work.app.sessions {
-                let uncertain: Vec<_> = session.commands().iter().filter(|command| {
-                    matches!(command.state, alfredo_tui::console_command::CommandState::Submitted)
-                        && !work.tasks.intent_pending(&command.intent)
-                        && !matches!(&command.intent, alfredo_tui::command_intent::Intent::Wayfinder { request, .. } if work.wayfinder.request_pending(request))
-                        && command.intent.acknowledgment(work.tasks.snapshot.as_ref(), work.tasks.canonical_scope.as_ref()).is_none()
-                }).map(|command| (command.id.clone(), work.tasks.unmatched_state(&command.intent)))
+                let uncertain: Vec<_> = session
+                    .commands()
+                    .iter()
+                    .filter(|command| work.tasks.command_uncertain(command, &work.wayfinder))
+                    .map(|command| {
+                        (
+                            command.id.clone(),
+                            work.tasks.unmatched_state(&command.intent),
+                        )
+                    })
                     .collect();
                 for (id, state) in uncertain {
                     session.set_command_state(&id, state);
@@ -1907,8 +1911,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 work.app.sessions[index].remember_submission();
                                 let draft = work.tasks.planner.checkpoint();
+                                let (tasks, wayfinder) = (&work.tasks, &work.wayfinder);
                                 match work.app.sessions[index].clear_conversation(
                                     draft.as_ref().and_then(|d| d.origin.as_ref()),
+                                    |command| tasks.command_in_flight(command, wayfinder),
                                 ) {
                                     Ok(()) => {
                                         if let Some(job) = jobs[index].take() {

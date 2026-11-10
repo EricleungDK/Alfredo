@@ -443,9 +443,13 @@ impl Session {
     /// draft is saved with the command that generated it, so clearing the session
     /// that holds that command would make every later save refuse. `/clear` is refused
     /// instead, and nothing changes: the owner approves or discards the draft first.
+    ///
+    /// `in_flight` says whether a command is still being decided (issue #654): an
+    /// acknowledged task command stays `Submitted` for the session but must not block.
     pub fn clear_conversation(
         &mut self,
         plan_origin: Option<&crate::planner_command::Request>,
+        in_flight: impl Fn(&crate::console_command::ConsoleCommand) -> bool,
     ) -> Result<(), &'static str> {
         if self.status.active() {
             return Err("Cancel (Esc) or wait for the current reply before /clear");
@@ -453,13 +457,7 @@ impl Session {
         if self.compacting.is_some() {
             return Err("Wait for the summary, or press Esc, before /clear");
         }
-        if self.commands.iter().any(|command| {
-            matches!(
-                command.state,
-                crate::console_command::CommandState::Pending
-                    | crate::console_command::CommandState::Submitted
-            )
-        }) {
+        if self.commands.iter().any(&in_flight) {
             return Err("A command in this conversation is still being recorded; try /clear again in a moment");
         }
         if plan_origin.is_some_and(|origin| {

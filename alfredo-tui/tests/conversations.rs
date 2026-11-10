@@ -3006,7 +3006,7 @@ fn clearing_a_conversation_never_leaves_a_plan_draft_without_its_origin() {
     let mut app = snapshot.restore();
     // Whatever /clear decides, the next autosave of the still-pending draft must work.
     let origin = draft.as_ref().and_then(|draft| draft.origin.as_ref());
-    if let Err(message) = app.sessions[0].clear_conversation(origin) {
+    if let Err(message) = app.sessions[0].clear_conversation(origin, |_| false) {
         assert!(message.contains("plan draft"), "{message}");
         assert!(app.sessions[0].commands().iter().any(|c| c.id == id));
     }
@@ -3031,7 +3031,7 @@ fn a_refused_clear_changes_nothing_and_a_clear_without_a_draft_still_saves() {
     let mut app = snapshot.restore();
     let before = Snapshot::capture(&app, "default");
     let error = app.sessions[0]
-        .clear_conversation(draft.origin.as_ref())
+        .clear_conversation(draft.origin.as_ref(), |_| false)
         .unwrap_err();
     assert!(
         error.contains("plan draft") && error.contains("/plan-cancel"),
@@ -3041,10 +3041,10 @@ fn a_refused_clear_changes_nothing_and_a_clear_without_a_draft_still_saves() {
     // Another conversation does not hold the origin, so it clears and still saves.
     app.add_session();
     app.sessions[1]
-        .clear_conversation(draft.origin.as_ref())
+        .clear_conversation(draft.origin.as_ref(), |_| false)
         .unwrap();
     // After the draft is cancelled the owning conversation clears too.
-    app.sessions[0].clear_conversation(None).unwrap();
+    app.sessions[0].clear_conversation(None, |_| false).unwrap();
     let cleared = Snapshot::capture(&app, "default");
     store.save(&cleared).unwrap();
     assert_eq!(store.load().unwrap().unwrap(), cleared);

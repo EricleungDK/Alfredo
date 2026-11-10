@@ -155,8 +155,102 @@ fn an_acknowledged_task_command_does_not_block_clear_forever() {
         .submit_command("/task First".into(), intent)
         .unwrap();
     session.set_command_state(&id, alfredo_tui::console_command::CommandState::Submitted);
-    session.clear_conversation(None).unwrap();
+    let router = idle_router(&fixture);
+    session
+        .clear_conversation(None, |c| control.command_in_flight(c, &router))
+        .unwrap();
     assert!(session.commands().is_empty());
+}
+fn idle_router(fixture: &Fixture) -> alfredo_tui::wayfinder::Router {
+    alfredo_tui::wayfinder::Router::new(alfredo_tui::understanding::Store::new(
+        &fixture.root.join("state"),
+        &fixture.root.join("workspace"),
+    ))
+}
+fn recorded(
+    session: &mut alfredo_tui::model::Session,
+    intent: &Intent,
+    state: alfredo_tui::console_command::CommandState,
+) {
+    let id = session
+        .submit_command("/task First".into(), intent.clone())
+        .unwrap();
+    session.set_command_state(&id, state);
+}
+#[test]
+fn clear_refuses_only_a_command_that_is_really_in_flight() {
+    use alfredo_tui::console_command::CommandState;
+    const REFUSED: &str =
+        "A command in this conversation is still being recorded; try /clear again in a moment";
+    let fixture = Fixture::new();
+    let mut control = fixture.control();
+    let intent = control
+        .prepare_command("/task First", "fixture")
+        .unwrap()
+        .unwrap();
+    let router = idle_router(&fixture);
+    let attempt = |control: &TaskControl, state: CommandState| {
+        let mut session = alfredo_tui::model::Session::new("fixture".into());
+        recorded(&mut session, &intent, state);
+        let cleared = session.clear_conversation(None, |c| control.command_in_flight(c, &router));
+        (cleared, session.commands().len())
+    };
+    // Pending is always in flight.
+    assert_eq!(attempt(&control, CommandState::Pending), (Err(REFUSED), 1));
+    // Submitted with no receipt yet is still undecided.
+    assert_eq!(
+        attempt(&control, CommandState::Submitted),
+        (Err(REFUSED), 1)
+    );
+    // Submitted and running (receipt not yet written) is in flight.
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    control.dispatch_prepared(&runtime, &intent).unwrap();
+    assert!(control.intent_pending(&intent));
+    let running = attempt(&control, CommandState::Submitted);
+    assert_eq!(running, (Err(REFUSED), 1));
+    wait(&mut control);
+    // Running ended but the control has not seen the receipt: still no acknowledgment.
+    control.snapshot = None;
+    assert!(!control.intent_pending(&intent));
+    assert_eq!(
+        attempt(&control, CommandState::Submitted),
+        (Err(REFUSED), 1)
+    );
+    // Acknowledged: cleared, command rows gone.
+    control.snapshot = Some(fixture.store.snapshot().unwrap());
+    // A retry re-dispatches an already acknowledged command: running still counts.
+    control.dispatch_prepared(&runtime, &intent).unwrap();
+    assert!(control.intent_pending(&intent));
+    assert!(intent
+        .acknowledgment(control.snapshot.as_ref(), None)
+        .is_some());
+    assert_eq!(
+        attempt(&control, CommandState::Submitted),
+        (Err(REFUSED), 1)
+    );
+    wait(&mut control);
+    assert_eq!(attempt(&control, CommandState::Submitted), (Ok(()), 0));
+    // Only a Submitted command that ended with no receipt is uncertain (settled by
+    // the sweep); running, acknowledged and decided commands are not.
+    let command = |state| {
+        let mut session = alfredo_tui::model::Session::new("fixture".into());
+        recorded(&mut session, &intent, state);
+        session.commands()[0].clone()
+    };
+    assert!(!control.command_uncertain(&command(CommandState::Submitted), &router));
+    assert!(!control.command_uncertain(&command(CommandState::Pending), &router));
+    control.snapshot = None;
+    assert!(control.command_uncertain(&command(CommandState::Submitted), &router));
+    assert!(!control.command_uncertain(&command(CommandState::Pending), &router));
+    control.dispatch_prepared(&runtime, &intent).unwrap();
+    assert!(!control.command_uncertain(&command(CommandState::Submitted), &router));
+    wait(&mut control);
+    control.snapshot = Some(fixture.store.snapshot().unwrap());
+    // A decided command never blocks.
+    let decided = CommandState::Refused {
+        reason: "no".into(),
+    };
+    assert_eq!(attempt(&control, decided), (Ok(()), 0));
 }
 #[test]
 fn prepared_scope_uses_its_exact_domain_and_saved_revision() {
