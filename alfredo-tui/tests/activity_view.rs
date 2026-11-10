@@ -342,6 +342,75 @@ fn live_progress_requests_timing_redraws_even_when_the_pane_is_hidden() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+fn finish_receipt(status: alfredo_tui::tasks::TaskStatus, detail: &str) -> Receipt {
+    Receipt {
+        revision: 1,
+        task: 1,
+        request: Request {
+            correlation: "finish:task-1-run-1".into(),
+            expected_revision: 0,
+            action: Action::Finish {
+                task: 1,
+                run: "task-1-run-1".into(),
+                status,
+                evidence_sha256: "b".repeat(64),
+                detail: detail.into(),
+            },
+        },
+    }
+}
+
+#[test]
+fn a_failed_finish_row_carries_the_receipt_cause_cut_with_an_ellipsis() {
+    use alfredo_tui::tasks::TaskStatus::Failed;
+    let detail = "Check failed (exit 3): stderr: AssertionError: v should be 1 but is 0";
+    assert_eq!(
+        ui::short_phase(&finish_receipt(Failed, detail)),
+        "Task #1 failed · Check failed (exit 3): stderr: AssertionError: v should be 1 b…"
+    );
+}
+
+#[test]
+fn the_failed_finish_cause_is_cut_one_cell_past_the_limit_not_at_it() {
+    use alfredo_tui::tasks::TaskStatus::Failed;
+    let prefix = "Task #1 failed · ";
+    let fits = "x".repeat(80 - prefix.len());
+    assert_eq!(
+        ui::short_phase(&finish_receipt(Failed, &fits)),
+        format!("{prefix}{fits}")
+    );
+    let over = "x".repeat(80 - prefix.len() + 1);
+    assert_eq!(
+        ui::short_phase(&finish_receipt(Failed, &over)),
+        format!("{prefix}{}…", "x".repeat(80 - prefix.len() - 1))
+    );
+}
+
+#[test]
+fn a_failed_finish_with_no_cause_keeps_the_bare_row() {
+    use alfredo_tui::tasks::TaskStatus::Failed;
+    for detail in ["", "   ", "\n\t"] {
+        assert_eq!(
+            ui::short_phase(&finish_receipt(Failed, detail)),
+            "Task #1 failed",
+            "{detail:?}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_finish_cause_is_one_line_with_hidden_characters_shown() {
+    use alfredo_tui::tasks::TaskStatus::Failed;
+    let row = ui::short_phase(&finish_receipt(
+        Failed,
+        "Check failed\nstderr: a\u{202e}b\u{200b}c\r\nd\u{2028}e",
+    ));
+    assert_eq!(
+        row,
+        "Task #1 failed · Check failed stderr: a<U+202E>b<U+200B>c d e"
+    );
+}
+
 #[test]
 fn a_failed_check_receipt_shows_its_whole_key_line_at_100_columns() {
     let key = "AssertionError: answer was 41 not 42";
