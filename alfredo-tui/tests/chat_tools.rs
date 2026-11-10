@@ -348,6 +348,17 @@ fn grep_reports_path_line_and_text_and_skips_git() {
     );
 }
 
+// Issue #662: a non-boolean `ignore_case` is refused, like `escalate`, not read as false.
+#[test]
+fn grep_rejects_a_non_boolean_ignore_case() {
+    let workspace = Workspace::new();
+    let refused = workspace.run("grep", json!({"pattern": "demo", "ignore_case": "true"}));
+    assert_eq!(
+        refused.trim(),
+        "error: argument ignore_case must be true or false"
+    );
+}
+
 // Issue #343: discovery honours git's ignore rules.
 
 /// A Workspace whose `.git` is a real repository (the plain one has a fake `.git`).
