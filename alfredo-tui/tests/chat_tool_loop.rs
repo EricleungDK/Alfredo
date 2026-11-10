@@ -370,6 +370,42 @@ async fn calls_past_the_per_round_limit_get_error_results() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #651: a long non-ASCII tool name is cut by bytes, so it stays a valid step.
+#[tokio::test]
+async fn a_long_non_ascii_tool_name_gets_an_unknown_tool_result_and_the_turn_completes() {
+    let root = workspace("cjk-name");
+    let addr = ollama_fixture::reserve();
+    let name = "读".repeat(40);
+    let fixture = ollama_fixture::serve(addr, {
+        let name = name.clone();
+        move |_, index| {
+            if index == 0 {
+                tool_call(&name, json!({}))
+            } else {
+                done("ok")
+            }
+        }
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert("go");
+    let messages = session.begin().unwrap();
+    finish(run(&fixture.endpoint, &root, messages).await, &mut session);
+    assert_eq!(session.status, Status::Complete);
+    let steps = session.tool_steps(1);
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].results.len(), 1);
+    assert!(
+        steps[0].results[0].starts_with("error: unknown tool"),
+        "{}",
+        steps[0].results[0]
+    );
+    assert!(steps[0].calls[0].name.len() <= 64);
+    let requests = fixture.requests.lock().unwrap();
+    let second = serde_json::to_string(&requests[1].body["messages"]).unwrap();
+    assert!(second.contains("unknown tool"), "{second}");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn the_loop_stops_when_a_step_would_pass_the_conversation_limit() {
     let root = workspace("limit");
