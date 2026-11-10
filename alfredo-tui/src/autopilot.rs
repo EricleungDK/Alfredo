@@ -2311,15 +2311,35 @@ fn unattended_lint(plan: &crate::planner::Plan) -> Result<(), String> {
     }
 }
 
+/// Start of every [`lint_refusal`].
+const LINT_REFUSAL_PREFIX: &str = "The plan cannot run unattended and nothing changed:";
+
+/// What follows the findings in every [`lint_refusal`].
+const LINT_REFUSAL_FIX: &str = "Fix it with /plan-revise (draft) or run it by hand with /approve";
+
 /// Reviewing a plan is the approval of its files and checks, but autopilot
 /// still refuses what it would refuse from the planner.
 fn lint_refusal(plan: &crate::planner::Plan) -> Result<(), String> {
     unattended_lint(plan).map_err(|error| {
+        // Every finding ends with a period of its own (#650).
         format!(
-            "The plan cannot run unattended and nothing changed: {}. Fix it with /plan-revise (draft) or run it by hand with /approve",
-            clean(&error, 600)
+            "{LINT_REFUSAL_PREFIX} {}. {LINT_REFUSAL_FIX}",
+            clean(&error, 600).trim_end_matches('.')
         )
     })
+}
+
+/// How the interactive TUI shows a [`lint_refusal`] that the one-line footer would cut
+/// before its fix: the footer names the fix, and the chat rows carry the whole sentence
+/// (#650). `None` for any other message.
+pub fn lint_refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
+    if !message.starts_with(LINT_REFUSAL_PREFIX) || !message.ends_with(LINT_REFUSAL_FIX) {
+        return None;
+    }
+    Some((
+        format!("{command} refused: the plan fails the unattended lint (see the chat rows above)"),
+        vec![format!("✗ Not started · {message}")],
+    ))
 }
 
 /// The goal autopilot shows for a plan it adopts: the `/plan` prompt.
