@@ -251,6 +251,91 @@ async fn the_loop_stops_at_the_step_cap_with_a_visible_notice() {
     let _ = fs::remove_dir_all(root);
 }
 
+const TEXT_CALL_NOTICE: &str =
+    "The model wrote a tool call as text; nothing ran. Ctrl+R retries.";
+
+/// Run one turn whose only reply is `text`; the notices, the reply and whether any tool
+/// event or file write happened (issue #660).
+async fn text_reply(tag: &str, text: &str) -> (Vec<String>, String, bool, usize) {
+    let root = workspace(tag);
+    let addr = ollama_fixture::reserve();
+    let reply = text.to_owned();
+    let fixture = ollama_fixture::serve(addr, move |_, _| done(&reply));
+    let mut session = Session::new("fixture".into());
+    session.insert("hi");
+    let messages = session.begin().unwrap();
+    let events = run(&fixture.endpoint, &root, messages).await;
+    let mut notices = Vec::new();
+    let mut ran = false;
+    for event in events {
+        match &event.update {
+            Update::Notice(text) => notices.push(text.clone()),
+            Update::ToolStep(_) | Update::ToolResult { .. } | Update::RuleRunning { .. } => {
+                ran = true;
+            }
+            _ => {}
+        }
+        session.apply(event.attempt, event.update);
+    }
+    assert_eq!(session.status, Status::Complete);
+    let wrote = root.join("pwned.txt").exists();
+    let requests = fixture.count("POST /api/chat");
+    let _ = fs::remove_dir_all(root);
+    (
+        notices,
+        session.messages[1].content.clone(),
+        ran || wrote,
+        requests,
+    )
+}
+
+#[tokio::test]
+async fn a_whole_reply_json_tool_call_gets_the_notice_and_nothing_runs() {
+    let call = r#"{"name": "write_file", "arguments": {"path": "pwned.txt", "content": "x"}}"#;
+    let (notices, reply, ran, requests) = text_reply("text-json", &format!("\n {call}\n")).await;
+    assert_eq!(notices, [TEXT_CALL_NOTICE]);
+    assert_eq!(reply, format!("\n {call}\n"), "the reply stays as written");
+    assert!(!ran, "a text call must never run a tool");
+    assert_eq!(requests, 1, "no re-prompt");
+}
+
+#[tokio::test]
+async fn tool_call_blocks_naming_registered_tools_get_the_notice_and_nothing_runs() {
+    let one = r#"<tool_call>{"name":"write_file","arguments":{"path":"pwned.txt","content":"x"}}</tool_call>"#;
+    let two = format!(
+        "{one}\n<tool_call>\n{{\"name\":\"read_file\",\"arguments\":{{\"path\":\"README.md\"}}}}\n</tool_call>"
+    );
+    for (tag, text) in [("block-one", one.to_owned()), ("block-two", two)] {
+        let (notices, _, ran, requests) = text_reply(tag, &text).await;
+        assert_eq!(notices, [TEXT_CALL_NOTICE], "{text}");
+        assert!(!ran);
+        assert_eq!(requests, 1);
+    }
+}
+
+#[tokio::test]
+async fn prose_fences_unknown_tools_and_partial_blocks_leave_the_reply_unchanged() {
+    let cases = [
+        r#"Use {"name":"read_file","arguments":{"path":"a.txt"}} to read it."#,
+        "```json\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.txt\"}}\n```",
+        r#"{"name":"launch_missiles","arguments":{}}"#,
+        r#"<tool_call>{"name":"launch_missiles","arguments":{}}</tool_call>"#,
+        r#"<tool_call>{"name":"read_file","arguments":{"path":"a"}}</tool_call> done"#,
+        r#"Sure. <tool_call>{"name":"read_file","arguments":{"path":"a"}}</tool_call>"#,
+        r#"<tool_call>{"name":"read_file","arguments":{"path":"a"}}"#,
+        r#"{"name":"read_file","arguments":"a.txt"}"#,
+        r#"{"name":"read_file"}"#,
+        r#"[{"name":"read_file","arguments":{"path":"a.txt"}}]"#,
+        "Plain answer.",
+    ];
+    for (index, text) in cases.iter().enumerate() {
+        let (notices, reply, ran, _) = text_reply(&format!("plain-{index}"), text).await;
+        assert!(notices.is_empty(), "{text}: {notices:?}");
+        assert_eq!(reply, *text);
+        assert!(!ran);
+    }
+}
+
 #[tokio::test]
 async fn a_configured_cap_stops_the_loop_after_that_many_rounds() {
     let root = workspace("cap-configured");
