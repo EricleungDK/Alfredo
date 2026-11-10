@@ -3601,7 +3601,13 @@ fn chat_collapsed_step_of_a_failed_check_names_the_cause_after_failed() {
             row.contains("✗ #1 planned → approved → started → failed · Check failed (exit 1):")
         })
         .unwrap_or_else(|| panic!("{screen}"));
-    assert!(rows[first + 1].contains("stderr: Traceback"), "{screen}");
+    // Issue #658: the row names the check's key error line, not the head of its traceback.
+    let step = rows[first..=first + 1].join(" ");
+    assert!(
+        step.contains("Check failed (exit 1): AssertionError"),
+        "{screen}"
+    );
+    assert!(!step.contains("Traceback"), "{screen}");
     assert!(!screen.contains("→ failed →"), "{screen}");
 }
 

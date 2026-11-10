@@ -370,6 +370,38 @@ fn a_failed_finish_row_carries_the_receipt_cause_cut_with_an_ellipsis() {
     );
 }
 
+const TRACEBACK_DETAIL: &str = "Check failed (exit 1): stderr: Traceback (most recent call last): | File \"<string>\", line 1, in <module> | from calc import answer; assert answer() == 42 | ^^^^^^^^^^^^^^ | AssertionError";
+
+#[test]
+fn a_failed_finish_row_of_a_python_traceback_names_the_key_error_line() {
+    use alfredo_tui::tasks::TaskStatus::Failed;
+    let row = ui::short_phase(&finish_receipt(Failed, TRACEBACK_DETAIL));
+    assert_eq!(
+        row,
+        "Task #1 failed · Check failed (exit 1): AssertionError"
+    );
+}
+
+#[test]
+fn a_failed_finish_row_keeps_the_key_line_when_a_long_check_head_is_cut() {
+    use alfredo_tui::tasks::TaskStatus::Failed;
+    let detail = format!(
+        "Check failed (exit 1): {}: stderr: noise | ImportError: cannot import name 'answer'",
+        "python -c from calc import answer ".repeat(4)
+    );
+    let row = ui::short_phase(&finish_receipt(Failed, &detail));
+    assert!(
+        row.ends_with("ImportError: cannot import name 'answer'"),
+        "{row}"
+    );
+    assert!(
+        row.contains('…'),
+        "the head is cut, not the key line: {row}"
+    );
+    assert!(row.chars().count() <= 80, "{row}");
+    assert!(!row.contains("stderr:"), "{row}");
+}
+
 #[test]
 fn the_failed_finish_cause_is_cut_one_cell_past_the_limit_not_at_it() {
     use alfredo_tui::tasks::TaskStatus::Failed;
