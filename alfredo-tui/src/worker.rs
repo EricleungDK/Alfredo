@@ -1870,7 +1870,7 @@ pub async fn start_checked(
                 receipt.request.correlation == format!("finish:{}", run.id)
                     && matches!(&receipt.request.action, Action::Finish { evidence_sha256, .. } if evidence_sha256 == &digest)
             }) {
-                return Ok((current, evidence.detail));
+                return Ok((current, finish_notice(&evidence.detail)));
             }
             let request = Request {
                 correlation: format!("finish:{}", run.id),
@@ -1884,7 +1884,7 @@ pub async fn start_checked(
                 },
             };
             if let Ok((snapshot, _)) = store.transact(request) {
-                return Ok((snapshot, evidence.detail));
+                return Ok((snapshot, finish_notice(&evidence.detail)));
             }
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1892,6 +1892,13 @@ pub async fn start_checked(
     Err(Refusal::Uncertain(
         "Evidence saved, but task result receipt is not confirmed; do not rerun effects".into(),
     ))
+}
+
+/// The footer text for a finished run (issue #658): a failed check reads as its head and key
+/// error line, not the first words of its output; any other detail is shown as recorded.
+pub fn finish_notice(detail: &str) -> String {
+    crate::autopilot::failure::check_cause(&crate::dashboard::single_line_visible(detail), 160)
+        .unwrap_or_else(|| detail.to_owned())
 }
 
 // Admission does not approve work. It revalidates the already claimed exact

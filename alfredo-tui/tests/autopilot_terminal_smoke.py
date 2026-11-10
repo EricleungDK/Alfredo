@@ -581,7 +581,7 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.wait_until('task 1 approved', lambda: self.statuses()[0][1] == 'approved')
         terminal.send('/run 1\r')
         self.wait_until('task 1 failed', lambda: self.statuses()[0][1] == 'failed', 60)
-        cause = '✗ Task #1 failed · Check failed (exit 1): stderr: Traceback'
+        cause = '✗ Task #1 failed · Check failed (exit 1): AssertionError'
         # F2 shows the chat view where the /run acknowledgment row sits; a redraw can swallow
         # the key, so press it again until the whole row is there (runbook section 6).
         deadline = time.monotonic() + 60
@@ -596,6 +596,10 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         flat = self.flat(terminal)
         self.assertIn(cause, flat)
         self.assertNotRegex(flat, r'Task #1 failed(?! ·)')
+        # Issue #658: the footer names the key line too, not the head of the traceback.
+        footer = terminal.screen().rstrip().splitlines()[-1]
+        self.assertIn('Check failed (exit 1): AssertionError', footer)
+        self.assertNotIn('Traceback', footer)
         self.quit(terminal)
 
     def test_go_in_repository_without_commits_fails_once_with_the_fix(self):

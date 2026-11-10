@@ -366,7 +366,7 @@ fn a_failed_finish_row_carries_the_receipt_cause_cut_with_an_ellipsis() {
     let detail = "Check failed (exit 3): stderr: AssertionError: v should be 1 but is 0";
     assert_eq!(
         ui::short_phase(&finish_receipt(Failed, detail)),
-        "Task #1 failed · Check failed (exit 3): stderr: AssertionError: v should be 1 b…"
+        "Task #1 failed · Check failed (exit 3): AssertionError: v should be 1 but is 0"
     );
 }
 

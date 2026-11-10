@@ -83,6 +83,8 @@ In the interactive TUI, the denied-sandbox refusal of `/go` and `/run` is shown 
 
 In the interactive TUI, a bare `/go` that the unattended plan lint refuses is shown the same way: the chat rows carry the whole finding (without a doubled period) and `Fix it with /plan-revise (draft) or run it by hand with /approve`, and the footer reads `/go refused: the plan fails the unattended lint (see the chat rows above)`. From the task view (F2) `/go` returns to the chat view so the rows are visible.
 
+A failed task's chat row (`✗ Task #1 failed · …`), the `started → failed` step of `/go` and the footer after a failed run name the check's key error line, as the `/go` summary does: `Check failed (exit 1): AssertionError`. The `stderr:`/`stdout:` label is dropped and the head is cut first (at 80 cells in rows) so the key line stays; hidden characters show as `<U+XXXX>`. The task pane and F3 evidence keep the whole output.
+
 Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any model
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
 executable check as `--doctor`). A bwrap that exists but cannot create a sandbox (user-namespace restriction, e.g. Ubuntu 24.04 AppArmor) is refused the same way before any model call, quoting bwrap's stderr and a host-policy fix instead of the install hint: a no-op `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` runs once per process (5 s limit) for `/go`, `--go` and `/run`, and fresh in `--doctor` (`FAIL sandbox`). If the sandbox still fails to start during a run, that
