@@ -252,6 +252,8 @@ fn temperature_json(value: f64) -> serde_json::Value {
 pub enum Round {
     /// The round finished; the tool calls it asked for (possibly none).
     Calls(Vec<ToolCall>),
+    /// The round finished with no tool call; the text it streamed (issue #660).
+    Reply(String),
     /// The model rejected tools; the failure was withheld for a plain retry.
     Rejected,
     /// The round failed (`Failed` sent) or the receiver closed.
@@ -264,6 +266,8 @@ struct Trace {
     recording: Option<Recording>,
     /// `Some` while a tool round collects its calls instead of emitting them.
     calls: Option<Vec<ToolCall>>,
+    /// The reply text of a collecting round (issue #660).
+    text: String,
 }
 
 #[derive(Deserialize)]
@@ -762,6 +766,7 @@ impl Ollama {
             .await
         {
             Round::Calls(calls) => Some(calls),
+            Round::Reply(_) => Some(Vec::new()),
             Round::Rejected | Round::Stopped => None,
         }
     }
@@ -828,6 +833,7 @@ impl Ollama {
             started: self.recorder.as_ref().map(|_| Instant::now()),
             recording: None,
             calls: collect.map(|_| Vec::new()),
+            text: String::new(),
         };
         // Recorded qualification requests measure one exact wire request.
         let limit = if self.recorder.is_some() {
@@ -884,7 +890,14 @@ impl Ollama {
             });
         }
         let failure = match result {
-            Ok(Ok(())) => return Round::Calls(trace.calls.take().unwrap_or_default()),
+            Ok(Ok(())) => {
+                let calls = trace.calls.take().unwrap_or_default();
+                return if calls.is_empty() && collect.is_some() {
+                    Round::Reply(std::mem::take(&mut trace.text))
+                } else {
+                    Round::Calls(calls)
+                };
+            }
             Ok(Err(error)) => error,
             Err(_) => "Request exceeded the ten-minute deadline; partial reply retained".into(),
         };
@@ -1293,6 +1306,9 @@ impl Ollama {
                     .map_err(|_| "Terminal closed")?;
             }
             if !content.is_empty() {
+                if trace.calls.is_some() {
+                    trace.text.push_str(&content);
+                }
                 sender
                     .send(Event {
                         session,

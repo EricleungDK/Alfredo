@@ -281,6 +281,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/ui.rs`, `src/ui/inspector.rs`, `src/ui/activity_lines.rs`, `src/model.rs` | Rendering (task inspector and receipts; activity and command lines) and conversation state |
 | `src/chat_tools/allow.rs` | Chat always-allow rules: per-mission store, strict matching, `/allow` |
 | `src/chat_tools/undo.rs` | `/undo`: pre-images of the last chat turn's approved edits in the State Directory, per-file refusal when changed since |
+| `src/chat_tools/text_call.rs` | Strict matcher for a reply that is only a tool call written as text (notice only, never run) |
 | `src/compaction.rs` | Chat compaction: summarise older turns into a note, `/clear`, `/compact` |
 | `src/console_log.rs` | Console command history on `Session` (child of `model`): sequences, admission, budget eviction, task receipts |
 | `src/side_pane.rs`, `src/theme.rs` | Side pane projection and keys; icons, status glyphs, palette, spinner |

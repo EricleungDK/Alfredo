@@ -198,6 +198,14 @@ pub async fn run_turn_limited(
             .await
         {
             Round::Calls(calls) => calls,
+            // The provider already sent `Done` with the tokens. Text that is only a
+            // tool call is never run (issue #660): the owner is told, after the reply.
+            Round::Reply(text) => {
+                if super::text_call::is_text_tool_call(&text) {
+                    send(Update::Notice(super::text_call::NOTICE.into())).await;
+                }
+                return;
+            }
             Round::Stopped => return,
             Round::Rejected => {
                 // Retry this round once without tools; later turns skip them without probing.

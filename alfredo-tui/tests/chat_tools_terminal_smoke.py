@@ -34,6 +34,10 @@ BIG_NEW = BIG_OLD.replace('row 100\nrow 101\nrow 102\n', 'ROW 100 new\nROW 101 n
 README = '# Demo project\nREADME_BODY_MARKER: a tiny repository used by the smoke.\n'
 
 
+TEXT_CALL = '{"name": "write_file", "arguments": {"path": "pwned.txt", "content": "x"}}'
+TEXT_CALL_NOTICE = 'The model wrote a tool call as text; nothing ran. Ctrl+R retries.'
+
+
 class Fixture:
     def __init__(self):
         self.requests = []
@@ -118,6 +122,8 @@ class Fixture:
                         'done': False}]
                 elif 'read big' in prompt:
                     chunks = [{'message': {'content': 'BIG_DONE'}, 'done': False}]
+                elif 'text call' in prompt:
+                    chunks = [{'message': {'content': TEXT_CALL}, 'done': False}]
                 elif 'just do it' in prompt:
                     chunks = [{'message': {'content': 'WAYFINDER_CHAT_REPLY'}, 'done': False}]
                 elif 'slow one' in prompt:
@@ -484,6 +490,21 @@ class ChatTools(unittest.TestCase):
         self.assertIn('read_file', self.tool_names(chats[0]))
         self.assertIn('run_command', self.tool_names(chats[0]))
         self.assertNotIn('Wayfinder', self.terminal.screen())
+
+    def test_a_tool_call_written_as_text_shows_the_notice_and_runs_nothing(self):
+        # Issue #660: the reply stays as written, the footer says nothing ran, and Ctrl+R
+        # asks again.
+        self.terminal.write(b'text call please\r')
+        self.terminal.wait_for(TEXT_CALL_NOTICE)
+        self.assertFalse(Path(self.repo.name, 'pwned.txt').exists())
+        self.assertEqual(len(self.fixture.chats()), 1)
+        time.sleep(0.3)
+        self.terminal.write(b'\x12')
+        deadline = time.time() + 5
+        while len(self.fixture.chats()) < 2 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(len(self.fixture.chats()), 2, 'Ctrl+R retried the turn')
+        self.assertFalse(Path(self.repo.name, 'pwned.txt').exists())
 
     def test_wayfinder_chat_says_tools_are_off_and_scope_clear_gives_them_back(self):
         # Issue #334: a project-start prompt enters Wayfinder (no request); the mission

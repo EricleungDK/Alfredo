@@ -24,6 +24,7 @@ mod run;
 pub mod secret_masks;
 mod shell;
 pub mod summary;
+pub mod text_call;
 pub mod undo;
 
 pub use run::{parse_max_turns, run_turn, run_turn_limited, MAX_STEPS, STEP_CAP_NOTICE};

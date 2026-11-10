@@ -839,6 +839,8 @@ struct Turn {
     stopped: Option<Stop>,
     /// Set when the model has no tool support (issue #281): the reply stays the model's text.
     no_tools: bool,
+    /// The text-tool-call notice (issue #660); nothing ran.
+    notice: Option<String>,
     /// Round cap the turn ran under (`--max-turns`); None is the default.
     cap: Option<usize>,
     /// Server counts summed over the turn's rounds (issue #283).
@@ -851,6 +853,10 @@ impl Turn {
             // After a stop the text is only the TUI's "ask again" notice.
             Update::Token(text) if self.stopped.is_none() => self.reply.push_str(&text),
             Update::Stopped(stop) => self.stopped = Some(stop),
+            Update::Notice(text) if text == alfredo_tui::chat_tools::text_call::NOTICE => {
+                say(text.clone());
+                self.notice = Some(text);
+            }
             Update::Notice(text) => {
                 self.no_tools = true;
                 say(text.chars().filter(|c| !c.is_control()).collect::<String>());
@@ -957,6 +963,7 @@ impl Turn {
             "policy": policy.label(),
             "reply": self.reply.trim(),
             "tools": !self.no_tools,
+            "notice": self.notice,
             "steps": self.steps,
             "calls": self.calls.iter().map(|call| serde_json::json!({
                 "tool": call.tool, "path": call.path,

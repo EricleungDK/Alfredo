@@ -1578,3 +1578,29 @@ fn headless_go_names_an_unrecordable_command_as_the_pause_reason() {
     assert!(reason.contains(expected), "{reason}");
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_reply_that_is_only_a_text_tool_call_adds_the_notice_and_keeps_the_exit_code() {
+    let notice = "The model wrote a tool call as text; nothing ran. Ctrl+R retries.";
+    let call = r#"{"name":"write_file","arguments":{"path":"pwned.txt","content":"x"}}"#;
+    for (tag, reply, expected) in [
+        ("text-call", call, Some(notice)),
+        ("text-plain", "All done.", None),
+    ] {
+        let root = repository(tag);
+        let fixture = scripted_chat(vec![done(reply)]);
+        let output = run(&root, &fixture, &["--chat", "hi", "--headless"]);
+        let value = result(&output);
+        assert_eq!(value["state"], "done");
+        assert_eq!(value["reply"], reply);
+        assert_eq!(value["tools"], true);
+        assert_eq!(value["notice"], json!(expected));
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).contains(notice),
+            expected.is_some()
+        );
+        assert!(!root.join("workspace/pwned.txt").exists(), "nothing ran");
+        let _ = fs::remove_dir_all(root);
+    }
+}
