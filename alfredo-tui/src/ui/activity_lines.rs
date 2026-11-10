@@ -3,6 +3,22 @@ use super::{
     Modifier, Span, Style, COMMAND_SUMMARY,
 };
 
+/// Cells a failed-finish phrase may take, cause included (issue #655). 80 cuts the AC example
+/// `Task #1 failed · Check failed (exit 3): stderr: AssertionError: v should be 1 b…` exactly.
+const FAILED_PHRASE_CELLS: usize = 80;
+
+/// `head · cause`: the receipt's own detail on one line, hidden characters shown, cut with
+/// `…`. A blank detail leaves `head` alone (issue #655).
+fn with_cause(head: String, detail: &str) -> String {
+    let cause = crate::dashboard::single_line_visible(detail);
+    let cause = cause.trim();
+    if cause.is_empty() {
+        head
+    } else {
+        truncate(&format!("{head} · {cause}"), FAILED_PHRASE_CELLS)
+    }
+}
+
 /// One short human sentence per canonical receipt.
 pub fn short_phase(receipt: &crate::tasks::Receipt) -> String {
     use crate::tasks::{Action, TaskStatus};
@@ -22,9 +38,9 @@ pub fn short_phase(receipt: &crate::tasks::Receipt) -> String {
         Action::Cancel { .. } => format!("Task #{id} cancelled"),
         Action::Requeue { .. } => format!("Task #{id} requeued"),
         Action::Start { .. } => format!("Task #{id} started"),
-        Action::Finish { status, .. } => match status {
+        Action::Finish { status, detail, .. } => match status {
             TaskStatus::ReviewReady => format!("Task #{id} check passed · awaiting review"),
-            TaskStatus::Failed => format!("Task #{id} failed"),
+            TaskStatus::Failed => with_cause(format!("Task #{id} failed"), detail),
             TaskStatus::Cancelled => format!("Task #{id} run cancelled"),
             TaskStatus::NeedsHumanReview => format!("Task #{id} held for human review"),
             other => format!("Task #{id} finished · {other:?}"),
@@ -108,9 +124,10 @@ fn phase_word(receipt: &crate::tasks::Receipt) -> Vec<Phase> {
         Action::Requeue { .. } => done("requeued"),
         Action::Assign { .. } => done("assigned"),
         Action::Start { .. } => done("started"),
-        Action::Finish { status, .. } => match status {
+        Action::Finish { status, detail, .. } => match status {
             TaskStatus::ReviewReady => done("check passed"),
             TaskStatus::Cancelled => vec![("cancelled".to_owned(), StepKind::Stopped)],
+            TaskStatus::Failed => vec![(with_cause("failed".to_owned(), detail), StepKind::Failed)],
             _ => vec![("failed".to_owned(), StepKind::Failed)],
         },
         Action::Cancel { .. } => vec![("cancelled".to_owned(), StepKind::Stopped)],
