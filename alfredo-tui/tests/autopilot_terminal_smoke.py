@@ -561,6 +561,26 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertIn('AssertionError', terminal.screen())
         self.quit(terminal)
 
+    def test_run_of_a_failing_task_shows_the_check_cause_on_its_chat_row_at_80_columns(self):
+        # Issue #655: the typed /run acknowledgment row (short_phase) carries the cause too.
+        self.fixture.release_app.set()
+        terminal = self.terminal(resume=False, height=30, width=80)
+        terminal.send('/plan add answer function\r')
+        self.screen_has(terminal, 'Not saved or approved', 60)
+        self.wait_until('draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
+        terminal.send('/plan-save\r')
+        self.screen_has(terminal, 'Plan saved', 30)
+        terminal.send('/approve 1\r')
+        self.wait_until('task 1 approved', lambda: self.statuses()[0][1] == 'approved')
+        terminal.send('/run 1\r')
+        self.wait_until('task 1 failed', lambda: self.statuses()[0][1] == 'failed', 60)
+        terminal.send(b'\x1bOQ')  # F2: the chat view, where the /run acknowledgment row sits
+        self.screen_has(terminal, 'Task #1 failed · Check failed (exit', 60)
+        flat = self.flat(terminal)
+        self.assertIn('✗ Task #1 failed · Check failed (exit 1): stderr: Traceback', flat)
+        self.assertNotRegex(flat, r'Task #1 failed(?! ·)')
+        self.quit(terminal)
+
     def test_go_in_repository_without_commits_fails_once_with_the_fix(self):
         empty = self.workspace.parent / 'empty'
         empty.mkdir()

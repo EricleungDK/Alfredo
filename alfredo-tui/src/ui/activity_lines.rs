@@ -3,7 +3,8 @@ use super::{
     Modifier, Span, Style, COMMAND_SUMMARY,
 };
 
-/// Cells a failed-finish phrase may take, cause included (issue #655).
+/// Cells a failed-finish phrase may take, cause included (issue #655). 80 cuts the AC example
+/// `Task #1 failed · Check failed (exit 3): stderr: AssertionError: v should be 1 b…` exactly.
 const FAILED_PHRASE_CELLS: usize = 80;
 
 /// `head · cause`: the receipt's own detail on one line, hidden characters shown, cut with
