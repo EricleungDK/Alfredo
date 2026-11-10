@@ -251,8 +251,7 @@ async fn the_loop_stops_at_the_step_cap_with_a_visible_notice() {
     let _ = fs::remove_dir_all(root);
 }
 
-const TEXT_CALL_NOTICE: &str =
-    "The model wrote a tool call as text; nothing ran. Ctrl+R retries.";
+const TEXT_CALL_NOTICE: &str = "The model wrote a tool call as text; nothing ran. Ctrl+R retries.";
 
 /// Run one turn whose only reply is `text`; the notices, the reply and whether any tool
 /// event or file write happened (issue #660).
@@ -1369,4 +1368,26 @@ async fn an_applied_call_survives_a_cancelled_round_and_reaches_the_next_request
     );
     assert_eq!(text.last().unwrap(), "user: hello");
     let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_text_tool_call_reply_can_be_retried_with_ctrl_r_but_a_plain_one_cannot() {
+    for (text, retryable) in [
+        (r#"{"name":"read_file","arguments":{"path":"a.txt"}}"#, true),
+        ("Plain answer.", false),
+    ] {
+        let root = workspace("text-retry");
+        let addr = ollama_fixture::reserve();
+        let reply = text.to_owned();
+        let fixture = ollama_fixture::serve(addr, move |_, _| done(&reply));
+        let mut session = Session::new("fixture".into());
+        session.insert("hi");
+        let messages = session.begin().unwrap();
+        for event in run(&fixture.endpoint, &root, messages).await {
+            session.apply(event.attempt, event.update);
+        }
+        assert_eq!(session.ends_in_text_tool_call(), retryable, "{text}");
+        assert_eq!(session.retry().is_ok(), retryable, "{text}");
+        let _ = fs::remove_dir_all(root);
+    }
 }

@@ -359,6 +359,7 @@ open TUI or another headless chat on the same repository (`--go --headless` stil
 whole lines to `chat-approvals.jsonl` (a per-mission file lock serializes each append). The
 eval uses it for chat tasks (`eval/README.md`).
 A reply with no text (and no stop), even after tool rounds, is `state` `failed` with `error` `Model returned no text; Ctrl+R retries or send again` (exit 1).
+`notice` is `null`, or `The model wrote a tool call as text; nothing ran. Ctrl+R retries.` when the whole reply was a tool call written as text (also on stderr); `state` and the exit code are unchanged.
 
 ## Build and install a development archive
 
@@ -1897,6 +1898,12 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   retries or send again`, shown as a transcript row and in the status line instead of a
   blank Assistant block. Like any failed turn, it is not sent as context: Ctrl+R retries the
   prompt, and a new prompt moves on without the empty reply. There is no automatic retry.
+- **Tool call written as text (issue #660).** When the whole trimmed reply is one JSON object
+  with a registered tool `name` and an `arguments` object, or only `<tool_call>…</tool_call>`
+  blocks that each do, the reply stays as written and the footer says `The model wrote a tool
+  call as text; nothing ran. Ctrl+R retries.` Nothing derived from model text is ever run
+  and there is no automatic retry; Ctrl+R asks again. Prose around such JSON, code fences and
+  unknown tool names get no notice.
 - **On screen.** Before the reply, each call shows as `⚙ read_file README.md` followed by
   `↳` and the first line of its result cut to one row (`… (N lines)` when longer). The
   full result goes to the model. Ctrl+O in the conversation shows every result of the

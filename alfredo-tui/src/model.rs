@@ -1283,8 +1283,19 @@ impl Session {
                 .all(|index| index.is_multiple_of(2) && index + 2 < self.messages.len())
     }
 
+    /// Whether the last reply is only a tool call written as text (issue #660).
+    pub fn ends_in_text_tool_call(&self) -> bool {
+        self.messages.last().is_some_and(|m| {
+            m.role == "assistant" && crate::chat_tools::text_call::is_text_tool_call(&m.content)
+        })
+    }
+
     pub fn retry(&mut self) -> Result<Vec<Message>, &'static str> {
-        if !matches!(self.status, Status::Failed(_) | Status::Cancelled) {
+        // A reply that was only a tool call written as text (issue #660) is retryable too:
+        // its notice says Ctrl+R retries.
+        if !matches!(self.status, Status::Failed(_) | Status::Cancelled)
+            && !(self.status == Status::Complete && self.ends_in_text_tool_call())
+        {
             return Err("Only interrupted turns can be retried");
         }
         // The incomplete assistant message stays visible until an explicit retry.
@@ -2068,7 +2079,11 @@ impl App {
     pub fn apply(&mut self, event: Event) {
         if let Some(session) = self.sessions.get_mut(event.session) {
             if let Update::Notice(text) = &event.update {
-                if session.attempt == event.attempt && session.status.active() {
+                // The text-call notice follows `Done` (issue #660), so it also shows on a
+                // turn that just completed.
+                let late = text == crate::chat_tools::text_call::NOTICE
+                    && session.status == Status::Complete;
+                if session.attempt == event.attempt && (session.status.active() || late) {
                     self.notice = text.clone();
                 }
                 return;
