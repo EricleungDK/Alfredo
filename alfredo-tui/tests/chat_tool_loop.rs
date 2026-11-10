@@ -1391,3 +1391,53 @@ async fn a_text_tool_call_reply_can_be_retried_with_ctrl_r_but_a_plain_one_canno
         let _ = fs::remove_dir_all(root);
     }
 }
+
+/// An app whose first conversation has a completed turn; the attempt it ran under.
+fn completed_app() -> (alfredo_tui::model::App, u64) {
+    let mut app = alfredo_tui::model::App::new("fixture".into());
+    app.sessions[0].insert("hi");
+    app.sessions[0].begin().unwrap();
+    let attempt = app.sessions[0].attempt;
+    app.apply(Event {
+        session: 0,
+        attempt,
+        update: Update::Token("reply".into()),
+    });
+    app.apply(Event {
+        session: 0,
+        attempt,
+        update: Update::Done,
+    });
+    assert_eq!(app.sessions[0].status, Status::Complete);
+    app.notice.clear();
+    (app, attempt)
+}
+
+fn notice_event(attempt: u64, text: &str) -> Event {
+    Event {
+        session: 0,
+        attempt,
+        update: Update::Notice(text.into()),
+    }
+}
+
+#[test]
+fn the_text_call_notice_shows_on_a_completed_turn_of_the_same_attempt() {
+    let (mut app, attempt) = completed_app();
+    app.apply(notice_event(attempt, TEXT_CALL_NOTICE));
+    assert_eq!(app.notice, TEXT_CALL_NOTICE);
+}
+
+#[test]
+fn the_text_call_notice_is_dropped_for_a_stale_attempt() {
+    let (mut app, attempt) = completed_app();
+    app.apply(notice_event(attempt + 1, TEXT_CALL_NOTICE));
+    assert!(app.notice.is_empty(), "{:?}", app.notice);
+}
+
+#[test]
+fn any_other_notice_is_dropped_on_a_completed_turn() {
+    let (mut app, attempt) = completed_app();
+    app.apply(notice_event(attempt, "Model m has no tool support"));
+    assert!(app.notice.is_empty(), "{:?}", app.notice);
+}
