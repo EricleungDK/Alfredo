@@ -553,6 +553,14 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertNotIn('Invalid plan JSON', screen)
         self.quit(terminal)
 
+    def test_a_failed_task_row_in_the_chat_view_names_the_failed_check_at_80_columns(self):
+        # Issue #655: the row said only "failed"; the receipt's own cause now follows it.
+        terminal = self.terminal(resume=False, height=30, width=80)
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.screen_has(terminal, 'failed · Check failed (exit', 90)
+        self.assertIn('AssertionError', terminal.screen())
+        self.quit(terminal)
+
     def test_go_in_repository_without_commits_fails_once_with_the_fix(self):
         empty = self.workspace.parent / 'empty'
         empty.mkdir()

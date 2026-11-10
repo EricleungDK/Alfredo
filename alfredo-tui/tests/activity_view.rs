@@ -374,16 +374,32 @@ fn a_failed_finish_row_carries_the_receipt_cause_cut_with_an_ellipsis() {
 fn the_failed_finish_cause_is_cut_one_cell_past_the_limit_not_at_it() {
     use alfredo_tui::tasks::TaskStatus::Failed;
     let prefix = "Task #1 failed · ";
-    let fits = "x".repeat(80 - prefix.len());
+    let room = 80 - prefix.chars().count();
+    let fits = "x".repeat(room);
     assert_eq!(
         ui::short_phase(&finish_receipt(Failed, &fits)),
         format!("{prefix}{fits}")
     );
-    let over = "x".repeat(80 - prefix.len() + 1);
+    let over = "x".repeat(room + 1);
     assert_eq!(
         ui::short_phase(&finish_receipt(Failed, &over)),
-        format!("{prefix}{}…", "x".repeat(80 - prefix.len() - 1))
+        format!("{prefix}{}…", "x".repeat(room - 1))
     );
+}
+
+#[test]
+fn finishes_other_than_failed_keep_their_rows_whatever_the_detail() {
+    use alfredo_tui::tasks::TaskStatus::{Cancelled, NeedsHumanReview, ReviewReady};
+    for (status, row) in [
+        (ReviewReady, "Task #1 check passed · awaiting review"),
+        (Cancelled, "Task #1 run cancelled"),
+        (NeedsHumanReview, "Task #1 held for human review"),
+    ] {
+        assert_eq!(
+            ui::short_phase(&finish_receipt(status, "Check failed (exit 3)")),
+            row
+        );
+    }
 }
 
 #[test]
