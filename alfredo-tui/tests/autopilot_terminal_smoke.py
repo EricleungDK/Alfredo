@@ -574,10 +574,20 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.wait_until('task 1 approved', lambda: self.statuses()[0][1] == 'approved')
         terminal.send('/run 1\r')
         self.wait_until('task 1 failed', lambda: self.statuses()[0][1] == 'failed', 60)
-        terminal.send(b'\x1bOQ')  # F2: the chat view, where the /run acknowledgment row sits
-        self.screen_has(terminal, 'Task #1 failed · Check failed (exit', 60)
+        cause = '✗ Task #1 failed · Check failed (exit 1): stderr: Traceback'
+        # F2 shows the chat view where the /run acknowledgment row sits; a redraw can swallow
+        # the key, so press it again until the whole row is there (runbook section 6).
+        deadline = time.monotonic() + 60
+        while True:
+            terminal.send(b'\x1bOQ')
+            try:
+                self.wait_until('chat row names the cause', lambda: cause in self.flat(terminal), 3)
+                break
+            except AssertionError:
+                if time.monotonic() > deadline:
+                    raise
         flat = self.flat(terminal)
-        self.assertIn('✗ Task #1 failed · Check failed (exit 1): stderr: Traceback', flat)
+        self.assertIn(cause, flat)
         self.assertNotRegex(flat, r'Task #1 failed(?! ·)')
         self.quit(terminal)
 
