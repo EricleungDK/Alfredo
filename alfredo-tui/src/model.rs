@@ -61,6 +61,8 @@ pub struct ToolStep {
     pub calls: Vec<ToolCall>,
     pub results: Vec<String>,
 }
+/// Longest tool-call name, in bytes, a recorded step may carry.
+pub(crate) const MAX_NAME_BYTES: usize = 64;
 impl ToolStep {
     /// Bytes this step adds to a request (calls as JSON plus results).
     pub fn bytes(&self) -> usize {
@@ -84,7 +86,7 @@ impl ToolStep {
             && self.calls.len() <= 64
             && self.calls.iter().all(|call| {
                 !call.name.is_empty()
-                    && call.name.len() <= 64
+                    && call.name.len() <= MAX_NAME_BYTES
                     && !call.name.chars().any(char::is_control)
             })
     }
