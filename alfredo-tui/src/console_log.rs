@@ -56,6 +56,18 @@ fn command_sizes(commands: &[crate::console_command::ConsoleCommand]) -> Vec<usi
         .collect()
 }
 
+/// Whether a command is acknowledged (issue #661): `Submitted`, its operation not
+/// running and its receipt present. Both sweeps call this with the same three facts.
+pub fn is_acknowledged(
+    state: &crate::console_command::CommandState,
+    running: bool,
+    awaiting_receipt: bool,
+) -> bool {
+    matches!(state, crate::console_command::CommandState::Submitted)
+        && !running
+        && !awaiting_receipt
+}
+
 impl Session {
     fn next_sequence_value(&self) -> u64 {
         self.task_receipts
@@ -333,7 +345,23 @@ impl Session {
             return false;
         };
         command.state = state;
+        self.acknowledged.0.remove(id);
         true
+    }
+    /// Record that a `Submitted` command is acknowledged (receipt present, nothing
+    /// running), so history eviction may drop it. Not saved; a restart re-marks it.
+    pub fn mark_acknowledged(&mut self, id: &str) -> bool {
+        let submitted = self.commands.iter().any(|command| {
+            command.id == id
+                && matches!(
+                    command.state,
+                    crate::console_command::CommandState::Submitted
+                )
+        });
+        if submitted {
+            self.acknowledged.0.insert(id.to_owned());
+        }
+        submitted
     }
     pub fn retry_command(&mut self, id: &str) -> Result<(), String> {
         let command = self
@@ -371,6 +399,7 @@ impl Session {
             .filter(|n| *n < u64::MAX)
             .ok_or("Retry limit reached")?;
         command.state = crate::console_command::CommandState::Pending;
+        self.acknowledged.0.remove(id);
         Ok(())
     }
     pub(crate) fn restore_commands(&mut self) {
@@ -602,7 +631,7 @@ impl Session {
             .then(|| "Command history 80% full; /clear starts a fresh one".into())
     }
     /// Drop the fewest oldest settled commands that bring the history within budget, and
-    /// say whether that was possible. Live (Pending, Submitted), selection, wayfinder,
+    /// say whether that was possible. Live (Pending, Submitted without an acknowledgement), selection, wayfinder,
     /// generated-plan and still-needed parent commands stay, so a restored Unknown or
     /// Refused entry is the usual victim. The command just admitted (last) stays too.
     /// Sizes are measured once per command, then the victims are found in one scan, so the
@@ -652,6 +681,9 @@ impl Session {
             self.commands = before;
             return false;
         }
+        for index in &dropped {
+            self.acknowledged.0.remove(&before[*index].id);
+        }
         self.retired_commands.extend(
             dropped
                 .iter()
@@ -698,16 +730,18 @@ impl Session {
                     }
                     _ => false,
                 });
+        let live_submitted = matches!(command.state, CommandState::Submitted)
+            && !self.acknowledged.0.contains(&command.id);
         !(matches!(
             command.state,
             CommandState::Pending
-                | CommandState::Submitted
                 | CommandState::Selection { .. }
                 | CommandState::Planner {
                     outcome: Planned::Generated { .. }
                 }
         ) || command.intent.selection_request().is_some()
             || matches!(command.intent, Intent::Wayfinder { .. })
+            || live_submitted
             || enabling
             || named_by_child
             || self.plan_origin.0.is_some()
