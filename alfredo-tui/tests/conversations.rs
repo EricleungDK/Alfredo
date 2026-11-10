@@ -4079,3 +4079,26 @@ fn oversize_compaction_summary_is_cut_within_limit_and_saves() {
         assert!(stored.contains("bytes omitted]"), "{label}: cut is marked");
     }
 }
+
+#[test]
+fn acknowledged_task_commands_do_not_fill_the_history() {
+    use alfredo_tui::console_command::CommandState;
+    let mut app = App::new("fixture".into());
+    let mut ids = Vec::new();
+    for number in 0..600 {
+        let id = app.sessions[0]
+            .submit_command(
+                "/task Acked".into(),
+                command_intent(&format!("acked-{number}")),
+            )
+            .unwrap_or_else(|error| panic!("admission {number} refused: {error}"));
+        app.sessions[0].set_command_state(&id, CommandState::Submitted);
+        assert!(app.sessions[0].mark_acknowledged(&id));
+        ids.push(id);
+    }
+    let commands = app.sessions[0].commands();
+    assert!(commands.len() < 600, "the oldest acknowledged were evicted");
+    assert_eq!(commands.last().unwrap().id, *ids.last().unwrap());
+    assert!(commands.iter().all(|c| c.id != ids[0]));
+    assert_saved_history_loads(&app);
+}

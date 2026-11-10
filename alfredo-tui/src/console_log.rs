@@ -335,6 +335,11 @@ impl Session {
         command.state = state;
         true
     }
+    /// Record that a `Submitted` command is acknowledged (receipt present, nothing
+    /// running), so history eviction may drop it. Not saved; a restart re-marks it.
+    pub fn mark_acknowledged(&mut self, _id: &str) -> bool {
+        false
+    }
     pub fn retry_command(&mut self, id: &str) -> Result<(), String> {
         let command = self
             .commands

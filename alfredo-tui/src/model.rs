@@ -259,6 +259,17 @@ impl PartialEq for PlanOrigin {
     }
 }
 
+/// Ids of `Submitted` commands whose receipt exists and whose operation is not running
+/// (issue #661). Runtime only, so it never takes part in session equality or the file.
+#[derive(Clone, Debug, Default)]
+struct Acknowledged(std::collections::BTreeSet<String>);
+
+impl PartialEq for Acknowledged {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
@@ -284,6 +295,9 @@ pub struct Session {
     /// whatever its state, so eviction must keep it. Runtime only, never saved.
     #[serde(skip)]
     plan_origin: PlanOrigin,
+    /// Acknowledged `Submitted` commands, which eviction treats as settled. Never saved.
+    #[serde(skip)]
+    acknowledged: Acknowledged,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     sources: std::collections::BTreeMap<usize, ResponseSource>,
     /// User-message indices of cancelled or failed turns the user moved past with
@@ -434,6 +448,7 @@ impl Session {
             commands: Vec::new(),
             retired_commands: Vec::new(),
             plan_origin: PlanOrigin::default(),
+            acknowledged: Acknowledged::default(),
             sources: Default::default(),
             interrupted: Vec::new(),
             status: Status::Ready,
