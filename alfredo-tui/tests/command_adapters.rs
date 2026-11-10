@@ -134,6 +134,31 @@ fn prepared_task_captures_selection_and_never_mutates_before_dispatch() {
     assert!(mismatch.reconcile(Some(&snapshot), None).is_none());
 }
 #[test]
+fn an_acknowledged_task_command_does_not_block_clear_forever() {
+    // Issue #654: task commands stay Submitted for the session; once their receipt
+    // is in the snapshot nothing is in flight, so /clear must work.
+    let fixture = Fixture::new();
+    let mut control = fixture.control();
+    let intent = control
+        .prepare_command("/task First", "fixture")
+        .unwrap()
+        .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    control.dispatch_prepared(&runtime, &intent).unwrap();
+    wait(&mut control);
+    control.snapshot = Some(fixture.store.snapshot().unwrap());
+    assert!(intent
+        .acknowledgment(control.snapshot.as_ref(), None)
+        .is_some());
+    let mut session = alfredo_tui::model::Session::new("fixture".into());
+    let id = session
+        .submit_command("/task First".into(), intent)
+        .unwrap();
+    session.set_command_state(&id, alfredo_tui::console_command::CommandState::Submitted);
+    session.clear_conversation(None).unwrap();
+    assert!(session.commands().is_empty());
+}
+#[test]
 fn prepared_scope_uses_its_exact_domain_and_saved_revision() {
     let fixture = Fixture::new();
     let mut control = fixture.control();
