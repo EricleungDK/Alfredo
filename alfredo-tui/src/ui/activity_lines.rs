@@ -10,13 +10,17 @@ const FAILED_PHRASE_CELLS: usize = 80;
 /// `head · cause`: the receipt's own detail on one line, hidden characters shown, cut with
 /// `…`. A blank detail leaves `head` alone (issue #655).
 fn with_cause(head: String, detail: &str) -> String {
-    let cause = crate::dashboard::single_line_visible(detail);
-    let cause = cause.trim();
-    if cause.is_empty() {
-        head
-    } else {
-        truncate(&format!("{head} · {cause}"), FAILED_PHRASE_CELLS)
+    use unicode_width::UnicodeWidthStr;
+    let visible = crate::dashboard::single_line_visible(detail);
+    let visible = visible.trim();
+    if visible.is_empty() {
+        return head;
     }
+    // A failed check reads as its key error line, not the head of its output (issue #658).
+    let room = FAILED_PHRASE_CELLS.saturating_sub(head.width() + 3);
+    let cause =
+        crate::autopilot::failure::check_cause(visible, room).unwrap_or_else(|| visible.to_owned());
+    truncate(&format!("{head} · {cause}"), FAILED_PHRASE_CELLS)
 }
 
 /// One short human sentence per canonical receipt.

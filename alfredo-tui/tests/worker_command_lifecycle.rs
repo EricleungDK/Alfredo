@@ -231,6 +231,10 @@ fn worker_command_links_start_finish_and_recovery_to_original_session_across_res
             thread::sleep(Duration::from_millis(2));
         }
         job.join().unwrap();
+        if outcome == TaskStatus::Failed {
+            // Issue #658: the footer names the check's key error line, not its traceback head.
+            assert_eq!(control.notice, "Check failed (exit 1): AssertionError");
+        }
         let finished = fixture.store.snapshot().unwrap();
         assert_eq!(finished.tasks[0].status, outcome);
         let chain = intent.task_receipts(Some(&finished));

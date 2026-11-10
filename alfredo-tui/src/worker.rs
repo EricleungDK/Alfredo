@@ -1894,6 +1894,13 @@ pub async fn start_checked(
     ))
 }
 
+/// The footer text for a finished run (issue #658): a failed check reads as its head and key
+/// error line, not the first words of its output; any other detail is shown as recorded.
+pub fn finish_notice(detail: &str) -> String {
+    crate::autopilot::failure::check_cause(&crate::dashboard::single_line_visible(detail), 160)
+        .unwrap_or_else(|| detail.to_owned())
+}
+
 // Admission does not approve work. It revalidates the already claimed exact
 // Running task after waiting, without rejecting unrelated task-store revisions.
 async fn worker_inference_admission(
