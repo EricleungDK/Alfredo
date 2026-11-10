@@ -1183,3 +1183,36 @@ fn fit_num_predict_clamps_to_the_room_left_and_refuses_below_the_floor() {
     assert_eq!(fit_num_predict(1793, 2048, 4096), Err(2049));
     assert_eq!(fit_num_predict(usize::MAX, 2048, 4096), Err(usize::MAX));
 }
+
+#[tokio::test]
+async fn running_probe_reports_names_and_bounded_windows() {
+    let long = "m".repeat(201);
+    let body = serde_json::json!({"models":[
+        {"name":"alpha","model":"alpha:latest","context_length":4096},
+        {"name":"zero","context_length":0},
+        {"name":"max","context_length":u32::MAX},
+        {"name":"over","context_length":u64::from(u32::MAX) + 1},
+        {"name":"bad\u{7}name","context_length":1024},
+        {"name": long, "context_length":1024},
+        {"model":"only-model"},
+    ]})
+    .to_string();
+    let fixture = serve(reserve(), move |_, _| Reply::Json(200, body.clone()));
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();
+    let windows = provider.running_windows().await.unwrap();
+    assert_eq!(
+        windows,
+        vec![
+            ("alpha".to_string(), Some(4096)),
+            ("alpha:latest".to_string(), Some(4096)),
+            ("max".to_string(), Some(u32::MAX)),
+            ("only-model".to_string(), None),
+            ("over".to_string(), None),
+            ("zero".to_string(), None),
+        ]
+    );
+    assert_eq!(
+        provider.running_models().await.unwrap(),
+        vec!["alpha", "alpha:latest", "max", "only-model", "over", "zero"]
+    );
+}
