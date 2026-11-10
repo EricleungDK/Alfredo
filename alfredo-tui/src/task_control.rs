@@ -1814,7 +1814,10 @@ impl TaskControl {
                         .into(),
                 ))
             });
-            let _ = sender.send((task, result.map(Projection::from))).await;
+            let result = result.map(|(snapshot, detail)| {
+                Projection::from((snapshot, crate::worker::finish_notice(&detail)))
+            });
+            let _ = sender.send((task, result)).await;
         });
         self.notice = format!("Starting worker for task #{task}; awaiting run receipt");
         Ok(())

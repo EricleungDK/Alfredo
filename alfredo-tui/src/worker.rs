@@ -1870,7 +1870,7 @@ pub async fn start_checked(
                 receipt.request.correlation == format!("finish:{}", run.id)
                     && matches!(&receipt.request.action, Action::Finish { evidence_sha256, .. } if evidence_sha256 == &digest)
             }) {
-                return Ok((current, finish_notice(&evidence.detail)));
+                return Ok((current, evidence.detail));
             }
             let request = Request {
                 correlation: format!("finish:{}", run.id),
@@ -1884,7 +1884,7 @@ pub async fn start_checked(
                 },
             };
             if let Ok((snapshot, _)) = store.transact(request) {
-                return Ok((snapshot, finish_notice(&evidence.detail)));
+                return Ok((snapshot, evidence.detail));
             }
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
