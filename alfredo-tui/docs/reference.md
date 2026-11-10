@@ -1898,7 +1898,9 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   blank Assistant block. Like any failed turn, it is not sent as context: Ctrl+R retries the
   prompt, and a new prompt moves on without the empty reply. There is no automatic retry.
 - **On screen.** Before the reply, each call shows as `⚙ read_file README.md` followed by
-  `↳` and the first line of its result cut to one row (`… (N lines)` when longer). The
+  `↳` and the first line of its result cut to one row (`… (N lines)` when longer); a
+  `run_command` row shows `exit code N · ` and the last non-empty output line instead (stderr
+  first when the exit code is not 0, hidden characters as `<U+XXXX>`). The
   full result goes to the model. Ctrl+O in the conversation shows every result of the
   open conversation in full instead, each capped at 200 lines followed by `… N more
   lines`; Ctrl+O again returns to one line. A conversation starts collapsed, the footer
