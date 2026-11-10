@@ -148,7 +148,14 @@ fn tool_step_lines(
             }
             continue;
         }
-        let first = dashboard::single_line_visible_tabs(result.lines().next().unwrap_or(""));
+        let first = if call.name == "run_command" {
+            command_row_text(result)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            dashboard::single_line_visible_tabs(result.lines().next().unwrap_or(""))
+        });
         let more = if count > 1 {
             format!(" … ({count} lines)")
         } else {
@@ -164,6 +171,35 @@ fn tool_step_lines(
     }
     lines.push(Line::default());
     lines
+}
+
+/// Collapsed `run_command` row text (issue #663): `exit code N · ` and the last non-empty
+/// output line, the stderr tail first on a non-zero exit and the stdout tail first
+/// otherwise. `None` when `result` is not a finished run (an error or refusal), which keeps
+/// the first-line row. Display only: the model gets the full result.
+fn command_row_text(result: &str) -> Option<String> {
+    let header = result.lines().next()?;
+    if !header.starts_with("exit code ") && !header.starts_with("killed by a signal") {
+        return None;
+    }
+    let code = header.split(" · ").next().unwrap_or(header);
+    let (before, stderr) = result.rsplit_once("\nstderr:\n")?;
+    let stdout = before.split_once("\nstdout:\n").map_or("", |(_, out)| out);
+    let last = |text: &str| {
+        text.lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(str::to_owned)
+    };
+    let (first_choice, second_choice) = if code == "exit code 0" {
+        (stdout, stderr)
+    } else {
+        (stderr, stdout)
+    };
+    Some(match last(first_choice).or_else(|| last(second_choice)) {
+        Some(line) => format!("{code} · {}", dashboard::single_line_visible_tabs(&line)),
+        None => code.to_string(),
+    })
 }
 
 /// Side pane width: a quarter of the terminal, 28 to 44 columns.
@@ -1540,7 +1576,14 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         Instant::now(),
         usize::from(inner.width),
     );
-    metadata.extend(timing_line(session, app.num_ctx).map(|text| Line::styled(text, dim())));
+    metadata.extend(
+        timing_line(
+            session,
+            app.num_ctx
+                .or_else(|| app.health.observed_window(&session.model)),
+        )
+        .map(|text| Line::styled(text, dim())),
+    );
     if !metadata.is_empty() {
         metadata.push(Line::default());
     }

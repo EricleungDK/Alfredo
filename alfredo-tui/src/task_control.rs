@@ -1814,7 +1814,10 @@ impl TaskControl {
                         .into(),
                 ))
             });
-            let _ = sender.send((task, result.map(Projection::from))).await;
+            let result = result.map(|(snapshot, detail)| {
+                Projection::from((snapshot, crate::worker::finish_notice(&detail)))
+            });
+            let _ = sender.send((task, result)).await;
         });
         self.notice = format!("Starting worker for task #{task}; awaiting run receipt");
         Ok(())
@@ -2086,7 +2089,7 @@ impl TaskControl {
                 .any(|active| active == intent)
     }
     /// The command's operation is running now (task, planner or Wayfinder).
-    fn operation_running(
+    pub fn operation_running(
         &self,
         command: &crate::console_command::ConsoleCommand,
         wayfinder: &crate::wayfinder::Router,
@@ -2094,7 +2097,7 @@ impl TaskControl {
         self.intent_pending(&command.intent)
             || matches!(&command.intent, crate::command_intent::Intent::Wayfinder { request, .. } if wayfinder.request_pending(request))
     }
-    fn awaiting_receipt(&self, command: &crate::console_command::ConsoleCommand) -> bool {
+    pub fn awaiting_receipt(&self, command: &crate::console_command::ConsoleCommand) -> bool {
         command
             .intent
             .acknowledgment(self.snapshot.as_ref(), self.canonical_scope.as_ref())

@@ -376,3 +376,89 @@ async fn bare_model_name_goes_warm_when_ollama_reports_it_as_latest() {
         "another tag is not warm"
     );
 }
+
+/// Issue #659: the chat turn line draws `ctx N/WINDOW` from the live `/api/ps`
+/// `context_length` of the selected model when `--num-ctx` is unset.
+async fn turn_line(ps: &str, configured: Option<u32>, used: u64) -> String {
+    let ps = ps.to_string();
+    let fixture = serve(reserve(), move |request, _| match request.path.as_str() {
+        "GET /api/ps" => Reply::Json(200, ps.clone()),
+        "GET /api/tags" => running(&["fixture"]),
+        _ => Reply::Json(404, "{}".into()),
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();
+    let monitor = Monitor::start(
+        &tokio::runtime::Handle::current(),
+        provider,
+        Duration::from_millis(20),
+    );
+    let view = monitor.view();
+    wait_for(&view, "fixture", |state| !matches!(state, Health::Unknown)).await;
+    // Give a second poll time to land so a context stored beside the model
+    // list is visible whichever poll the wait above saw.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let mut app = App::new("fixture".into());
+    app.health = view;
+    app.num_ctx = configured;
+    app.sessions[0].insert("hello");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(1, Update::Admitted);
+    app.sessions[0].apply(1, Update::Token("answer".into()));
+    app.sessions[0].apply(
+        1,
+        Update::Metrics(alfredo_tui::metrics::Metrics {
+            prompt_eval_count: Some(used),
+            ..Default::default()
+        }),
+    );
+    app.sessions[0].apply(1, Update::Done);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..30)
+        .map(|y| {
+            (0..120)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+const PS_4096: &str = r#"{"models":[{"name":"fixture","model":"fixture","context_length":4096}]}"#;
+
+#[tokio::test]
+async fn unset_num_ctx_uses_the_observed_window() {
+    let screen = turn_line(PS_4096, None, 1200).await;
+    assert!(screen.contains("ctx 1200/4096"), "{screen}");
+    assert!(!screen.contains("truncated"), "{screen}");
+    assert!(!screen.contains("/default"), "{screen}");
+}
+
+#[tokio::test]
+async fn observed_window_warns_of_truncation_near_the_limit() {
+    let screen = turn_line(PS_4096, None, 3950).await;
+    assert!(
+        screen.contains("ctx 3950/4096 · context may be truncated"),
+        "{screen}"
+    );
+}
+
+#[tokio::test]
+async fn unobserved_window_stays_default() {
+    let no_field = r#"{"models":[{"name":"fixture","model":"fixture"}]}"#;
+    let other_model = r#"{"models":[{"name":"other","model":"other","context_length":4096}]}"#;
+    for ps in [no_field, other_model, r#"{"models":[]}"#] {
+        let screen = turn_line(ps, None, 3950).await;
+        assert!(screen.contains("ctx 3950/default"), "{ps}: {screen}");
+        assert!(!screen.contains("truncated"), "{ps}: {screen}");
+    }
+}
+
+#[tokio::test]
+async fn configured_num_ctx_wins_over_the_observed_window() {
+    let screen = turn_line(PS_4096, Some(8192), 3950).await;
+    assert!(screen.contains("ctx 3950/8192"), "{screen}");
+    assert!(!screen.contains("truncated"), "{screen}");
+    assert!(!screen.contains("/4096"), "{screen}");
+}

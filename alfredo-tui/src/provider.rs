@@ -501,6 +501,17 @@ impl Ollama {
     /// Names of resident models (GET /api/ps); a short health probe that
     /// bypasses inference admission.
     pub async fn running_models(&self) -> Result<Vec<String>, String> {
+        Ok(self
+            .running_windows()
+            .await?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect())
+    }
+
+    /// Resident model names with the live window (`context_length`) when `/api/ps`
+    /// reports one; same probe as `running_models`.
+    pub async fn running_windows(&self) -> Result<Vec<(String, Option<u32>)>, String> {
         tokio::time::timeout(HEALTH_DEADLINE, async {
             let mut endpoint = self.endpoint.clone();
             endpoint.set_path("/api/ps");
@@ -538,17 +549,25 @@ impl Ollama {
                 name: Option<String>,
                 #[serde(default)]
                 model: Option<String>,
+                #[serde(default)]
+                context_length: Option<u64>,
             }
             let running: Running =
                 serde_json::from_slice(&bytes).map_err(|_| "Invalid Ollama health response")?;
-            let mut names: Vec<String> = running
+            let mut names: Vec<(String, Option<u32>)> = running
                 .models
                 .unwrap_or_default()
                 .into_iter()
                 .take(256)
-                .flat_map(|entry| [entry.name, entry.model])
+                .flat_map(|entry| {
+                    let window = entry
+                        .context_length
+                        .and_then(|value| u32::try_from(value).ok())
+                        .filter(|value| *value > 0);
+                    [entry.name, entry.model].map(|name| name.map(|name| (name, window)))
+                })
                 .flatten()
-                .filter(|name| name.len() <= 200 && !name.chars().any(char::is_control))
+                .filter(|(name, _)| name.len() <= 200 && !name.chars().any(char::is_control))
                 .collect();
             names.sort();
             names.dedup();

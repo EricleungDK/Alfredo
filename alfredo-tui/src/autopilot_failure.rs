@@ -128,6 +128,31 @@ pub fn last_failure_line(detail: &str) -> String {
     shorten(&first, LIMIT)
 }
 
+/// A failed check's cause for a chat row or the footer (issue #658): its head without the
+/// `stderr:`/`stdout:` label, then the output's key error line, within `cells` terminal cells.
+/// The head is cut first so the key line stays. `None` when `detail` is not a check failure
+/// with output. `detail` should already be one visible line.
+pub fn check_cause(detail: &str, cells: usize) -> Option<String> {
+    use unicode_width::UnicodeWidthStr;
+    let (head, key) = check_head_and_key(detail)?;
+    let head = head.trim_end();
+    let head = ["stderr:", "stdout:"]
+        .iter()
+        .find_map(|label| head.strip_suffix(label))
+        .unwrap_or(head);
+    let head = head.trim_end().trim_end_matches(['·', ':']).trim_end();
+    let key = crate::dashboard::truncate(key.trim(), cells);
+    let room = cells.saturating_sub(key.width() + 2);
+    let head = if head.width() <= room {
+        head.to_owned()
+    } else if room >= 8 {
+        crate::dashboard::truncate(head, room)
+    } else {
+        return Some(key);
+    };
+    Some(format!("{head}: {key}"))
+}
+
 /// The summary line of an autopilot repair's title (`Repair #N: autopilot: <failure>`), as
 /// `Last failure` shows it, so a title cut for width keeps the check's key error line.
 pub fn title_failure_line(title: &str) -> Option<String> {

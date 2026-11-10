@@ -3,9 +3,9 @@
 use alfredo_tui::{
     autopilot::{
         failure::{
-            failure_detail, held_or_done, interrupted_reason, last_failure_line, sandbox_failure,
-            title_failure_line, too_large_failure, unreachable_failure, BUDGET_EXHAUSTED,
-            INTERRUPTED,
+            check_cause, failure_detail, held_or_done, interrupted_reason, last_failure_line,
+            sandbox_failure, title_failure_line, too_large_failure, unreachable_failure,
+            BUDGET_EXHAUSTED, INTERRUPTED,
         },
         state_path, Autopilot, Family, Settled,
     },
@@ -259,6 +259,68 @@ fn the_last_failure_line_is_the_first_nonblank_line_shortened_on_a_character() {
     assert_eq!(
         last_failure_line(&"é".repeat(170)),
         format!("{}…", "é".repeat(159))
+    );
+}
+
+#[test]
+fn a_check_cause_drops_the_stream_label_and_ends_with_the_key_error_line() {
+    for (detail, cause) in [
+        (
+            "Check failed (exit 1): stderr: Traceback (most recent call last) | File x | AssertionError",
+            "Check failed (exit 1): AssertionError",
+        ),
+        (
+            "Check failed (exit 1): pytest -q: stderr: setup | AssertionError: 41 != 42 | done",
+            "Check failed (exit 1): pytest -q: AssertionError: 41 != 42",
+        ),
+        (
+            "Check failed (exit 1): t · stdout: a | FAILED z",
+            "Check failed (exit 1): t: FAILED z",
+        ),
+    ] {
+        assert_eq!(check_cause(detail, 100).as_deref(), Some(cause), "{detail}");
+    }
+}
+
+#[test]
+fn a_check_cause_cuts_the_head_first_and_then_the_key_line_at_the_cell_limit() {
+    let detail = format!(
+        "Check failed (exit 1): {}: stderr: x | AssertionError: nope",
+        "cmd ".repeat(20)
+    );
+    let cause = check_cause(&detail, 40).unwrap();
+    assert!(cause.ends_with(": AssertionError: nope"), "{cause}");
+    assert!(
+        cause.contains('…') && cause.chars().count() <= 40,
+        "{cause}"
+    );
+    // No room for a head: the key line alone, cut with an ellipsis.
+    assert_eq!(
+        check_cause("Check failed (exit 1): stderr: AssertionError: nope", 10).as_deref(),
+        Some("Assertion…")
+    );
+}
+
+#[test]
+fn a_check_cause_is_none_without_check_output_to_pick_from() {
+    assert_eq!(check_cause("Check failed (exit 1)", 80), None);
+    assert_eq!(check_cause("Worker cancelled after check", 80), None);
+}
+
+#[test]
+fn the_footer_text_of_a_failed_run_is_its_check_cause_and_others_are_unchanged() {
+    use alfredo_tui::worker::finish_notice;
+    assert_eq!(
+        finish_notice("Check failed (exit 1): stderr: Traceback (most recent call last): | File \"<string>\", line 1, in <module> | AssertionError"),
+        "Check failed (exit 1): AssertionError"
+    );
+    assert_eq!(
+        finish_notice("Approved check passed; changes await human review"),
+        "Approved check passed; changes await human review"
+    );
+    assert_eq!(
+        finish_notice("Check failed (exit 1): stderr: a\u{202e}b | Error: x\u{200b}y"),
+        "Check failed (exit 1): Error: x<U+200B>y"
     );
 }
 

@@ -621,6 +621,21 @@ fn step(
         for (id, state) in uncertain {
             session.set_command_state(&id, state);
         }
+        let acknowledged: Vec<_> = session
+            .commands()
+            .iter()
+            .filter(|command| {
+                alfredo_tui::model::console_log::is_acknowledged(
+                    &command.state,
+                    work.tasks.intent_pending(&command.intent),
+                    work.tasks.awaiting_receipt(command),
+                )
+            })
+            .map(|command| command.id.clone())
+            .collect();
+        for id in acknowledged {
+            session.mark_acknowledged(&id);
+        }
     }
     if !stopping && pending.is_none() {
         crate::command_staging::submit_autopilot(runtime, work, pending);

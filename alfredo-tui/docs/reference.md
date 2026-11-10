@@ -83,6 +83,8 @@ In the interactive TUI, the denied-sandbox refusal of `/go` and `/run` is shown 
 
 In the interactive TUI, a bare `/go` that the unattended plan lint refuses is shown the same way: the chat rows carry the whole finding (without a doubled period) and `Fix it with /plan-revise (draft) or run it by hand with /approve`, and the footer reads `/go refused: the plan fails the unattended lint (see the chat rows above)`. From the task view (F2) `/go` returns to the chat view so the rows are visible.
 
+A failed task's chat row (`✗ Task #1 failed · …`), the `started → failed` step of `/go` and the footer after a failed run name the check's key error line, as the `/go` summary does: `Check failed (exit 1): AssertionError`. The `stderr:`/`stdout:` label is dropped and the head is cut first (at 80 cells in rows) so the key line stays; hidden characters show as `<U+XXXX>`. The task pane and F3 evidence keep the whole output.
+
 Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any model
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
 executable check as `--doctor`). A bwrap that exists but cannot create a sandbox (user-namespace restriction, e.g. Ubuntu 24.04 AppArmor) is refused the same way before any model call, quoting bwrap's stderr and a host-policy fix instead of the install hint: a no-op `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` runs once per process (5 s limit) for `/go`, `--go` and `/run`, and fresh in `--doctor` (`FAIL sandbox`). If the sandbox still fails to start during a run, that
@@ -240,9 +242,11 @@ Each conversation keeps at most 512 saved commands and 512 KiB of command histor
 (the command JSON plus 1 KiB reserved per command). At 80% of either, the footer (and
 headless stderr) warns and names `/clear`. When a new command would exceed the budget,
 the oldest settled commands are evicted to make room: refused, interrupted (restored
-`Unknown`) and finished Control entries, and stopped or failed Planner entries. Live `Pending` and `Submitted`
-commands are never evicted, nor are selection and Wayfinder commands, generated planner
-outcomes, the latest `/dispatch on` while dispatch is on, or a Task or Control command an
+`Unknown`) and finished Control entries, stopped or failed Planner entries, and acknowledged
+task commands. Live `Pending` commands and `Submitted` commands still awaiting a receipt or
+running are never evicted; a `Submitted` command whose receipt exists and whose
+operation has finished is acknowledged (tracked in memory, not saved) and evictable. Also kept: selection and Wayfinder commands, generated planner
+outcomes, the latest `/dispatch on` while dispatch is on, and a Task or Control command an
 automatic `/run` or Architect draft still names. Intent ids are not reused, so a live
 command stays idempotent; an evicted command can no longer be retried or serve as an
 automatic parent (`Saved originating command is unavailable`). If only unevictable
@@ -557,8 +561,12 @@ is loading or busy. Model discovery bypasses this queue.
   off by the clamped limit reports the real token limit and suggests raising `--num-ctx`.
   Short prompts therefore work at any accepted window, including 2048 and 4096.
   After each reply that reports `prompt_eval_count` the chat shows
-  `ctx used/N` (`ctx used/default` when unset), plus "context may be truncated" from
-  95% of a set window. `--doctor` prints a `NOTE context:` line. A larger window
+  `ctx used/N`, plus "context may be truncated" from 95% of the window. N is
+  `--num-ctx` when set; otherwise it is the observed window, the selected model's
+  `context_length` from the 5 s `GET /api/ps` health poll (so a default 4096 window
+  warns too). With no loaded model or no `context_length` it reads `ctx used/default`
+  with no warning. The observed window only labels the line: nothing is refused or
+  compacted by it. `--doctor` prints a `NOTE context:` line. A larger window
   uses more VRAM (KV cache), so it is your setting; there is no default.
 - At startup, on workspace switch and on `/model NAME`, Alfredo preloads the model
   in the background (`POST /api/generate` with an empty prompt). Preload bypasses
@@ -1905,7 +1913,9 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   and there is no automatic retry; Ctrl+R asks again. Prose around such JSON, code fences and
   unknown tool names get no notice.
 - **On screen.** Before the reply, each call shows as `⚙ read_file README.md` followed by
-  `↳` and the first line of its result cut to one row (`… (N lines)` when longer). The
+  `↳` and the first line of its result cut to one row (`… (N lines)` when longer); a
+  `run_command` row shows `exit code N · ` and the last non-empty output line instead (stderr
+  first when the exit code is not 0, hidden characters as `<U+XXXX>`). The
   full result goes to the model. Ctrl+O in the conversation shows every result of the
   open conversation in full instead, each capped at 200 lines followed by `… N more
   lines`; Ctrl+O again returns to one line. A conversation starts collapsed, the footer
