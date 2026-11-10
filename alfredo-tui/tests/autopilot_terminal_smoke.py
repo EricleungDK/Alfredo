@@ -560,6 +560,44 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertNotIn('Invalid plan JSON', screen)
         self.quit(terminal)
 
+    def test_a_failed_task_row_in_the_chat_view_names_the_failed_check_at_80_columns(self):
+        # Issue #655: the row said only "failed"; the receipt's own cause now follows it.
+        terminal = self.terminal(resume=False, height=30, width=80)
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.screen_has(terminal, 'failed · Check failed (exit', 90)
+        self.assertIn('AssertionError', terminal.screen())
+        self.quit(terminal)
+
+    def test_run_of_a_failing_task_shows_the_check_cause_on_its_chat_row_at_80_columns(self):
+        # Issue #655: the typed /run acknowledgment row (short_phase) carries the cause too.
+        self.fixture.release_app.set()
+        terminal = self.terminal(resume=False, height=30, width=80)
+        terminal.send('/plan add answer function\r')
+        self.screen_has(terminal, 'Not saved or approved', 60)
+        self.wait_until('draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
+        terminal.send('/plan-save\r')
+        self.screen_has(terminal, 'Plan saved', 30)
+        terminal.send('/approve 1\r')
+        self.wait_until('task 1 approved', lambda: self.statuses()[0][1] == 'approved')
+        terminal.send('/run 1\r')
+        self.wait_until('task 1 failed', lambda: self.statuses()[0][1] == 'failed', 60)
+        cause = '✗ Task #1 failed · Check failed (exit 1): stderr: Traceback'
+        # F2 shows the chat view where the /run acknowledgment row sits; a redraw can swallow
+        # the key, so press it again until the whole row is there (runbook section 6).
+        deadline = time.monotonic() + 60
+        while True:
+            terminal.send(b'\x1bOQ')
+            try:
+                self.wait_until('chat row names the cause', lambda: cause in self.flat(terminal), 3)
+                break
+            except AssertionError:
+                if time.monotonic() > deadline:
+                    raise
+        flat = self.flat(terminal)
+        self.assertIn(cause, flat)
+        self.assertNotRegex(flat, r'Task #1 failed(?! ·)')
+        self.quit(terminal)
+
     def test_go_in_repository_without_commits_fails_once_with_the_fix(self):
         empty = self.workspace.parent / 'empty'
         empty.mkdir()

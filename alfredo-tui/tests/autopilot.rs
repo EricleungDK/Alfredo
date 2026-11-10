@@ -3573,6 +3573,39 @@ fn chat_collapses_autopilot_commands_into_one_line_per_task() {
 }
 
 #[test]
+fn chat_collapsed_step_of_a_failed_check_names_the_cause_after_failed() {
+    let fixture = Fixture::new();
+    // Every worker answer leaves answer() at 41, so the check fails (issue #655).
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+            ]})
+            .to_string();
+        }
+        bad_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    let mut app = alfredo_tui::model::App::new("fixture".into());
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    drive_recorded(&mut app, &mut autopilot, &mut control, &runtime);
+    control.set_visible(false);
+    let rows = render_rows(&app, &control, 100, 30);
+    let screen = rows.join("\n");
+    let first = rows
+        .iter()
+        .position(|row| {
+            row.contains("✗ #1 planned → approved → started → failed · Check failed (exit 1):")
+        })
+        .unwrap_or_else(|| panic!("{screen}"));
+    assert!(rows[first + 1].contains("stderr: Traceback"), "{screen}");
+    assert!(!screen.contains("→ failed →"), "{screen}");
+}
+
+#[test]
 fn finished_report_reads_as_labeled_sections_and_the_footer_uses_wide_gaps() {
     let fixture = Fixture::new();
     let server = one_good_task();
