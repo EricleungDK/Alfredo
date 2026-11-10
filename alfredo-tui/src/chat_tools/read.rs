@@ -589,10 +589,11 @@ fn grep_within(
     let pattern = text_arg(arguments, "pattern")?
         .filter(|pattern| !pattern.is_empty())
         .ok_or("missing required argument pattern")?;
-    let ignore_case = arguments
-        .get("ignore_case")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let ignore_case = match arguments.get("ignore_case") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(_) => return Err("argument ignore_case must be true or false".into()),
+    };
     let needle = if ignore_case {
         pattern.to_lowercase()
     } else {

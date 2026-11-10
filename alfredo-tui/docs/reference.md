@@ -242,9 +242,11 @@ Each conversation keeps at most 512 saved commands and 512 KiB of command histor
 (the command JSON plus 1 KiB reserved per command). At 80% of either, the footer (and
 headless stderr) warns and names `/clear`. When a new command would exceed the budget,
 the oldest settled commands are evicted to make room: refused, interrupted (restored
-`Unknown`) and finished Control entries, and stopped or failed Planner entries. Live `Pending` and `Submitted`
-commands are never evicted, nor are selection and Wayfinder commands, generated planner
-outcomes, the latest `/dispatch on` while dispatch is on, or a Task or Control command an
+`Unknown`) and finished Control entries, stopped or failed Planner entries, and acknowledged
+task commands. Live `Pending` commands and `Submitted` commands still awaiting a receipt or
+running are never evicted; a `Submitted` command whose receipt exists and whose
+operation has finished is acknowledged (tracked in memory, not saved) and evictable. Also kept: selection and Wayfinder commands, generated planner
+outcomes, the latest `/dispatch on` while dispatch is on, and a Task or Control command an
 automatic `/run` or Architect draft still names. Intent ids are not reused, so a live
 command stays idempotent; an evicted command can no longer be retried or serve as an
 automatic parent (`Saved originating command is unavailable`). If only unevictable
@@ -558,8 +560,12 @@ is loading or busy. Model discovery bypasses this queue.
   off by the clamped limit reports the real token limit and suggests raising `--num-ctx`.
   Short prompts therefore work at any accepted window, including 2048 and 4096.
   After each reply that reports `prompt_eval_count` the chat shows
-  `ctx used/N` (`ctx used/default` when unset), plus "context may be truncated" from
-  95% of a set window. `--doctor` prints a `NOTE context:` line. A larger window
+  `ctx used/N`, plus "context may be truncated" from 95% of the window. N is
+  `--num-ctx` when set; otherwise it is the observed window, the selected model's
+  `context_length` from the 5 s `GET /api/ps` health poll (so a default 4096 window
+  warns too). With no loaded model or no `context_length` it reads `ctx used/default`
+  with no warning. The observed window only labels the line: nothing is refused or
+  compacted by it. `--doctor` prints a `NOTE context:` line. A larger window
   uses more VRAM (KV cache), so it is your setting; there is no default.
 - At startup, on workspace switch and on `/model NAME`, Alfredo preloads the model
   in the background (`POST /api/generate` with an empty prompt). Preload bypasses
@@ -1900,7 +1906,9 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   blank Assistant block. Like any failed turn, it is not sent as context: Ctrl+R retries the
   prompt, and a new prompt moves on without the empty reply. There is no automatic retry.
 - **On screen.** Before the reply, each call shows as `⚙ read_file README.md` followed by
-  `↳` and the first line of its result cut to one row (`… (N lines)` when longer). The
+  `↳` and the first line of its result cut to one row (`… (N lines)` when longer); a
+  `run_command` row shows `exit code N · ` and the last non-empty output line instead (stderr
+  first when the exit code is not 0, hidden characters as `<U+XXXX>`). The
   full result goes to the model. Ctrl+O in the conversation shows every result of the
   open conversation in full instead, each capped at 200 lines followed by `… N more
   lines`; Ctrl+O again returns to one line. A conversation starts collapsed, the footer

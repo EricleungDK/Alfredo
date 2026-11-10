@@ -413,3 +413,95 @@ fn saving_while_scrolled_over_expanded_results_and_a_compaction_note_succeeds() 
     drop(store);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A `run_command` result as `chat_tools::shell` formats it: exit line, then the streams.
+fn command_result(code: i32, stdout: &str, stderr: &str) -> String {
+    format!("exit code {code} · sandboxed · cwd .\nstdout:\n{stdout}\nstderr:\n{stderr}")
+}
+
+fn result_row(name: &str, result: &str) -> String {
+    let mut app = App::new("m".into());
+    let session = &mut app.sessions[0];
+    session.insert("go");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    let step = ToolStep {
+        calls: vec![ToolCall {
+            name: name.into(),
+            arguments: json!({"command": "cargo test"}),
+        }],
+        results: vec![result.into()],
+    };
+    session.apply(attempt, Update::ToolStep(step));
+    session.apply(attempt, Update::Token("DONE".into()));
+    session.apply(attempt, Update::Done);
+    let text = screen_text(&app, 120, 30);
+    text.lines()
+        .find(|line| line.contains('↳'))
+        .unwrap_or("")
+        .trim_end()
+        .to_string()
+}
+
+/// Issue #663: a failed run shows its cause on the collapsed row.
+#[test]
+fn collapsed_run_command_row_shows_the_stderr_tail_of_a_failed_run() {
+    let stdout = numbered(12);
+    let result = command_result(1, &stdout, "warning: noise\nFAILED test_x\n");
+    let row = result_row("run_command", &result);
+    assert!(
+        row.contains("↳ exit code 1 · FAILED test_x … (17 lines)"),
+        "{row}"
+    );
+    assert!(!row.contains("sandboxed"), "{row}");
+}
+
+#[test]
+fn collapsed_run_command_row_shows_the_last_stdout_line_on_success() {
+    let result = command_result(0, "banner\n3 passed\n\n", "");
+    let row = result_row("run_command", &result);
+    assert!(row.contains("↳ exit code 0 · 3 passed … ("), "{row}");
+    assert!(!row.contains("banner"), "{row}");
+}
+
+#[test]
+fn collapsed_run_command_row_hides_format_characters_in_the_output_line() {
+    let result = command_result(1, "", "bad \u{202E}line\u{200B}");
+    let row = result_row("run_command", &result);
+    assert!(row.contains("bad <U+202E>line<U+200B>"), "{row}");
+    assert!(!row.contains('\u{202E}'), "{row}");
+}
+
+#[test]
+fn collapsed_rows_of_other_tools_and_run_command_errors_keep_the_first_line() {
+    let result = command_result(1, "out", "FAILED test_x");
+    let row = result_row("grep", &result);
+    assert!(
+        row.contains("↳ exit code 1 · sandboxed · cwd . … (5 lines)"),
+        "{row}"
+    );
+    let row = result_row("run_command", "error: nothing ran\nsecond");
+    assert!(row.contains("↳ error: nothing ran … (2 lines)"), "{row}");
+}
+
+#[test]
+fn collapsed_run_command_row_falls_back_to_the_other_stream_and_bare_exit() {
+    let row = result_row("run_command", &command_result(1, "only out\n", ""));
+    assert!(row.contains("↳ exit code 1 · only out … ("), "{row}");
+    let row = result_row("run_command", &command_result(0, "", ""));
+    assert!(row.contains("↳ exit code 0 … ("), "{row}");
+    assert!(!row.contains("sandboxed"), "{row}");
+}
+
+#[test]
+fn collapsed_run_command_row_covers_a_run_killed_by_a_signal() {
+    let result =
+        "killed by a signal · sandboxed · cwd .\nstdout:\nout\nstderr:\nSegmentation fault";
+    let row = result_row("run_command", result);
+    assert!(
+        row.contains("↳ killed by a signal · Segmentation fault … (5 lines)"),
+        "{row}"
+    );
+    assert!(!row.contains("sandboxed"), "{row}");
+}

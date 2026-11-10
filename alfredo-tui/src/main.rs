@@ -685,6 +685,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     session.set_command_state(&id, state);
                     dirty = true;
                 }
+                let acknowledged: Vec<_> = session
+                    .commands()
+                    .iter()
+                    .filter(|command| {
+                        alfredo_tui::model::console_log::is_acknowledged(
+                            &command.state,
+                            work.tasks.operation_running(command, &work.wayfinder),
+                            work.tasks.awaiting_receipt(command),
+                        )
+                    })
+                    .map(|command| command.id.clone())
+                    .collect();
+                for id in acknowledged {
+                    session.mark_acknowledged(&id);
+                }
             }
 
             // This records when the console observed a canonical receipt, not who
@@ -2558,7 +2573,7 @@ const HELP_LINES: &[&str] = &[
     "Foreground conversations get bounded priority over queued workers.",
     "--worker-format blocks|json: coding workers answer with plain-text FILE blocks (default, no schema) or the legacy schema-constrained JSON file plan. Either answer is accepted; qualification always requests json.",
     "--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.",
-    "--num-ctx N sets Ollama's input window (num_ctx, tokens, 2048..262144; env ALFREDO_NUM_CTX) on every chat, planner, worker and repair request and the preload, clamps the reply limit to the room left, and refuses a request whose estimated prompt (bytes/3) plus 256 tokens exceeds it instead of letting Ollama truncate silently. Unset: the server's window applies and requests are unchanged. The chat shows ctx used/N after each reply.",
+    "--num-ctx N sets Ollama's input window (num_ctx, tokens, 2048..262144; env ALFREDO_NUM_CTX) on every chat, planner, worker and repair request and the preload, clamps the reply limit to the room left, and refuses a request whose estimated prompt (bytes/3) plus 256 tokens exceeds it instead of letting Ollama truncate silently. Unset: the server's window applies and requests are unchanged. The chat shows ctx used/N after each reply (N is the server's reported window when unset).",
     "--max-turns N (1..32, default 8; env ALFREDO_MAX_TURNS) caps the tool rounds of one chat turn, interactive and --chat --headless; a turn that asks for more stops with the step-limit notice naming N. Approvals are unchanged. Out of range or non-numeric exits 2.",
     "--connect-retries retries model requests that fail before any reply text, including Ollama error frames (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.",
     "Explicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.",
