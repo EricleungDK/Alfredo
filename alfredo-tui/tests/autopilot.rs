@@ -4798,6 +4798,27 @@ fn bare_go_refuses_a_plan_whose_approved_files_exceed_the_context_bound() {
 }
 
 #[test]
+fn bare_go_lint_refusal_text_has_no_doubled_period_and_ends_with_the_fix() {
+    let fixture = Fixture::new();
+    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let server = Server::new(|_, _| files_plan(&["a.py", "b.py"]));
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap_err();
+    // Every finding ends with a period; the sentence must not repeat it (#650).
+    assert!(!error.contains(".."), "{error}");
+    assert!(
+        error.contains("by hand. Fix it with /plan-revise (draft) or run it by hand with /approve"),
+        "{error}"
+    );
+    assert!(error.ends_with("/approve"), "{error}");
+}
+
+#[test]
 fn go_goal_with_an_open_draft_names_bare_go_as_the_way_to_run_it() {
     let fixture = Fixture::new();
     let server = plan_server();

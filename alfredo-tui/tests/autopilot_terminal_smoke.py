@@ -32,6 +32,8 @@ class AutopilotServer:
         self.release_app = threading.Event()
         self.prose_worker = False
         self.bad_plan = False
+        # Issue #650: one task over three 42,000-byte files, which the unattended lint refuses.
+        self.big_plan = False
         # Closes the socket on every worker request, as a restarting Ollama does.
         self.drop_worker = False
         # Recovery-by-/repair option: every automatic repair writes wrong content until `fixed`.
@@ -84,6 +86,10 @@ class AutopilotServer:
                         ]
                         if fixture.echo_worker:
                             tasks = [dict(tasks[0], policy={'files': ['calc.py'], 'check': ['/usr/bin/true']})]
+                        if fixture.big_plan:
+                            tasks = [{'title': 'Touch files', 'acceptance': ['files touched'],
+                                      'model': request['model'], 'dependencies': [],
+                                      'policy': {'files': ['a.py', 'b.py', 'c.py'], 'check': ['/usr/bin/true']}}]
                         content = ('no plan today' if fixture.bad_plan else
                                    json.dumps({'tasks': tasks[:1] if fixture.single_task else tasks}))
                     elif fixture.drop_worker:
@@ -693,6 +699,52 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         # The footer points at the chat rows, so they must be on screen, not behind the task view.
         self.screen_has(terminal, 'Not started')
         self.assertEqual(self.fixture.markers(), [])
+        self.quit(terminal)
+
+
+    def commit_big_files(self):
+        for name in ['a.py', 'b.py', 'c.py']:
+            (self.workspace / name).write_text('x = 1\n' * 7000)
+        self.git('add', '.')
+        self.git('-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', 'commit', '-qm', 'big files')
+
+    def open_big_draft(self, terminal):
+        self.fixture.big_plan = True
+        terminal.send('/plan touch files\r')
+        self.screen_has(terminal, 'Not saved or approved', 60)
+        self.wait_until('draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
+
+    def assert_lint_refusal_rows(self, terminal):
+        self.screen_has(terminal, 'Fix it with /plan-revise (draft) or run it by hand with /approve')
+        time.sleep(0.5)
+        terminal.pump()
+        flat = self.flat(terminal)
+        self.assertIn('The plan cannot run unattended and nothing changed: Approved files total 124 KiB;', flat)
+        self.assertIn('workers can read up to 96 KiB of approved files.', flat)
+        self.assertIn('edit them by hand. Fix it with /plan-revise (draft) or run it by hand with /approve', flat)
+        self.assertNotIn('..', flat)
+        footer = terminal.screen().rstrip().splitlines()[-1]
+        self.assertIn('/go refused', footer)
+        self.assertIn('see the chat rows above', footer)
+        self.assertEqual(self.fixture.markers(), ['PLAN'])
+        self.assertEqual(self.statuses(), [])
+
+    def test_go_refused_by_the_plan_lint_shows_the_finding_and_the_fix_in_chat_rows_at_80_columns(self):
+        self.commit_big_files()
+        terminal = self.terminal(resume=False, height=24, width=80)
+        self.open_big_draft(terminal)
+        terminal.send('/go\r')
+        self.assert_lint_refusal_rows(terminal)
+        self.quit(terminal)
+
+    def test_go_refused_by_the_plan_lint_from_the_task_view_shows_the_chat_rows_at_80_columns(self):
+        self.commit_big_files()
+        terminal = self.terminal(resume=False, height=24, width=80)
+        self.open_big_draft(terminal)
+        terminal.send(b'\x1bOQ')  # F2: task view
+        self.wait_until('task view open', lambda: 'Chat 1' not in terminal.screen())
+        terminal.send('/go\r')
+        self.assert_lint_refusal_rows(terminal)
         self.quit(terminal)
 
 
