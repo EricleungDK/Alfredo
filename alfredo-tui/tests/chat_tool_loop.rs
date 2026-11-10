@@ -370,6 +370,165 @@ async fn calls_past_the_per_round_limit_get_error_results() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #651: a long non-ASCII tool name is cut by bytes, so it stays a valid step.
+#[tokio::test]
+async fn a_long_non_ascii_tool_name_gets_an_unknown_tool_result_and_the_turn_completes() {
+    let root = workspace("cjk-name");
+    let addr = ollama_fixture::reserve();
+    let name = "读".repeat(40);
+    let fixture = ollama_fixture::serve(addr, {
+        let name = name.clone();
+        move |_, index| {
+            if index == 0 {
+                tool_call(&name, json!({}))
+            } else {
+                done("ok")
+            }
+        }
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert("go");
+    let messages = session.begin().unwrap();
+    finish(run(&fixture.endpoint, &root, messages).await, &mut session);
+    assert_eq!(session.status, Status::Complete);
+    let steps = session.tool_steps(1);
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].results.len(), 1);
+    assert!(
+        steps[0].results[0].starts_with("error: unknown tool"),
+        "{}",
+        steps[0].results[0]
+    );
+    assert!(steps[0].calls[0].name.len() <= 64);
+    let requests = fixture.requests.lock().unwrap();
+    let second = serde_json::to_string(&requests[1].body["messages"]).unwrap();
+    assert!(second.contains("unknown tool"), "{second}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #651: whichever byte of a name falls on the 64-byte limit, the turn completes
+/// with the cut name recorded (3-byte and 4-byte chars, limit inside or at a char edge).
+#[tokio::test]
+async fn names_whose_64th_byte_falls_inside_a_char_are_cut_and_the_turn_completes() {
+    let names = [
+        "读".repeat(21) + "读读",
+        format!("{}读读", "x".repeat(62)),
+        format!("a{}", "读".repeat(30)),
+        "😀".repeat(20),
+        format!("a{}", "😀".repeat(20)),
+        format!("{}😀😀", "y".repeat(61)),
+    ];
+    for name in names {
+        let root = workspace("cut-name");
+        let addr = ollama_fixture::reserve();
+        let sent = name.clone();
+        let fixture = ollama_fixture::serve(addr, move |_, index| {
+            if index == 0 {
+                tool_call(&sent, json!({}))
+            } else {
+                done("ok")
+            }
+        });
+        let mut session = Session::new("fixture".into());
+        session.insert("go");
+        let messages = session.begin().unwrap();
+        finish(run(&fixture.endpoint, &root, messages).await, &mut session);
+        assert_eq!(session.status, Status::Complete, "{name}");
+        let steps = session.tool_steps(1);
+        assert_eq!(steps.len(), 1, "{name}");
+        let recorded = &steps[0].calls[0].name;
+        assert!(recorded.len() <= 64, "{name}: {} bytes", recorded.len());
+        assert!(!recorded.is_empty() && name.starts_with(recorded.as_str()));
+        assert!(steps[0].results[0].starts_with("error: unknown tool"));
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #651: the name the loop records is the model's name without control characters,
+/// cut to exactly 64 bytes, or `unnamed` when nothing is left.
+#[tokio::test]
+async fn recorded_tool_names_drop_control_chars_and_stop_at_64_bytes() {
+    let cases = [
+        ("a".repeat(100), "a".repeat(64)),
+        ("a\u{7}b\n读".to_string(), "ab读".to_string()),
+        ("\u{7}\u{1}".to_string(), "unnamed".to_string()),
+        (format!("\u{7}{}", "读".repeat(30)), "读".repeat(21)),
+        ("😀".repeat(16) + "x", "😀".repeat(16)),
+    ];
+    for (sent, expected) in cases {
+        let root = workspace("clean-name");
+        let addr = ollama_fixture::reserve();
+        let name = sent.clone();
+        let fixture = ollama_fixture::serve(addr, move |_, index| {
+            if index == 0 {
+                tool_call(&name, json!({}))
+            } else {
+                done("ok")
+            }
+        });
+        let mut session = Session::new("fixture".into());
+        session.insert("go");
+        let messages = session.begin().unwrap();
+        finish(run(&fixture.endpoint, &root, messages).await, &mut session);
+        assert_eq!(session.status, Status::Complete, "{sent:?}");
+        let steps = session.tool_steps(1);
+        assert_eq!(steps.len(), 1, "{sent:?}");
+        assert_eq!(steps[0].calls[0].name, expected, "{sent:?}");
+        assert!(steps[0].results[0].starts_with("error: unknown tool"));
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Issue #651: a saved or replayed step still needs a non-empty, control-free name of at
+/// most 64 bytes; each rule alone rejects it.
+#[test]
+fn a_tool_result_whose_name_breaks_one_validity_rule_fails_the_turn() {
+    let rejected = [
+        "n".repeat(65),
+        "读".repeat(22),
+        String::new(),
+        "bad\u{7}name".to_string(),
+    ];
+    for name in rejected {
+        let mut session = Session::new("fixture".into());
+        session.insert("go");
+        session.begin().unwrap();
+        session.apply(
+            1,
+            Update::ToolResult {
+                call: ToolCall {
+                    name: name.clone(),
+                    arguments: json!({}),
+                },
+                result: "ok".into(),
+                new_round: true,
+            },
+        );
+        assert!(
+            matches!(session.status, Status::Failed(_)),
+            "{name:?}: {:?}",
+            session.status
+        );
+        assert!(session.tool_steps(1).is_empty(), "{name:?}");
+    }
+    let mut session = Session::new("fixture".into());
+    session.insert("go");
+    session.begin().unwrap();
+    session.apply(
+        1,
+        Update::ToolResult {
+            call: ToolCall {
+                name: "n".repeat(64),
+                arguments: json!({}),
+            },
+            result: "ok".into(),
+            new_round: true,
+        },
+    );
+    assert!(!matches!(session.status, Status::Failed(_)));
+    assert_eq!(session.tool_steps(1).len(), 1);
+}
+
 #[tokio::test]
 async fn the_loop_stops_when_a_step_would_pass_the_conversation_limit() {
     let root = workspace("limit");

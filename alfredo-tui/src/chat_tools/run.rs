@@ -5,7 +5,9 @@ use super::{
     cap_to, definitions, dispatch_budgeted, normalize_arguments, Tier, MAX_OUTPUT, TOOLS,
 };
 use crate::{
-    model::{Event, Message, Stop, ToolCall, ToolStep, Update, MAX_TEXT, OUTPUT_LIMIT},
+    model::{
+        Event, Message, Stop, ToolCall, ToolStep, Update, MAX_NAME_BYTES, MAX_TEXT, OUTPUT_LIMIT,
+    },
     provider::{Ollama, Round},
 };
 use std::{
@@ -243,12 +245,7 @@ pub async fn run_turn_limited(
         calls.truncate(MAX_KEPT);
         for call in &mut calls {
             call.arguments = normalize_arguments(&call.arguments);
-            call.name = call
-                .name
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(64)
-                .collect();
+            call.name = clean_name(&call.name);
             if call.name.is_empty() {
                 call.name = "unnamed".into();
             }
@@ -664,6 +661,19 @@ impl Drop for Undecided {
         };
         log.append(&self.card, &outcome);
     }
+}
+
+/// A model-supplied tool name without control characters, cut on a char boundary to at
+/// most `MAX_NAME_BYTES` bytes so the recorded step passes `ToolStep::valid`.
+fn clean_name(name: &str) -> String {
+    let mut clean = String::new();
+    for c in name.chars().filter(|c| !c.is_control()) {
+        if clean.len() + c.len_utf8() > MAX_NAME_BYTES {
+            break;
+        }
+        clean.push(c);
+    }
+    clean
 }
 
 #[cfg(test)]
