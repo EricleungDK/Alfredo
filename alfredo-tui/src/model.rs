@@ -1293,9 +1293,9 @@ impl Session {
     pub fn retry(&mut self) -> Result<Vec<Message>, &'static str> {
         // A reply that was only a tool call written as text (issue #660) is retryable too:
         // its notice says Ctrl+R retries.
-        if !matches!(self.status, Status::Failed(_) | Status::Cancelled)
-            && !(self.status == Status::Complete && self.ends_in_text_tool_call())
-        {
+        let retryable = matches!(self.status, Status::Failed(_) | Status::Cancelled)
+            || (self.status == Status::Complete && self.ends_in_text_tool_call());
+        if !retryable {
             return Err("Only interrupted turns can be retried");
         }
         // The incomplete assistant message stays visible until an explicit retry.
