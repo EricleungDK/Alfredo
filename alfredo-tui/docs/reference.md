@@ -556,8 +556,12 @@ is loading or busy. Model discovery bypasses this queue.
   off by the clamped limit reports the real token limit and suggests raising `--num-ctx`.
   Short prompts therefore work at any accepted window, including 2048 and 4096.
   After each reply that reports `prompt_eval_count` the chat shows
-  `ctx used/N` (`ctx used/default` when unset), plus "context may be truncated" from
-  95% of a set window. `--doctor` prints a `NOTE context:` line. A larger window
+  `ctx used/N`, plus "context may be truncated" from 95% of the window. N is
+  `--num-ctx` when set; otherwise it is the observed window, the selected model's
+  `context_length` from the 5 s `GET /api/ps` health poll (so a default 4096 window
+  warns too). With no loaded model or no `context_length` it reads `ctx used/default`
+  with no warning. The observed window only labels the line: nothing is refused or
+  compacted by it. `--doctor` prints a `NOTE context:` line. A larger window
   uses more VRAM (KV cache), so it is your setting; there is no default.
 - At startup, on workspace switch and on `/model NAME`, Alfredo preloads the model
   in the background (`POST /api/generate` with an empty prompt). Preload bypasses

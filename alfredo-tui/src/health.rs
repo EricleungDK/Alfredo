@@ -78,6 +78,8 @@ struct State {
     /// None until the first poll completes.
     reachable: Option<Result<(), Instant>>,
     running: Vec<String>,
+    /// Live window (`/api/ps` `context_length`) per resident model name.
+    windows: Vec<(String, u32)>,
     /// Last `/api/tags` listing; None until fetched or when it fails.
     installed: Option<Vec<String>>,
     preloading: Option<String>,
@@ -103,6 +105,16 @@ struct Control {
 struct Inner {
     state: Mutex<State>,
     control: Option<Control>,
+}
+
+impl State {
+    fn set_running(&mut self, running: Vec<(String, Option<u32>)>) {
+        self.running = running.iter().map(|(name, _)| name.clone()).collect();
+        self.windows = running
+            .into_iter()
+            .filter_map(|(name, window)| Some((name, window?)))
+            .collect();
+    }
 }
 
 impl Inner {
@@ -172,6 +184,19 @@ impl HealthView {
         }
     }
 
+    /// The live window the server reports for `model`, if it is resident and says so.
+    pub fn observed_window(&self, model: &str) -> Option<u32> {
+        let state = self.inner.state.lock().unwrap();
+        if state.fixed.is_some() {
+            return None;
+        }
+        state
+            .windows
+            .iter()
+            .find(|(name, _)| crate::models::same_model(name, model))
+            .map(|(_, window)| *window)
+    }
+
     pub fn preload_error(&self) -> Option<String> {
         self.inner.state.lock().unwrap().preload_error.clone()
     }
@@ -219,7 +244,7 @@ impl HealthView {
         let provider = control.provider.clone();
         tasks.preload = Some(control.handle.spawn(async move {
             let result = provider.preload(&model).await;
-            let running = provider.running_models().await.ok();
+            let running = provider.running_windows().await.ok();
             inner.update(|state| {
                 if state.preloading.as_deref() == Some(model.as_str()) {
                     state.preloading = None;
@@ -228,7 +253,7 @@ impl HealthView {
                     Ok(()) => {
                         state.reachable = Some(Ok(()));
                         if let Some(running) = running {
-                            state.running = running;
+                            state.set_running(running);
                         } else if !crate::models::contains_model(&state.running, &model) {
                             state.running.push(model);
                         }
@@ -258,7 +283,7 @@ impl Monitor {
         let poller = inner.clone();
         let task = handle.spawn(async move {
             loop {
-                let observed = provider.running_models().await;
+                let observed = provider.running_windows().await;
                 // A failed catalog fetch keeps the last listing; absence never flags.
                 let catalog = if observed.is_ok() {
                     tokio::time::timeout(CATALOG_DEADLINE, provider.models())
@@ -271,7 +296,7 @@ impl Monitor {
                 poller.update(|state| match observed {
                     Ok(running) => {
                         state.reachable = Some(Ok(()));
-                        state.running = running;
+                        state.set_running(running);
                         if catalog.is_some() {
                             state.installed = catalog;
                         }
@@ -281,6 +306,7 @@ impl Monitor {
                             state.reachable = Some(Err(Instant::now()));
                         }
                         state.running.clear();
+                        state.windows.clear();
                     }
                 });
                 tokio::time::sleep(interval).await;
