@@ -685,6 +685,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     session.set_command_state(&id, state);
                     dirty = true;
                 }
+                let acknowledged: Vec<_> = session
+                    .commands()
+                    .iter()
+                    .filter(|command| {
+                        matches!(
+                            command.state,
+                            alfredo_tui::console_command::CommandState::Submitted
+                        ) && !work.tasks.command_in_flight(command, &work.wayfinder)
+                    })
+                    .map(|command| command.id.clone())
+                    .collect();
+                for id in acknowledged {
+                    session.mark_acknowledged(&id);
+                }
             }
 
             // This records when the console observed a canonical receipt, not who

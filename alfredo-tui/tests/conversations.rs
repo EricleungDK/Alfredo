@@ -4102,3 +4102,85 @@ fn acknowledged_task_commands_do_not_fill_the_history() {
     assert!(commands.iter().all(|c| c.id != ids[0]));
     assert_saved_history_loads(&app);
 }
+
+#[test]
+fn acknowledging_never_frees_pending_or_unreceipted_submitted_commands() {
+    use alfredo_tui::console_command::CommandState;
+    let mut app = App::new("fixture".into());
+    let pending = app.sessions[0]
+        .submit_command("/task Live".into(), command_intent("live-pending"))
+        .unwrap();
+    let waiting = app.sessions[0]
+        .submit_command("/task Live".into(), command_intent("live-waiting"))
+        .unwrap();
+    app.sessions[0].set_command_state(&waiting, CommandState::Submitted);
+    // Only a Submitted command can be acknowledged.
+    assert!(!app.sessions[0].mark_acknowledged(&pending));
+    assert!(!app.sessions[0].mark_acknowledged("no-such-id"));
+    for number in 0..600 {
+        let id = app.sessions[0]
+            .submit_command("/task Acked".into(), command_intent(&format!("a-{number}")))
+            .unwrap();
+        app.sessions[0].set_command_state(&id, CommandState::Submitted);
+        app.sessions[0].mark_acknowledged(&id);
+    }
+    let ids: Vec<_> = app.sessions[0].commands().iter().map(|c| &c.id).collect();
+    assert!(ids.contains(&&pending) && ids.contains(&&waiting));
+    assert!(app.sessions[0].commands().len() < 600);
+}
+
+#[test]
+fn a_state_change_or_retry_withdraws_the_acknowledgement() {
+    use alfredo_tui::console_command::CommandState;
+    let mut app = App::new("fixture".into());
+    let id = app.sessions[0]
+        .submit_command("/task Back".into(), command_intent("back"))
+        .unwrap();
+    app.sessions[0].set_command_state(&id, CommandState::Submitted);
+    assert!(app.sessions[0].mark_acknowledged(&id));
+    // Back to Submitted by a new send: it is live again until re-acknowledged.
+    app.sessions[0].set_command_state(&id, CommandState::Pending);
+    app.sessions[0].set_command_state(&id, CommandState::Submitted);
+    for number in 0..600 {
+        let other = app.sessions[0]
+            .submit_command("/task Acked".into(), command_intent(&format!("b-{number}")))
+            .unwrap();
+        app.sessions[0].set_command_state(&other, CommandState::Submitted);
+        app.sessions[0].mark_acknowledged(&other);
+    }
+    assert!(app.sessions[0].commands().iter().any(|c| c.id == id));
+}
+
+#[test]
+fn an_evicted_acknowledged_command_stays_refused_and_the_file_format_is_unchanged() {
+    use alfredo_tui::console_command::CommandState;
+    let mut app = App::new("fixture".into());
+    let first = app.sessions[0]
+        .submit_command("/task Acked".into(), command_intent("acked-0"))
+        .unwrap();
+    app.sessions[0].set_command_state(&first, CommandState::Submitted);
+    app.sessions[0].mark_acknowledged(&first);
+    let mut number = 1;
+    while app.sessions[0].commands().iter().any(|c| c.id == first) {
+        let id = app.sessions[0]
+            .submit_command(
+                "/task Acked".into(),
+                command_intent(&format!("acked-{number}")),
+            )
+            .unwrap();
+        app.sessions[0].set_command_state(&id, CommandState::Submitted);
+        app.sessions[0].mark_acknowledged(&id);
+        number += 1;
+        assert!(number < 2000);
+    }
+    let error = app.sessions[0]
+        .submit_command("/task Acked".into(), command_intent("acked-0"))
+        .unwrap_err();
+    assert!(error.contains("Retry the original command entry"), "{error}");
+    // The acknowledged set is runtime only: the saved JSON has no trace of it.
+    let json = serde_json::to_string(&app.sessions[0]).unwrap();
+    assert!(!json.contains("acknowledged"), "{json}");
+    let reloaded: alfredo_tui::model::Session = serde_json::from_str(&json).unwrap();
+    assert_eq!(serde_json::to_string(&reloaded).unwrap(), json);
+    assert_saved_history_loads(&app);
+}

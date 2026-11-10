@@ -240,9 +240,11 @@ Each conversation keeps at most 512 saved commands and 512 KiB of command histor
 (the command JSON plus 1 KiB reserved per command). At 80% of either, the footer (and
 headless stderr) warns and names `/clear`. When a new command would exceed the budget,
 the oldest settled commands are evicted to make room: refused, interrupted (restored
-`Unknown`) and finished Control entries, and stopped or failed Planner entries. Live `Pending` and `Submitted`
-commands are never evicted, nor are selection and Wayfinder commands, generated planner
-outcomes, the latest `/dispatch on` while dispatch is on, or a Task or Control command an
+`Unknown`) and finished Control entries, stopped or failed Planner entries, and acknowledged
+task commands. Live `Pending` commands and `Submitted` commands still awaiting a receipt or
+running are never evicted; a `Submitted` command whose receipt exists and whose
+operation has finished is acknowledged (tracked in memory, not saved) and evictable. Also kept: selection and Wayfinder commands, generated planner
+outcomes, the latest `/dispatch on` while dispatch is on, and a Task or Control command an
 automatic `/run` or Architect draft still names. Intent ids are not reused, so a live
 command stays idempotent; an evicted command can no longer be retried or serve as an
 automatic parent (`Saved originating command is unavailable`). If only unevictable

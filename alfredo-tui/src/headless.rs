@@ -621,6 +621,25 @@ fn step(
         for (id, state) in uncertain {
             session.set_command_state(&id, state);
         }
+        let acknowledged: Vec<_> = session
+            .commands()
+            .iter()
+            .filter(|command| {
+                matches!(command.state, CommandState::Submitted)
+                    && !work.tasks.intent_pending(&command.intent)
+                    && command
+                        .intent
+                        .acknowledgment(
+                            work.tasks.snapshot.as_ref(),
+                            work.tasks.canonical_scope.as_ref(),
+                        )
+                        .is_some()
+            })
+            .map(|command| command.id.clone())
+            .collect();
+        for id in acknowledged {
+            session.mark_acknowledged(&id);
+        }
     }
     if !stopping && pending.is_none() {
         crate::command_staging::submit_autopilot(runtime, work, pending);
