@@ -172,6 +172,20 @@ class Compaction(unittest.TestCase):
         self.terminal.wait_for('REPLY_3')
         self.assertEqual(len(self.fixture.chats()[-1]['messages']), 2)  # context + the one prompt
 
+    def test_clear_works_after_an_acknowledged_task_command(self):
+        # Issue #654: task commands stay Submitted for the session; once the receipt is
+        # shown nothing is in flight, so /clear must not wait for them.
+        self.terminal.write(b'/task Clear_after_task\r')
+        self.terminal.wait_for('Task #1 saved')
+        self.terminal.write(b'/chat\r')
+        self.terminal.wait_for('/task Clear_after_task')
+        self.terminal.write(b'/clear\r')
+        self.terminal.wait_for('Conversation cleared')
+        screen = self.terminal.screen()
+        self.assertNotIn('still being recorded', screen)
+        self.assertNotIn('/task Clear_after_task', screen)
+        self.assertNotIn('Task #1 saved', screen)
+
     def test_compact_summarises_on_demand_without_sending(self):
         self.send('PASTE1', 200)
         self.terminal.wait_for('REPLY_1')

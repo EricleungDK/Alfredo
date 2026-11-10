@@ -275,6 +275,13 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertEqual(self.git('symbolic-ref', 'HEAD'), 'refs/heads/main')
         self.assertEqual(self.git('status', '--porcelain'), '')
         self.assertEqual((self.workspace / 'calc.py').read_text(), 'def answer():\n    return 0\n')
+        # Issue #654: a finished /go (its commands stay Submitted) never blocks /clear.
+        terminal.send('/chat\r')
+        self.screen_has(terminal, '✓ #2 accepted')
+        terminal.send('/clear\r')
+        self.screen_has(terminal, 'Conversation cleared')
+        self.assertNotIn('✓ #2 accepted', terminal.screen())
+        self.assertNotIn('still being recorded', terminal.screen())
         self.quit(terminal)
 
     def test_an_idle_second_terminal_in_chat_view_shows_the_tasks_another_terminal_wrote(self):

@@ -2085,6 +2085,53 @@ impl TaskControl {
                 .values()
                 .any(|active| active == intent)
     }
+    /// The command's operation is running now (task, planner or Wayfinder).
+    fn operation_running(
+        &self,
+        command: &crate::console_command::ConsoleCommand,
+        wayfinder: &crate::wayfinder::Router,
+    ) -> bool {
+        self.intent_pending(&command.intent)
+            || matches!(&command.intent, crate::command_intent::Intent::Wayfinder { request, .. } if wayfinder.request_pending(request))
+    }
+    fn awaiting_receipt(&self, command: &crate::console_command::ConsoleCommand) -> bool {
+        command
+            .intent
+            .acknowledgment(self.snapshot.as_ref(), self.canonical_scope.as_ref())
+            .is_none()
+    }
+    /// A `Submitted` command whose operation ended without a matching receipt: the
+    /// caller settles it with `unmatched_state`.
+    pub fn command_uncertain(
+        &self,
+        command: &crate::console_command::ConsoleCommand,
+        wayfinder: &crate::wayfinder::Router,
+    ) -> bool {
+        matches!(
+            command.state,
+            crate::console_command::CommandState::Submitted
+        ) && !self.operation_running(command, wayfinder)
+            && self.awaiting_receipt(command)
+    }
+    /// Whether a recorded command is still being decided: `Pending`, or `Submitted`
+    /// and either running or without its receipt yet. Task-intent commands stay
+    /// `Submitted` for the session once acknowledged, so that alone is not in flight
+    /// (issue #654). Shares its parts with `command_uncertain` so `/clear` and the
+    /// uncertain-command sweep cannot drift.
+    pub fn command_in_flight(
+        &self,
+        command: &crate::console_command::ConsoleCommand,
+        wayfinder: &crate::wayfinder::Router,
+    ) -> bool {
+        use crate::console_command::CommandState;
+        match command.state {
+            CommandState::Pending => true,
+            CommandState::Submitted => {
+                self.operation_running(command, wayfinder) || self.awaiting_receipt(command)
+            }
+            _ => false,
+        }
+    }
     pub fn intent_error(&self, intent: &crate::command_intent::Intent) -> Option<String> {
         self.prepared_errors.get(intent.correlation()).cloned()
     }

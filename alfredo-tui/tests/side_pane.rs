@@ -356,7 +356,7 @@ fn chat_preview_follows_the_turns_left_after_clear() {
     app.sessions[0].begin().unwrap();
     app.sessions[0].apply(1, Update::Done);
     assert_eq!(chat_seconds(&app), [Some("why does login fail".to_owned())]);
-    app.sessions[0].clear_conversation(None).unwrap();
+    app.sessions[0].clear_conversation(None, |_| false).unwrap();
     assert_eq!(chat_seconds(&app), [None]);
     app.sessions[0].insert("write release notes");
     app.sessions[0].begin().unwrap();

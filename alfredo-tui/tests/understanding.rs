@@ -708,3 +708,65 @@ fn router_preparation_and_resume_are_inert_and_exact_withdrawal_prevents_dispatc
     assert_eq!(scope.snapshot().unwrap().revision, 1);
     assert!(!router.active());
 }
+
+#[test]
+fn clear_counts_a_wayfinder_command_with_a_pending_request_as_in_flight_even_when_acknowledged() {
+    // Issue #654: a receipt alone does not settle a Wayfinder command while its request runs.
+    use alfredo_tui::{
+        console_command::CommandState,
+        model::{Message, Session, Update},
+        task_control::TaskControl,
+        wayfinder::{dispatch, prepare, Preparation, Router, Turn},
+    };
+    let fixture = Fixture::new();
+    let scope = fixture.a.understanding();
+    let prompt = "Build a new project";
+    let Preparation::Request(request) = prepare(&scope, prompt, "clear-pinned", Some(0)).unwrap()
+    else {
+        panic!("Expected inert first-contact request")
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut router = Router::new(scope.clone());
+    let turn = Turn {
+        session: 0,
+        attempt: 1,
+        model: "fixture".into(),
+        user_message: 0,
+        messages: vec![Message {
+            role: "user".into(),
+            content: prompt.into(),
+        }],
+    };
+    router.resume(turn, request.clone()).unwrap();
+    router.dispatch_prepared(&runtime, 0, &request).unwrap();
+    assert!(router.request_pending(&request));
+    // The receipt is durable and the control has seen it; the router has not polled yet.
+    dispatch(&scope, &request).unwrap();
+    let mut control = TaskControl::new(fixture.a.clone());
+    control.canonical_scope = Some(scope.snapshot().unwrap());
+    let mut session = Session::new("fixture".into());
+    session.insert(prompt);
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Token("reply".into()));
+    session.apply(attempt, Update::Done);
+    let id = session
+        .submit_wayfinder_command(0, request.clone())
+        .unwrap();
+    session.set_command_state(&id, CommandState::Submitted);
+    let command = session.commands()[0].clone();
+    assert!(command
+        .intent
+        .acknowledgment(None, control.canonical_scope.as_ref())
+        .is_some());
+    assert!(control.command_in_flight(&command, &router));
+    assert!(!control.command_uncertain(&command, &router));
+    // With no pending request the same acknowledged command no longer blocks /clear.
+    let idle = Router::new(scope);
+    assert!(!idle.request_pending(&request));
+    assert!(!control.command_in_flight(&command, &idle));
+    session
+        .clear_conversation(None, |c| control.command_in_flight(c, &idle))
+        .unwrap();
+    assert!(session.commands().is_empty());
+}
