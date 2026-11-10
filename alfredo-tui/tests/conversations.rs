@@ -4187,3 +4187,20 @@ fn an_evicted_acknowledged_command_stays_refused_and_the_file_format_is_unchange
     assert_eq!(serde_json::to_string(&reloaded).unwrap(), json);
     assert_saved_history_loads(&app);
 }
+
+#[test]
+fn only_a_submitted_command_with_a_receipt_and_nothing_running_is_acknowledged() {
+    use alfredo_tui::{console_command::CommandState, model::console_log::is_acknowledged};
+    let refused = CommandState::Refused {
+        reason: "no".into(),
+    };
+    for (running, awaiting) in [(false, false), (true, false), (false, true), (true, true)] {
+        assert_eq!(
+            is_acknowledged(&CommandState::Submitted, running, awaiting),
+            !running && !awaiting,
+            "running {running}, awaiting {awaiting}"
+        );
+        assert!(!is_acknowledged(&CommandState::Pending, running, awaiting));
+        assert!(!is_acknowledged(&refused, running, awaiting));
+    }
+}

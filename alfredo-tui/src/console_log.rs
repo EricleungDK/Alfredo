@@ -56,6 +56,18 @@ fn command_sizes(commands: &[crate::console_command::ConsoleCommand]) -> Vec<usi
         .collect()
 }
 
+/// Whether a command is acknowledged (issue #661): `Submitted`, its operation not
+/// running and its receipt present. Both sweeps call this with the same three facts.
+pub fn is_acknowledged(
+    state: &crate::console_command::CommandState,
+    running: bool,
+    awaiting_receipt: bool,
+) -> bool {
+    matches!(state, crate::console_command::CommandState::Submitted)
+        && !running
+        && !awaiting_receipt
+}
+
 impl Session {
     fn next_sequence_value(&self) -> u64 {
         self.task_receipts

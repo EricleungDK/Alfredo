@@ -625,15 +625,11 @@ fn step(
             .commands()
             .iter()
             .filter(|command| {
-                matches!(command.state, CommandState::Submitted)
-                    && !work.tasks.intent_pending(&command.intent)
-                    && command
-                        .intent
-                        .acknowledgment(
-                            work.tasks.snapshot.as_ref(),
-                            work.tasks.canonical_scope.as_ref(),
-                        )
-                        .is_some()
+                alfredo_tui::model::console_log::is_acknowledged(
+                    &command.state,
+                    work.tasks.intent_pending(&command.intent),
+                    work.tasks.awaiting_receipt(command),
+                )
             })
             .map(|command| command.id.clone())
             .collect();

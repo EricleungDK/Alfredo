@@ -5,7 +5,7 @@ use unicode_width::UnicodeWidthStr;
 #[path = "compaction.rs"]
 pub mod compaction;
 #[path = "console_log.rs"]
-mod console_log;
+pub mod console_log;
 pub use compaction::Compaction;
 
 pub const MAX_TEXT: usize = 128 * 1024;

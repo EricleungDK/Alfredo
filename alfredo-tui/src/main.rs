@@ -689,10 +689,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .commands()
                     .iter()
                     .filter(|command| {
-                        matches!(
-                            command.state,
-                            alfredo_tui::console_command::CommandState::Submitted
-                        ) && !work.tasks.command_in_flight(command, &work.wayfinder)
+                        alfredo_tui::model::console_log::is_acknowledged(
+                            &command.state,
+                            work.tasks.operation_running(command, &work.wayfinder),
+                            work.tasks.awaiting_receipt(command),
+                        )
                     })
                     .map(|command| command.id.clone())
                     .collect();
