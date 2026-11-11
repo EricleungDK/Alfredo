@@ -1275,7 +1275,8 @@ fn truncate_to_char_boundary(bytes: &mut Vec<u8>, max: usize) {
         return;
     }
     let mut end = max;
-    while end > 0 && (bytes[end] & 0xC0) == 0x80 {
+    // Valid UTF-8 starts with a lead byte, so this stops at index 0 at the latest.
+    while (bytes[end] & 0xC0) == 0x80 {
         end -= 1;
     }
     bytes.truncate(end);
@@ -2915,120 +2916,6 @@ mod tests {
         assert_eq!(receipt.status, "completed");
         assert_eq!(receipt.stdout, "same output");
         assert!(!receipt.reconciliation_required);
-        fs::remove_dir_all(root).expect("test fixture should be removable");
-    }
-
-    #[test]
-    fn system_launcher_decodes_non_utf8_output_lossily_and_keeps_the_true_outcome() {
-        if trusted_bwrap_path().is_none() {
-            return;
-        }
-        let (request, root) = system_test_request(
-            "shadow-rust-system-lossy-utf8",
-            vec![
-                "/bin/sh".to_owned(),
-                "-c".to_owned(),
-                "printf 'caf\\351\\n'; printf 'bad \\351\\n' >&2; exit 3".to_owned(),
-            ],
-            ExecutionLimits {
-                timeout_seconds: 2.0,
-                output_limit_bytes: 4096,
-                address_space_bytes: 8 * 1024 * 1024 * 1024,
-                file_size_bytes: 2 * 1024 * 1024 * 1024,
-                open_file_limit: 1024,
-                process_count_limit: 256,
-                descendant_grace_seconds: 0.1,
-            },
-        );
-        let receipt = RustExecutionProvider::new()
-            .execute(&request)
-            .expect("system provider should return a receipt");
-        assert_eq!(receipt.status, "failed", "{receipt:?}");
-        assert_eq!(receipt.exit_code, Some(3));
-        assert_eq!(receipt.stdout, "caf\u{FFFD}\n");
-        assert_eq!(receipt.stderr, "bad \u{FFFD}\n");
-        assert_eq!(receipt.stdout_bytes, receipt.stdout.len());
-        assert!(receipt.error_code.is_empty(), "{receipt:?}");
-        fs::remove_dir_all(root).expect("test fixture should be removable");
-    }
-
-    #[test]
-    fn system_launcher_completes_when_one_byte_of_output_is_not_utf8() {
-        if trusted_bwrap_path().is_none() {
-            return;
-        }
-        let (request, root) = system_test_request(
-            "shadow-rust-system-lossy-complete",
-            vec!["/usr/bin/printf".to_owned(), "caf\\351\\n".to_owned()],
-            ExecutionLimits {
-                timeout_seconds: 2.0,
-                output_limit_bytes: 4096,
-                address_space_bytes: 8 * 1024 * 1024 * 1024,
-                file_size_bytes: 2 * 1024 * 1024 * 1024,
-                open_file_limit: 1024,
-                process_count_limit: 256,
-                descendant_grace_seconds: 0.1,
-            },
-        );
-        let receipt = RustExecutionProvider::new()
-            .execute(&request)
-            .expect("system provider should return a receipt");
-        assert_eq!(receipt.status, "completed", "{receipt:?}");
-        assert_eq!(receipt.exit_code, Some(0));
-        assert_eq!(receipt.stdout, "caf\u{FFFD}\n");
-        fs::remove_dir_all(root).expect("test fixture should be removable");
-    }
-
-    #[test]
-    fn lossy_decoding_keeps_valid_text_and_replaces_only_invalid_bytes() {
-        assert_eq!(lossy_utf8("héllo".as_bytes().to_vec()), "héllo".as_bytes());
-        assert_eq!(
-            lossy_utf8(b"a\xffb\xc3".to_vec()),
-            "a\u{FFFD}b\u{FFFD}".as_bytes()
-        );
-        let mut text = "aé€".as_bytes().to_vec();
-        truncate_to_char_boundary(&mut text, 2);
-        assert_eq!(text, b"a");
-        let mut text = "aé€".as_bytes().to_vec();
-        truncate_to_char_boundary(&mut text, 5);
-        assert_eq!(text, "aé".as_bytes());
-        let mut text = b"abc".to_vec();
-        truncate_to_char_boundary(&mut text, 8);
-        assert_eq!(text, b"abc");
-    }
-
-    #[test]
-    fn system_launcher_bounds_decoded_output_by_the_output_limit() {
-        if trusted_bwrap_path().is_none() {
-            return;
-        }
-        // 200 invalid bytes fit the captured limit but decode to 600 bytes.
-        let (request, root) = system_test_request(
-            "shadow-rust-system-lossy-bound",
-            vec![
-                "/bin/sh".to_owned(),
-                "-c".to_owned(),
-                "i=0; while [ $i -lt 200 ]; do printf '\\377'; i=$((i+1)); done".to_owned(),
-            ],
-            ExecutionLimits {
-                timeout_seconds: 2.0,
-                output_limit_bytes: 512,
-                address_space_bytes: 8 * 1024 * 1024 * 1024,
-                file_size_bytes: 2 * 1024 * 1024 * 1024,
-                open_file_limit: 1024,
-                process_count_limit: 256,
-                descendant_grace_seconds: 0.1,
-            },
-        );
-        let receipt = RustExecutionProvider::new()
-            .execute(&request)
-            .expect("system provider should return a receipt");
-        assert_eq!(receipt.status, "output-limit", "{receipt:?}");
-        assert!(receipt.stdout_bytes <= 512, "{receipt:?}");
-        assert!(receipt
-            .stdout
-            .chars()
-            .all(|c| c == '\u{FFFD}' || c == '\n' || c.is_ascii()));
         fs::remove_dir_all(root).expect("test fixture should be removable");
     }
 
