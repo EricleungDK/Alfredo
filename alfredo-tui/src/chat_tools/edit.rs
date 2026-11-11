@@ -503,8 +503,9 @@ pub(crate) fn refuse_read_only(metadata: &std::fs::Metadata, shown: &str) -> Res
     Ok(())
 }
 
-/// The text of the regular file at `path`, read as [`read_bounded`] reads it, so the card's
-/// fingerprint and the text the edit works on come from the same bounded read.
+/// The text of the regular file at `path`, read through [`read_bounded`]. The card's
+/// fingerprint and this read are separate reads, but both go through the same bounded
+/// reader, so both have the same bounds.
 fn read_existing(root: &Path, path: &Path) -> Result<String, String> {
     let bytes = read_bounded(root, path)?.ok_or_else(|| "no such file or directory".to_string())?;
     String::from_utf8(bytes).map_err(|_| "not a UTF-8 text file".into())

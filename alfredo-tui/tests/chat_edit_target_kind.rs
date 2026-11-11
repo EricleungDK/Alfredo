@@ -20,7 +20,8 @@ struct Workspace(PathBuf);
 
 impl Workspace {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("alfredo-scan-{tag}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("alfredo-edit-target-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         Self(root)
@@ -118,8 +119,10 @@ fn an_edit_card_for_a_fifo_target_is_refused_promptly() {
     }
     let blocked: Vec<String> = outcomes
         .iter()
-        .filter(|(_, got)| !matches!(got, Ok(Err(_))))
-        .map(|(tool, got)| format!("{tool} on a FIFO: {got:?} (Timeout = blocked)"))
+        .filter(|(_, got)| !matches!(got, Ok(Err(e)) if e.contains("not a regular file")))
+        .map(|(tool, got)| {
+            format!("{tool} on a FIFO: {got:?} (want Err naming \"not a regular file\")")
+        })
         .collect();
     assert!(blocked.is_empty(), "{}", blocked.join("; "));
 }
@@ -173,8 +176,8 @@ fn an_approved_edit_whose_target_became_a_fifo_is_refused_promptly() {
     let still_fifo = is_fifo(&target);
     release_fifo(&target);
     assert!(
-        matches!(got, Ok(Err(_))),
-        "apply on a FIFO: {got:?} (Timeout = blocked)"
+        matches!(&got, Ok(Err(e)) if e.contains("not a regular file")),
+        "apply on a FIFO: {got:?} (want Err naming \"not a regular file\")"
     );
     assert!(still_fifo, "apply replaced the FIFO");
 }
