@@ -94,7 +94,7 @@ pub(crate) fn text(root: &Path, path: &Path) -> Result<String, String> {
 fn contents(file: std::fs::File, len: u64) -> Result<String, String> {
     if len > MAX_FILE {
         return Err(format!(
-            "file is {len} bytes, over the {MAX_FILE}-byte read limit; use grep"
+            "file is {len} bytes, over the {MAX_FILE}-byte read limit; grep can't search it either; use run_command (for example grep -n PATTERN FILE)"
         ));
     }
     let mut bytes = Vec::new();
