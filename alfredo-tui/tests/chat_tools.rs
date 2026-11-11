@@ -1220,7 +1220,7 @@ fn a_command_that_prints_a_nul_keeps_its_exit_code_and_output() {
     let result = workspace.run("run_command", json!({"command": "printf 'a\\0b\\n'"}));
     assert!(result.starts_with("exit code 0"), "{result}");
     assert!(result.contains("a\u{FFFD}b"), "{result}");
-    assert!(!result.contains("sandbox"), "{result}");
+    assert!(!result.contains("could not run"), "{result}");
     assert!(!result.contains("output passed"), "{result}");
 }
 
