@@ -472,6 +472,7 @@ pub fn refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>
     config_refusal_view(message)
         .or_else(|| crate::doctor::sandbox_refusal_view(message, command))
         .or_else(|| crate::autopilot::lint_refusal_view(message, command))
+        .or_else(|| crate::autopilot::active_refusal_view(message, command))
 }
 
 /// Why `workspace` cannot run coding work because of its Git config, read the bounded,

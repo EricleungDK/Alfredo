@@ -819,7 +819,7 @@ impl Autopilot {
         if let Some(saved) = &self.saved {
             if saved.active() && (!saved.paused || !tasks.workers.is_empty()) {
                 return Err(format!(
-                    "Autopilot is active for “{}”; /pause or /stop and let workers finish before a new /go",
+                    "{ACTIVE_REFUSAL_PREFIX}{}{ACTIVE_REFUSAL_FIX}",
                     clean(&saved.goal, 80)
                 ));
             }
@@ -2338,6 +2338,25 @@ pub fn lint_refusal_view(message: &str, command: &str) -> Option<(String, Vec<St
     }
     Some((
         format!("{command} refused: the plan fails the unattended lint (see the chat rows above)"),
+        vec![format!("✗ Not started · {message}")],
+    ))
+}
+
+/// What opens the refusal of a `/go` while a run is active; the goal follows.
+const ACTIVE_REFUSAL_PREFIX: &str = "Autopilot is active for “";
+
+/// What follows the goal in that refusal.
+const ACTIVE_REFUSAL_FIX: &str = "”; /pause or /stop and let workers finish before a new /go";
+
+/// How the interactive TUI shows the refusal of a `/go` while a run is active, which the
+/// one-line footer would cut before its fix: the footer says why, and the chat rows carry
+/// the whole sentence (#672). `None` for any other message.
+pub fn active_refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
+    if !message.starts_with(ACTIVE_REFUSAL_PREFIX) || !message.ends_with(ACTIVE_REFUSAL_FIX) {
+        return None;
+    }
+    Some((
+        format!("{command} refused: autopilot is active (see the chat rows above)"),
         vec![format!("✗ Not started · {message}")],
     ))
 }
