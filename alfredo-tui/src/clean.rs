@@ -172,6 +172,11 @@ pub fn unsaved_work(evidence: &Evidence) -> bool {
         || evidence.patch.starts_with("Diff unavailable")
 }
 
+/// A full 40-hex-digit commit id: the only shape a saved candidate ref can be named by.
+pub fn is_full_commit_id(commit: &str) -> bool {
+    commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Decide, per run that still has a worktree directory, whether it may be removed.
 pub async fn plan(store: &TaskStore) -> Result<Plan, String> {
     let snapshot = store.snapshot()?;
@@ -252,7 +257,7 @@ pub async fn plan(store: &TaskStore) -> Result<Plan, String> {
         };
         if let Some(commit) = &evidence.candidate_commit {
             let name = format!("refs/alfredo/candidates/{commit}");
-            let valid = commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit());
+            let valid = is_full_commit_id(commit);
             let resolved = if valid {
                 git(
                     &workspace,

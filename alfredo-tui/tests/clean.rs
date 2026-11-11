@@ -573,3 +573,17 @@ fn clean_yes_report_names_the_removed_worktrees() {
     assert!(report.contains("Evidence (F3)"), "{report}");
     assert!(!report.contains("Would remove"), "{report}");
 }
+
+#[test]
+fn only_a_full_forty_digit_hex_commit_id_names_a_candidate_ref() {
+    assert!(clean::is_full_commit_id(&"a".repeat(40)));
+    assert!(clean::is_full_commit_id(
+        "0123456789abcdefABCDEF0123456789abcdef01"
+    ));
+    // Right length, not hex: only the hex condition rejects it.
+    assert!(!clean::is_full_commit_id(&"g".repeat(40)));
+    // Hex, wrong length: only the length condition rejects it.
+    assert!(!clean::is_full_commit_id("abc123"));
+    assert!(!clean::is_full_commit_id(&"a".repeat(41)));
+    assert!(!clean::is_full_commit_id(""));
+}
