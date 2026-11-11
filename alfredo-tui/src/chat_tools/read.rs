@@ -32,13 +32,14 @@ const MAX_LINE: usize = 200;
 pub const READ_FILE: Tool = Tool {
     name: "read_file",
     tier: Tier::Read,
-    description: "Read a UTF-8 text file in the Coding Workspace (the owner's repository working tree). Returns numbered lines (line<TAB>text). Long files are cut and over-long lines are shown cut; call again with start_line to continue.",
+    description: "Read a UTF-8 text file in the Coding Workspace. Returns numbered lines (line<TAB>text); long files and lines are cut, so call again with start_line to continue.",
     parameters: || {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path relative to the repository root, e.g. README.md or src/main.rs"},
-                "start_line": {"type": "integer", "description": "First line to return (1-based, default 1)"}
+                "path": {"type": "string", "description": "File path relative to the repository root, e.g. src/main.rs"},
+                "start_line": {"type": "integer", "description": "First line (1-based, default 1)"},
+                "end_line": {"type": "integer", "description": "Last line (inclusive)"}
             },
             "required": ["path"]
         })
@@ -117,6 +118,17 @@ pub(crate) fn read_file_within(
     arguments: &Value,
     limit: usize,
 ) -> Result<String, String> {
+    let note = unknown_note(arguments, &["path", "start_line", "end_line"]);
+    let body = read_file_window(
+        root,
+        arguments,
+        limit.min(MAX_OUTPUT).saturating_sub(note.len()),
+    )?;
+    Ok(note + &body)
+}
+
+/// The numbered lines of [`read_file_within`], without the unknown-argument note.
+fn read_file_window(root: &Path, arguments: &Value, limit: usize) -> Result<String, String> {
     let budget = limit.min(MAX_OUTPUT);
     let path = text_arg(arguments, "path")?.ok_or("missing required argument path")?;
     let start = match arguments.get("start_line") {
@@ -125,6 +137,14 @@ pub(crate) fn read_file_within(
             .as_u64()
             .filter(|line| *line >= 1)
             .ok_or("start_line must be a positive integer")? as usize,
+    };
+    let end = match arguments.get("end_line") {
+        None | Some(Value::Null) => usize::MAX,
+        Some(value) => value
+            .as_u64()
+            .filter(|line| *line >= 1 && *line as usize >= start)
+            .ok_or("end_line must be a positive integer not before start_line")?
+            as usize,
     };
     let full = resolve_read(root, path)?;
     let content = text(root, &full).map_err(|error| format!("{path}: {error}"))?;
@@ -138,7 +158,12 @@ pub(crate) fn read_file_within(
         ));
     }
     let mut out = String::new();
-    for (number, line) in content.lines().enumerate().skip(start - 1) {
+    for (number, line) in content
+        .lines()
+        .enumerate()
+        .skip(start - 1)
+        .take(end.saturating_sub(start - 1))
+    {
         let entry = format!("{}\t{line}\n", number + 1);
         if out.len() + entry.len() <= budget.saturating_sub(120) {
             out.push_str(&entry);
