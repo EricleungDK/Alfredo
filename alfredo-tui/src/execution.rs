@@ -1212,11 +1212,23 @@ impl ProcessLauncher for SystemProcessLauncher {
                 (ProcessOutcomeStatus::Completed, String::new())
             }
         });
-        if std::str::from_utf8(&stdout).is_err() || std::str::from_utf8(&stderr).is_err() {
-            stdout.clear();
-            stderr.clear();
-            status = ProcessOutcomeStatus::OutputLimit;
-            error_message = "Process output was not valid UTF-8 and was rejected.".to_owned();
+        // Receipt strings must be UTF-8, but a stray byte (Latin-1 text, a binary
+        // fragment) says nothing about how the process ended: replace it with U+FFFD
+        // and keep the real status and exit code. Replacement grows each bad byte to
+        // three, so the decoded text is re-bounded to the same output limit; only a
+        // genuine overshoot of that limit changes the status.
+        stdout = lossy_utf8(stdout);
+        stderr = lossy_utf8(stderr);
+        let limit = request.limits.output_limit_bytes;
+        if stdout.len() + stderr.len() > limit {
+            truncate_to_char_boundary(&mut stderr, limit.saturating_sub(stdout.len()));
+            truncate_to_char_boundary(&mut stdout, limit);
+            if status == ProcessOutcomeStatus::Completed {
+                status = ProcessOutcomeStatus::OutputLimit;
+                error_message = format!(
+                    "Process output exceeded the {limit}-byte aggregate limit once invalid UTF-8 was replaced."
+                );
+            }
         }
         if !error_message.is_empty()
             && matches!(
@@ -1245,6 +1257,28 @@ impl ProcessLauncher for SystemProcessLauncher {
             error_message,
         })
     }
+}
+
+/// Valid UTF-8 is returned untouched (no copy); invalid bytes become U+FFFD.
+fn lossy_utf8(bytes: Vec<u8>) -> Vec<u8> {
+    match String::from_utf8(bytes) {
+        Ok(text) => text.into_bytes(),
+        Err(error) => String::from_utf8_lossy(error.as_bytes())
+            .into_owned()
+            .into_bytes(),
+    }
+}
+
+/// Shorten valid UTF-8 `bytes` to at most `max` bytes without splitting a character.
+fn truncate_to_char_boundary(bytes: &mut Vec<u8>, max: usize) {
+    if bytes.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while end > 0 && (bytes[end] & 0xC0) == 0x80 {
+        end -= 1;
+    }
+    bytes.truncate(end);
 }
 
 fn append_bounded_diagnostic(output: &mut Vec<u8>, diagnostic: &str, budget: usize) {
@@ -2942,6 +2976,59 @@ mod tests {
         assert_eq!(receipt.status, "completed", "{receipt:?}");
         assert_eq!(receipt.exit_code, Some(0));
         assert_eq!(receipt.stdout, "caf\u{FFFD}\n");
+        fs::remove_dir_all(root).expect("test fixture should be removable");
+    }
+
+    #[test]
+    fn lossy_decoding_keeps_valid_text_and_replaces_only_invalid_bytes() {
+        assert_eq!(lossy_utf8("héllo".as_bytes().to_vec()), "héllo".as_bytes());
+        assert_eq!(
+            lossy_utf8(b"a\xffb\xc3".to_vec()),
+            "a\u{FFFD}b\u{FFFD}".as_bytes()
+        );
+        let mut text = "aé€".as_bytes().to_vec();
+        truncate_to_char_boundary(&mut text, 2);
+        assert_eq!(text, b"a");
+        let mut text = "aé€".as_bytes().to_vec();
+        truncate_to_char_boundary(&mut text, 5);
+        assert_eq!(text, "aé".as_bytes());
+        let mut text = b"abc".to_vec();
+        truncate_to_char_boundary(&mut text, 8);
+        assert_eq!(text, b"abc");
+    }
+
+    #[test]
+    fn system_launcher_bounds_decoded_output_by_the_output_limit() {
+        if trusted_bwrap_path().is_none() {
+            return;
+        }
+        // 200 invalid bytes fit the captured limit but decode to 600 bytes.
+        let (request, root) = system_test_request(
+            "shadow-rust-system-lossy-bound",
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "i=0; while [ $i -lt 200 ]; do printf '\\377'; i=$((i+1)); done".to_owned(),
+            ],
+            ExecutionLimits {
+                timeout_seconds: 2.0,
+                output_limit_bytes: 512,
+                address_space_bytes: 8 * 1024 * 1024 * 1024,
+                file_size_bytes: 2 * 1024 * 1024 * 1024,
+                open_file_limit: 1024,
+                process_count_limit: 256,
+                descendant_grace_seconds: 0.1,
+            },
+        );
+        let receipt = RustExecutionProvider::new()
+            .execute(&request)
+            .expect("system provider should return a receipt");
+        assert_eq!(receipt.status, "output-limit", "{receipt:?}");
+        assert!(receipt.stdout_bytes <= 512, "{receipt:?}");
+        assert!(receipt
+            .stdout
+            .chars()
+            .all(|c| c == '\u{FFFD}' || c == '\n' || c.is_ascii()));
         fs::remove_dir_all(root).expect("test fixture should be removable");
     }
 
