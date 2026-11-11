@@ -158,6 +158,49 @@ fn read_file_end_line_without_start_line_reads_from_the_top() {
 }
 
 #[test]
+fn read_file_end_line_at_the_last_line_returns_it_without_a_hint() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let output = workspace.run(
+        "read_file",
+        json!({"path": "big.txt", "start_line": 5000, "end_line": 5000}),
+    );
+    assert_eq!(output, "5000\tline 5000\n");
+}
+
+#[test]
+fn read_file_end_line_past_the_end_returns_to_the_last_line_without_error() {
+    let workspace = Workspace::new();
+    let output = workspace.run(
+        "read_file",
+        json!({"path": "src/main.rs", "start_line": 2, "end_line": 999}),
+    );
+    assert_eq!(output, "2\t    println!(\"hi\");\n3\t}\n");
+}
+
+#[test]
+fn read_file_end_line_still_stops_at_the_output_budget_with_a_hint() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let output = workspace.run("read_file", json!({"path": "big.txt", "end_line": 5000}));
+    assert!(output.len() <= MAX_OUTPUT, "{}", output.len());
+    assert!(output.contains("[truncated at line "), "{output}");
+}
+
+#[test]
+fn read_file_note_leaves_the_continuation_hint_intact_on_a_long_file() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let output = workspace.run("read_file", json!({"path": "big.txt", "limit": 3}));
+    assert!(
+        output.starts_with("[note: unknown argument limit ignored;"),
+        "{output}"
+    );
+    assert!(output.len() <= MAX_OUTPUT, "{}", output.len());
+    assert!(output.ends_with("to continue]"), "{output}");
+}
+
+#[test]
 fn read_file_end_line_before_start_line_is_an_error() {
     let workspace = Workspace::new();
     workspace.big();
