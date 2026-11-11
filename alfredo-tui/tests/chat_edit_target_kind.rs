@@ -9,7 +9,7 @@ use serde_json::json;
 use std::{
     ffi::CString,
     fs,
-    os::unix::{ffi::OsStrExt, fs::FileTypeExt},
+    os::unix::{ffi::OsStrExt, fs::FileTypeExt, net::UnixListener},
     path::{Path, PathBuf},
     sync::mpsc,
     time::Duration,
@@ -197,4 +197,52 @@ fn a_missing_write_target_still_fingerprints_as_absent() {
         "{}",
         card.fingerprint
     );
+}
+
+/// The edit limit in bytes (`edit::MAX_FILE`), spelled out for the integration tests.
+const EDIT_LIMIT: usize = 1048576;
+
+#[test]
+fn an_edit_of_an_exactly_limit_sized_file_writes_the_whole_file() {
+    let ws = Workspace::new("exact");
+    let target = ws.0.join("exact.txt");
+    let mut content = b"a".to_vec();
+    content.extend(std::iter::repeat_n(b'x', EDIT_LIMIT - 2));
+    content.push(b'\n');
+    assert_eq!(content.len(), EDIT_LIMIT);
+    fs::write(&target, &content).unwrap();
+    let card =
+        approval::card(&ws.0, &edit_call("exact.txt")).expect("a limit-sized file is editable");
+    approval::apply(&ws.0, &card).expect("the approved edit applies");
+    let mut expected = content.clone();
+    expected[0] = b'b';
+    assert!(
+        fs::read(&target).unwrap() == expected,
+        "the edit did not write the whole file"
+    );
+}
+
+#[test]
+fn an_edit_of_a_file_one_byte_over_the_limit_is_refused_by_name() {
+    let ws = Workspace::new("over");
+    fs::File::create(ws.0.join("over.txt"))
+        .unwrap()
+        .set_len(EDIT_LIMIT as u64 + 1)
+        .unwrap();
+    let error = approval::card(&ws.0, &edit_call("over.txt"))
+        .map(|_| ())
+        .expect_err("a file one byte over the limit was accepted");
+    assert!(
+        error.contains("over the 1048576-byte edit limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_socket_target_is_refused_rather_than_read_as_absent() {
+    let ws = Workspace::new("socket");
+    // Opening a socket path fails with ENXIO, which is not "no such file": it must refuse.
+    let _listener = UnixListener::bind(ws.0.join("s.sock")).unwrap();
+    let got = approval::card(&ws.0, &write_call("s.sock")).map(|_| ());
+    assert!(got.is_err(), "a socket target was fingerprinted: {got:?}");
 }
