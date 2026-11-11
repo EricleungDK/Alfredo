@@ -737,6 +737,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Issue #670: an over-limit file is skipped unread, so it costs no scan budget and
+    // cannot make a `[stopped: …]` note blame the budget for files it never read.
+    #[test]
+    fn a_skipped_oversize_file_costs_no_scan_budget() {
+        let dir = tree(1, 10);
+        let _cleanup = Cleanup(dir.clone());
+        let big = std::fs::File::create(dir.join("a_big.log")).unwrap();
+        big.set_len(MAX_FILE + 1).unwrap();
+        let out = grep_within(
+            &dir,
+            &json!({"pattern": "needle"}),
+            1 << 20,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(out.contains("f000.txt:1:needle 0"), "{out}");
+        assert!(!out.contains("[stopped"), "{out}");
+        assert!(out.contains("a_big.log (over 4 MiB)"), "{out}");
+    }
+
     #[test]
     fn grep_stops_at_the_wall_deadline() {
         let dir = tree(5, 100);

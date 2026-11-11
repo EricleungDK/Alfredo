@@ -390,6 +390,104 @@ fn grep_boolean_ignore_case_is_unchanged() {
     assert_eq!(off.trim(), "no matches");
 }
 
+// Issue #670: grep says which files it could not search instead of answering "no matches".
+
+/// 5 MiB of `x`, then a line holding `needle` (over the 4 MiB read limit).
+fn write_unsearchable(workspace: &Workspace) {
+    let mut big = vec![b'x'; 5 * 1024 * 1024];
+    big.extend_from_slice(b"\nneedle\n");
+    fs::write(workspace.root.join("big.log"), &big).unwrap();
+    fs::write(workspace.root.join("latin.txt"), b"caf\xe9 needle\n").unwrap();
+    fs::write(workspace.root.join("bin.dat"), b"\0needle\n").unwrap();
+}
+
+#[test]
+fn grep_says_which_files_it_could_not_search() {
+    let ws = Workspace::new();
+    write_unsearchable(&ws);
+    let all = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(
+        all.contains("big.log") && all.contains("latin.txt") && all.contains("bin.dat"),
+        "{all}"
+    );
+    assert!(all.contains("not searched"), "{all}");
+    assert!(
+        all.trim_end().ends_with(
+            "[not searched: big.log (over 4 MiB), bin.dat (binary), latin.txt (not UTF-8); use run_command grep for these]"
+        ),
+        "{all}"
+    );
+    let one = ws.run("grep", json!({"pattern": "needle", "path": "big.log"}));
+    assert!(!one.contains("no matches"), "{one}");
+}
+
+#[test]
+fn grep_shows_matches_then_the_not_searched_note() {
+    let ws = Workspace::new();
+    fs::write(ws.root.join("latin.txt"), b"caf\xe9 needle\n").unwrap();
+    fs::write(ws.root.join("ok.txt"), "a needle here\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert_eq!(
+        out.trim_end(),
+        "ok.txt:1:a needle here\n[not searched: latin.txt (not UTF-8); use run_command grep for these]"
+    );
+}
+
+#[test]
+fn grep_on_one_unsearchable_file_returns_its_read_error() {
+    let ws = Workspace::new();
+    write_unsearchable(&ws);
+    let big = ws.run("grep", json!({"pattern": "needle", "path": "big.log"}));
+    assert_eq!(
+        big.trim(),
+        "error: big.log: file is 5242888 bytes, over the 4194304-byte read limit; use grep"
+    );
+    let latin = ws.run("grep", json!({"pattern": "needle", "path": "latin.txt"}));
+    assert_eq!(
+        latin.trim(),
+        "error: latin.txt: not a UTF-8 text file; not shown"
+    );
+    let bin = ws.run("grep", json!({"pattern": "needle", "path": "bin.dat"}));
+    assert_eq!(bin.trim(), "error: bin.dat: binary file; not shown");
+}
+
+#[test]
+fn grep_names_at_most_five_skipped_files_and_counts_the_rest() {
+    let ws = Workspace::new();
+    for n in 0..8 {
+        fs::write(ws.root.join(format!("b{n}.dat")), b"\0needle\n").unwrap();
+    }
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(
+        out.trim_end().ends_with(
+            "[not searched: b0.dat (binary), b1.dat (binary), b2.dat (binary), b3.dat (binary), b4.dat (binary) and 3 more; use run_command grep for these]"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("b5.dat"), "{out}");
+}
+
+#[test]
+fn grep_shows_hidden_characters_in_skipped_file_names() {
+    let ws = Workspace::new();
+    fs::write(ws.root.join("a\u{202e}b\u{1b}.dat"), b"\0needle\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(out.contains("a<U+202E>b<U+001B>.dat (binary)"), "{out}");
+    assert!(!out.contains('\u{202e}') && !out.contains('\u{1b}'), "{out}");
+}
+
+#[test]
+fn grep_never_names_secret_or_excluded_files_in_the_skipped_note() {
+    let ws = Workspace::new();
+    fs::write(ws.root.join(".env"), b"\0needle\n").unwrap();
+    fs::create_dir_all(ws.root.join("node_modules")).unwrap();
+    fs::write(ws.root.join("node_modules/dep.bin"), b"\0needle\n").unwrap();
+    fs::write(ws.root.join("shown.dat"), b"\0needle\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(out.contains("shown.dat (binary)"), "{out}");
+    assert!(!out.contains(".env") && !out.contains("dep.bin"), "{out}");
+}
+
 // Issue #343: discovery honours git's ignore rules.
 
 /// A Workspace whose `.git` is a real repository (the plain one has a fake `.git`).
