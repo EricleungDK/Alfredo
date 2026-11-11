@@ -4900,6 +4900,90 @@ fn lint_refusal_view_needs_both_the_prefix_and_the_fix_to_match() {
     );
 }
 
+/// An autopilot that is planning its first goal, so every `/go` is refused as active.
+fn active_refusal_for(first_goal: &str, command: &str) -> String {
+    let fixture = Fixture::new();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let server = slow_planning(gate);
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start(first_goal, "fixture", 2, &control).unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "planning",
+        |_, c| planning_in_flight(c, &server),
+    );
+    let error = autopilot
+        .command(&runtime, &mut control, command, "fixture", 2)
+        .unwrap_err();
+    drop(release);
+    error
+}
+
+#[test]
+fn go_while_autopilot_is_active_shows_the_whole_refusal_as_a_chat_row_and_a_short_footer() {
+    for command in ["/go another goal", "/go"] {
+        let error = active_refusal_for("Make answer return 42", command);
+        assert!(
+            error.starts_with("Autopilot is active for “Make answer return 42”"),
+            "{error}"
+        );
+        let (notice, rows) = alfredo_tui::worker::refusal_view(&error, "/go").expect(command);
+        assert_eq!(rows, vec![format!("✗ Not started · {error}")], "{command}");
+        assert!(
+            rows[0].ends_with("/pause or /stop and let workers finish before a new /go"),
+            "{rows:?}"
+        );
+        assert_eq!(
+            notice,
+            "/go refused: autopilot is active (see the chat rows above)"
+        );
+        assert!(notice.chars().count() <= 78, "{notice}");
+    }
+}
+
+#[test]
+fn go_while_autopilot_is_active_keeps_the_eighty_character_goal_cut_and_the_whole_fix() {
+    let goal =
+        "Add a function initials(name) to names.py that returns the capital letters of each word";
+    assert!(goal.chars().count() > 80);
+    let error = active_refusal_for(goal, "/go other");
+    let (_, rows) = alfredo_tui::worker::refusal_view(&error, "/go").expect("active refusal");
+    let cut: String = goal.chars().take(80).collect();
+    assert!(rows[0].contains(&format!("“{}”;", cut.trim())), "{rows:?}");
+    assert!(!rows[0].contains(&goal[80..]), "{rows:?}");
+    assert!(
+        rows[0].ends_with("/pause or /stop and let workers finish before a new /go"),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn active_refusal_view_needs_both_the_prefix_and_the_fix_to_match() {
+    let prefix = "Autopilot is active for “Goal”";
+    let fix = "/pause or /stop and let workers finish before a new /go";
+    let both = format!("{prefix}; {fix}");
+    let (notice, rows) = alfredo_tui::autopilot::active_refusal_view(&both, "/go").expect("both");
+    assert_eq!(rows, vec![format!("✗ Not started · {both}")]);
+    assert!(
+        notice.starts_with("/go refused: autopilot is active"),
+        "{notice}"
+    );
+    let prefix_only = format!("{prefix}; something else");
+    let fix_only = format!("Something else; {fix}");
+    assert_eq!(
+        alfredo_tui::autopilot::active_refusal_view(&prefix_only, "/go"),
+        None
+    );
+    assert_eq!(
+        alfredo_tui::autopilot::active_refusal_view(&fix_only, "/go"),
+        None
+    );
+}
+
 #[test]
 fn go_goal_with_an_open_draft_names_bare_go_as_the_way_to_run_it() {
     let fixture = Fixture::new();

@@ -367,6 +367,30 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertEqual(self.git('show', f'{branches[0]}:calc.py'), 'def answer():\n    return 42')
         self.quit(terminal)
 
+    def test_go_while_autopilot_runs_shows_the_whole_refusal_in_chat_rows_at_80_columns(self):
+        # Issue #672: the footer cut "Autopilot is active for ..." before its fix.
+        goal = 'Make answer return 42 and add app, then keep every other file exactly as it is today'
+        terminal = self.terminal(resume=False, height=24, width=80)
+        terminal.send(f'/go {goal}\r')
+        self.wait_until('dependent worker requested', lambda: self.fixture.markers().count('APP') == 1, 60)
+        for command in ('/go another goal', '/go'):
+            terminal.send(f'{command}\r')
+            # The chat row wraps, so wait on the words, not the screen text.
+            self.wait_until('active refusal row', lambda: 'before a new /go' in self.flat(terminal), 30)
+            time.sleep(0.5)
+            terminal.pump()
+            flat = self.flat(terminal)
+            self.assertIn('✗ Not started · Autopilot is active for “Make answer return 42 and add app', flat)
+            self.assertIn('/pause or /stop and let workers finish before a new /go', flat)
+            footer = terminal.screen().rstrip().splitlines()[-1]
+            self.assertIn('/go refused: autopilot is active', footer)
+            # Replace the footer so the next command's message is its own.
+            terminal.send(b'/tasks #1\r')
+            self.wait_until('footer replaced', lambda: '/go refused: autopilot is active' not in terminal.screen())
+        self.assertEqual(self.fixture.markers().count('PLAN'), 1)
+        self.fixture.release_app.set()
+        self.quit(terminal)
+
     def test_esc_cancels_a_manual_plan_request_like_plan_cancel_and_keeps_an_idle_draft(self):
         self.fixture.hold_plan = threading.Event()
         terminal = self.terminal(resume=False)
