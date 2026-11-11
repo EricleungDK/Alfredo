@@ -1740,7 +1740,10 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   symlinks that resolve outside the repository are refused; listing and search never
   follow symlinks. The `@path` exclusions apply: `.git`, secrets (the **Secret files**
   list below), `node_modules`, `target`, `dist`, `vendor`. Binary and
-  non-UTF-8 files and files over 4 MiB are not shown.
+  non-UTF-8 files and files over 4 MiB are not shown. `grep` cannot search them
+  either: a whole-workspace search ends with `[not searched: FILE (over 4 MiB | binary | not
+  UTF-8), …; use run_command grep for these]` (five names, then `and N more`), and `grep` with
+  a `path` naming one returns that file's read error instead of `no matches` (issue #670).
 - **Glob filter (issue #337).** `list_files` and `grep` take an optional `glob` (`*` any
   run of characters except `/`, `?` one character except `/`, `**` any run including `/`,
   `**/` zero or more directories). A glob without `/` (`*.rs`) is tested against the file

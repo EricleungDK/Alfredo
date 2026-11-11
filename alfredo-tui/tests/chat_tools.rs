@@ -520,6 +520,182 @@ fn grep_boolean_ignore_case_is_unchanged() {
     assert_eq!(off.trim(), "no matches");
 }
 
+// Issue #670: grep says which files it could not search instead of answering "no matches".
+
+/// 5 MiB of `x`, then a line holding `needle` (over the 4 MiB read limit).
+fn write_unsearchable(workspace: &Workspace) {
+    let mut big = vec![b'x'; 5 * 1024 * 1024];
+    big.extend_from_slice(b"\nneedle\n");
+    fs::write(workspace.root.join("big.log"), &big).unwrap();
+    fs::write(workspace.root.join("latin.txt"), b"caf\xe9 needle\n").unwrap();
+    fs::write(workspace.root.join("bin.dat"), b"\0needle\n").unwrap();
+}
+
+#[test]
+fn grep_says_which_files_it_could_not_search() {
+    let ws = Workspace::new();
+    write_unsearchable(&ws);
+    let all = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(
+        all.contains("big.log") && all.contains("latin.txt") && all.contains("bin.dat"),
+        "{all}"
+    );
+    assert!(all.contains("not searched"), "{all}");
+    assert!(
+        all.trim_end().ends_with(
+            "[not searched: big.log (over 4 MiB), bin.dat (binary), latin.txt (not UTF-8); use run_command grep for these]"
+        ),
+        "{all}"
+    );
+    let one = ws.run("grep", json!({"pattern": "needle", "path": "big.log"}));
+    assert!(!one.contains("no matches"), "{one}");
+}
+
+#[test]
+fn grep_shows_matches_then_the_not_searched_note() {
+    let ws = Workspace::new();
+    fs::write(ws.root.join("latin.txt"), b"caf\xe9 needle\n").unwrap();
+    fs::write(ws.root.join("ok.txt"), "a needle here\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert_eq!(
+        out.trim_end(),
+        "ok.txt:1:a needle here\n[not searched: latin.txt (not UTF-8); use run_command grep for these]"
+    );
+}
+
+#[test]
+fn grep_on_one_unsearchable_file_returns_its_read_error() {
+    let ws = Workspace::new();
+    write_unsearchable(&ws);
+    let big = ws.run("grep", json!({"pattern": "needle", "path": "big.log"}));
+    assert_eq!(
+        big.trim(),
+        "error: big.log: file is 5242888 bytes, over the 4194304-byte read limit; use grep"
+    );
+    let latin = ws.run("grep", json!({"pattern": "needle", "path": "latin.txt"}));
+    assert_eq!(
+        latin.trim(),
+        "error: latin.txt: not a UTF-8 text file; not shown"
+    );
+    let bin = ws.run("grep", json!({"pattern": "needle", "path": "bin.dat"}));
+    assert_eq!(bin.trim(), "error: bin.dat: binary file; not shown");
+}
+
+#[test]
+fn grep_names_at_most_five_skipped_files_and_counts_the_rest() {
+    let ws = Workspace::new();
+    for n in 0..8 {
+        fs::write(ws.root.join(format!("b{n}.dat")), b"\0needle\n").unwrap();
+    }
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(
+        out.trim_end().ends_with(
+            "[not searched: b0.dat (binary), b1.dat (binary), b2.dat (binary), b3.dat (binary), b4.dat (binary) and 3 more; use run_command grep for these]"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("b5.dat"), "{out}");
+}
+
+#[test]
+fn grep_shows_hidden_characters_in_skipped_file_names() {
+    let ws = Workspace::new();
+    fs::write(ws.root.join("a\u{202e}b\u{1b}.dat"), b"\0needle\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(out.contains("a<U+202E>b<U+001B>.dat (binary)"), "{out}");
+    assert!(
+        !out.contains('\u{202e}') && !out.contains('\u{1b}'),
+        "{out}"
+    );
+}
+
+#[test]
+fn grep_never_names_secret_or_excluded_files_in_the_skipped_note() {
+    let ws = Workspace::new();
+    fs::write(ws.root.join(".env"), b"\0needle\n").unwrap();
+    fs::create_dir_all(ws.root.join("node_modules")).unwrap();
+    fs::write(ws.root.join("node_modules/dep.bin"), b"\0needle\n").unwrap();
+    fs::write(ws.root.join("shown.dat"), b"\0needle\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(out.contains("shown.dat (binary)"), "{out}");
+    assert!(!out.contains(".env") && !out.contains("dep.bin"), "{out}");
+}
+
+#[test]
+fn a_text_only_workspace_without_a_match_still_says_just_no_matches() {
+    let ws = Workspace::new();
+    let none = ws.run("grep", json!({"pattern": "absent-text"}));
+    assert_eq!(none, "no matches");
+}
+
+#[test]
+fn grep_names_exactly_five_skipped_files_without_a_more_count() {
+    let ws = Workspace::new();
+    for n in 0..5 {
+        fs::write(ws.root.join(format!("b{n}.dat")), b"\0needle\n").unwrap();
+    }
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(
+        out.trim_end()
+            .ends_with("b4.dat (binary); use run_command grep for these]"),
+        "{out}"
+    );
+    assert!(!out.contains(" more"), "{out}");
+}
+
+#[test]
+fn grep_still_searches_a_file_of_exactly_the_read_limit() {
+    let ws = Workspace::new();
+    let mut exact = b"needle\n".to_vec();
+    exact.resize(4 * 1024 * 1024, b'x');
+    fs::write(ws.root.join("exact.log"), &exact).unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(out.starts_with("exact.log:1:needle"), "{out}");
+    assert!(!out.contains("not searched"), "{out}");
+}
+
+#[test]
+fn grep_with_only_skipped_files_puts_the_note_on_the_line_after_no_matches() {
+    let ws = Workspace::new();
+    fs::write(ws.root.join("bin.dat"), b"\0needle\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert_eq!(
+        out,
+        "no matches\n[not searched: bin.dat (binary); use run_command grep for these]"
+    );
+}
+
+#[test]
+fn grep_cuts_a_skipped_file_name_only_past_forty_characters() {
+    let ws = Workspace::new();
+    let exact = format!("a{}.dat", "x".repeat(35));
+    let over = format!("b{}.dat", "x".repeat(36));
+    assert_eq!((exact.chars().count(), over.chars().count()), (40, 41));
+    fs::write(ws.root.join(&exact), b"\0needle\n").unwrap();
+    fs::write(ws.root.join(&over), b"\0needle\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(out.contains(&format!("{exact} (binary)")), "{out}");
+    assert!(
+        out.contains(&format!("{}\u{2026} (binary)", &over[..40])),
+        "{out}"
+    );
+}
+
+#[test]
+fn skipped_oversize_files_do_not_use_up_the_grep_scan_budget() {
+    let ws = Workspace::new();
+    // 20 sparse files of 5 MiB: charged 4 MiB each they would pass the 64 MiB budget.
+    for n in 0..20 {
+        let file = fs::File::create(ws.root.join(format!("a{n:02}.log"))).unwrap();
+        file.set_len(5 * 1024 * 1024).unwrap();
+    }
+    fs::write(ws.root.join("zz.txt"), "a needle here\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(out.starts_with("zz.txt:1:a needle here\n"), "{out}");
+    assert!(!out.contains("[stopped"), "{out}");
+    assert!(out.contains("and 15 more"), "{out}");
+}
+
 // Issue #343: discovery honours git's ignore rules.
 
 /// A Workspace whose `.git` is a real repository (the plain one has a fake `.git`).
