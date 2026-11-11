@@ -774,8 +774,7 @@ class AutopilotTerminalSmoke(unittest.TestCase):
     def test_go_refused_repo_config_from_the_task_view_shows_the_fix_command_at_80_columns(self):
         self.git('config', '--local', 'core.excludesFile', '/x')
         terminal = self.terminal(resume=False, height=24, width=80)
-        terminal.send(b'\x1bOQ')  # F2: task view
-        self.wait_until('task view open', lambda: 'Chat 1' not in terminal.screen())
+        self.open_task_view(terminal)
         terminal.send('/go add something\r')
         self.screen_has(terminal, 'git config --local --unset core.excludesFile')
         # The footer points at the chat rows, so they must be on screen, not behind the task view.
@@ -795,6 +794,19 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         terminal.send('/plan touch files\r')
         self.screen_has(terminal, 'Not saved or approved', 60)
         self.wait_until('draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
+
+    def open_task_view(self, terminal):
+        # A redraw can swallow F2, so press it again until the task view's own footer is on
+        # screen (runbook section 6). "Chat 1" absent is not proof: a mid-draw screen lacks it.
+        deadline = time.monotonic() + 60
+        while True:
+            terminal.send(b'\x1bOQ')  # F2: task view
+            try:
+                self.wait_until('task view open', lambda: 'F2 chat' in terminal.screen(), 3)
+                return
+            except AssertionError:
+                if time.monotonic() > deadline:
+                    raise
 
     def assert_lint_refusal_rows(self, terminal):
         # The chat row wraps, so wait on the words, not the screen text.
@@ -824,8 +836,7 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.commit_big_files()
         terminal = self.terminal(resume=False, height=24, width=80)
         self.open_big_draft(terminal)
-        terminal.send(b'\x1bOQ')  # F2: task view
-        self.wait_until('task view open', lambda: 'Chat 1' not in terminal.screen())
+        self.open_task_view(terminal)
         terminal.send('/go\r')
         self.assert_lint_refusal_rows(terminal)
         self.quit(terminal)
