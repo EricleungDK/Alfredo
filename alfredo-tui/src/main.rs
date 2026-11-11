@@ -512,10 +512,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         work
     } else {
         // After a failed automatic open, start from the path box so any repository can be chosen.
-        let (starting, workspace) = match workspace {
-            Some(path) if automatic => (path, None),
-            workspace => (starting, workspace),
-        };
+        let (starting, workspace) =
+            alfredo_tui::selection::selector_start(starting, workspace, automatic);
         let Some(choice) = alfredo_tui::selection::choose(
             &runtime,
             &starting,

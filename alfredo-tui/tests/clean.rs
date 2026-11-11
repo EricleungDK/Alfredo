@@ -530,3 +530,46 @@ async fn symlinked_run_directory_is_ignored() {
     assert!(plan.remove.is_empty());
     assert!(moved.join("worktree").exists());
 }
+
+#[test]
+fn clean_report_lists_the_header_and_what_would_be_removed() {
+    use alfredo_tui::task_control::TaskControl;
+    let fixture = Fixture::new();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut tasks = TaskControl::new(fixture.store.clone());
+    clean::command(&runtime, &mut tasks, false, "").unwrap();
+    let report = tasks.autopilot_report.clone().unwrap();
+    assert!(
+        report.starts_with("Clean finished runs' worktrees\n\nWould remove 0 worktrees"),
+        "{report}"
+    );
+    assert!(report.contains("Evidence (F3)"), "{report}");
+    assert!(!report.contains("Removed"), "{report}");
+}
+
+#[test]
+fn clean_yes_report_names_the_removed_worktrees() {
+    use alfredo_tui::task_control::TaskControl;
+    let fixture = Fixture::new();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let task = fixture.task("a.txt");
+    assert_eq!(
+        runtime.block_on(fixture.run(task, "a.txt", "OK\n")),
+        TaskStatus::ReviewReady
+    );
+    fixture.action(Action::Review { task, accept: true });
+    let mut tasks = TaskControl::new(fixture.store.clone());
+    let notice = clean::command(&runtime, &mut tasks, false, "yes").unwrap();
+    assert!(
+        notice.starts_with("Removed 1 worktree · freed "),
+        "{notice}"
+    );
+    let report = tasks.autopilot_report.clone().unwrap();
+    assert!(
+        report.starts_with("Clean finished runs' worktrees\n\nRemoved 1 worktree · freed "),
+        "{report}"
+    );
+    assert!(report.contains(&format!("  #{task} ")), "{report}");
+    assert!(report.contains("Evidence (F3)"), "{report}");
+    assert!(!report.contains("Would remove"), "{report}");
+}
