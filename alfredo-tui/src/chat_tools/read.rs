@@ -602,7 +602,8 @@ fn grep_within(
     let glob = Glob::from_arguments(arguments)?;
     let path = text_arg(arguments, "path")?.unwrap_or(".");
     let full = resolve_path(root, path)?;
-    let (mut files, mut cut, note) = if full.is_file() {
+    let single = full.is_file();
+    let (mut files, mut cut, note) = if single {
         (vec![full], false, None)
     } else {
         discover(root, &full, MAX_VISITS)
@@ -615,6 +616,7 @@ fn grep_within(
         let _ = writeln!(out, "[{note}]");
     }
     let mut matches = 0;
+    let mut skipped: Vec<(String, &'static str)> = Vec::new();
     'files: for file in &files {
         if round.as_ref().is_some_and(|b| b.cancel.is_set()) {
             return Err("cancelled".into());
@@ -630,9 +632,18 @@ fn grep_within(
         let Ok((handle, len)) = open_confined(root, file) else {
             continue;
         };
-        scanned += len.min(MAX_FILE);
-        let Ok(content) = contents(handle, len) else {
-            continue;
+        // An over-limit file is skipped unread, so it costs no scan budget (issue #670).
+        if len <= MAX_FILE {
+            scanned += len;
+        }
+        let content = match contents(handle, len) {
+            Ok(content) => content,
+            // A file named by `path` says why it cannot be searched, not "no matches".
+            Err(error) if single => return Err(format!("{path}: {error}")),
+            Err(error) => {
+                skipped.push((display(root, file), skip_reason(&error)));
+                continue;
+            }
         };
         for (number, line) in content.lines().enumerate() {
             let found = if ignore_case {
@@ -657,6 +668,7 @@ fn grep_within(
         if looks_like_regex(pattern) {
             out.push_str(" (grep matches literal text, not regular expressions; search for one literal piece of text, or run several greps; filter files with glob, e.g. glob=\"src/*.rs\")");
         }
+        append_skipped(&mut out, &skipped);
         return Ok(out);
     }
     if cut {
@@ -676,7 +688,56 @@ fn grep_within(
             started.elapsed().as_secs_f64()
         );
     }
+    append_skipped(&mut out, &skipped);
     Ok(out)
+}
+
+/// Files named in the [`append_skipped`] note.
+const MAX_SKIPPED_NAMED: usize = 5;
+/// Characters of one file name shown in that note, so it stays inside the output reserve.
+const MAX_SKIPPED_NAME: usize = 40;
+
+/// The short reason for a [`contents`] refusal.
+fn skip_reason(error: &str) -> &'static str {
+    if error.starts_with("file is ") {
+        "over 4 MiB"
+    } else if error.starts_with("binary") {
+        "binary"
+    } else if error.starts_with("not a UTF-8") {
+        "not UTF-8"
+    } else {
+        "unreadable"
+    }
+}
+
+/// Ends `out` with a `[not searched: …]` line naming up to [`MAX_SKIPPED_NAMED`] files grep
+/// could not read, then `and N more`; nothing when none were skipped (issue #670). Names
+/// show hidden characters as `<U+XXXX>`; only files discovery offered are ever listed.
+fn append_skipped(out: &mut String, skipped: &[(String, &'static str)]) {
+    if skipped.is_empty() {
+        return;
+    }
+    let named: Vec<String> = skipped
+        .iter()
+        .take(MAX_SKIPPED_NAMED)
+        .map(|(name, reason)| {
+            let mut shown = crate::dashboard::safe_visible(name)
+                .replace('\n', "<U+000A>")
+                .replace('\t', "<U+0009>");
+            if shown.chars().count() > MAX_SKIPPED_NAME {
+                shown = shown.chars().take(MAX_SKIPPED_NAME).collect::<String>() + "…";
+            }
+            format!("{shown} ({reason})")
+        })
+        .collect();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    let _ = write!(out, "[not searched: {}", named.join(", "));
+    if skipped.len() > MAX_SKIPPED_NAMED {
+        let _ = write!(out, " and {} more", skipped.len() - MAX_SKIPPED_NAMED);
+    }
+    out.push_str("; use run_command grep for these]");
 }
 
 #[cfg(test)]

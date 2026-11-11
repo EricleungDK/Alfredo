@@ -473,7 +473,10 @@ fn grep_shows_hidden_characters_in_skipped_file_names() {
     fs::write(ws.root.join("a\u{202e}b\u{1b}.dat"), b"\0needle\n").unwrap();
     let out = ws.run("grep", json!({"pattern": "needle"}));
     assert!(out.contains("a<U+202E>b<U+001B>.dat (binary)"), "{out}");
-    assert!(!out.contains('\u{202e}') && !out.contains('\u{1b}'), "{out}");
+    assert!(
+        !out.contains('\u{202e}') && !out.contains('\u{1b}'),
+        "{out}"
+    );
 }
 
 #[test]
@@ -486,6 +489,39 @@ fn grep_never_names_secret_or_excluded_files_in_the_skipped_note() {
     let out = ws.run("grep", json!({"pattern": "needle"}));
     assert!(out.contains("shown.dat (binary)"), "{out}");
     assert!(!out.contains(".env") && !out.contains("dep.bin"), "{out}");
+}
+
+#[test]
+fn a_text_only_workspace_without_a_match_still_says_just_no_matches() {
+    let ws = Workspace::new();
+    let none = ws.run("grep", json!({"pattern": "absent-text"}));
+    assert_eq!(none, "no matches");
+}
+
+#[test]
+fn grep_names_exactly_five_skipped_files_without_a_more_count() {
+    let ws = Workspace::new();
+    for n in 0..5 {
+        fs::write(ws.root.join(format!("b{n}.dat")), b"\0needle\n").unwrap();
+    }
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(
+        out.trim_end()
+            .ends_with("b4.dat (binary); use run_command grep for these]"),
+        "{out}"
+    );
+    assert!(!out.contains(" more"), "{out}");
+}
+
+#[test]
+fn grep_still_searches_a_file_of_exactly_the_read_limit() {
+    let ws = Workspace::new();
+    let mut exact = b"needle\n".to_vec();
+    exact.resize(4 * 1024 * 1024, b'x');
+    fs::write(ws.root.join("exact.log"), &exact).unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(out.starts_with("exact.log:1:needle"), "{out}");
+    assert!(!out.contains("not searched"), "{out}");
 }
 
 // Issue #343: discovery honours git's ignore rules.
