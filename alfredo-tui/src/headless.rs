@@ -499,7 +499,7 @@ pub fn run(options: Options) -> Result<i32, String> {
             drained
         } else if status.state == RunState::Paused {
             // Autopilot halted itself (a refusal, contention): the notice says why.
-            reason = work.autopilot.notice().to_owned();
+            work.autopilot.notice().clone_into(&mut reason);
             say(&reason);
             work.autopilot.stop(runtime, &mut work.tasks);
             stopping = Some(Instant::now());
@@ -510,7 +510,7 @@ pub fn run(options: Options) -> Result<i32, String> {
         if end {
             if let Some(error) = &fatal {
                 status.state = RunState::Failed;
-                reason = error.clone();
+                reason.clone_from(error);
             } else if status.state.finished() && status.state == RunState::Failed {
                 // The report's "Reason" row names why the whole run failed.
                 reason = work

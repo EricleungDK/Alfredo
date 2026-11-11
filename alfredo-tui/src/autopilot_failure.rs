@@ -132,6 +132,7 @@ pub fn last_failure_line(detail: &str) -> String {
 /// `stderr:`/`stdout:` label, then the output's key error line, within `cells` terminal cells.
 /// The head is cut first so the key line stays. `None` when `detail` is not a check failure
 /// with output. `detail` should already be one visible line.
+#[must_use]
 pub fn check_cause(detail: &str, cells: usize) -> Option<String> {
     use unicode_width::UnicodeWidthStr;
     let (head, key) = check_head_and_key(detail)?;

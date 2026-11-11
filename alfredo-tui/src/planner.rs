@@ -730,7 +730,7 @@ impl Planner {
         self.metrics = None;
         self.context = None;
         self.scope = None;
-        self.architecture = request.architecture.clone();
+        self.architecture.clone_from(&request.architecture);
         self.prompt = prompt.into();
         self.model = model.into();
         self.revision = revision;

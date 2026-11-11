@@ -1897,6 +1897,7 @@ pub async fn start_checked(
 
 /// The footer text for a finished run (issue #658): a failed check reads as its head and key
 /// error line, not the first words of its output; any other detail is shown as recorded.
+#[must_use]
 pub fn finish_notice(detail: &str) -> String {
     crate::autopilot::failure::check_cause(&crate::dashboard::single_line_visible(detail), 160)
         .unwrap_or_else(|| detail.to_owned())

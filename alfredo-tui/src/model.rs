@@ -599,11 +599,11 @@ impl Session {
     pub(crate) fn checkpoint(&self) -> Self {
         let mut snapshot = self.clone();
         if let Some((draft, cursor)) = &self.unsent {
-            snapshot.draft = draft.clone();
+            snapshot.draft.clone_from(draft);
             snapshot.cursor = *cursor;
         }
         if let Some(chat) = &self.aside {
-            snapshot.draft = chat.clone();
+            snapshot.draft.clone_from(chat);
             snapshot.cursor = chat.len();
         }
         snapshot.aside = None;
@@ -670,17 +670,16 @@ impl Session {
         if self.history.is_empty() {
             return;
         }
-        let next = match self.history_index {
-            Some(index) => index.saturating_sub(1),
-            None => {
-                self.unsent = Some((self.draft.clone(), self.cursor()));
-                let last = self.history.len() - 1;
-                // Recalling the text already in the prompt would look like a no-op.
-                if last > 0 && self.history[last] == self.draft.trim() {
-                    last - 1
-                } else {
-                    last
-                }
+        let next = if let Some(index) = self.history_index {
+            index.saturating_sub(1)
+        } else {
+            self.unsent = Some((self.draft.clone(), self.cursor()));
+            let last = self.history.len() - 1;
+            // Recalling the text already in the prompt would look like a no-op.
+            if last > 0 && self.history[last] == self.draft.trim() {
+                last - 1
+            } else {
+                last
             }
         };
         self.history_index = Some(next);
@@ -1021,7 +1020,7 @@ impl Session {
         }
         let text = self.queue.remove(0);
         let (draft, cursor) = (std::mem::take(&mut self.draft), self.cursor);
-        self.draft = text.clone();
+        self.draft.clone_from(&text);
         let result = self.begin();
         if result.is_ok() {
             self.draft = draft;
@@ -2099,7 +2098,7 @@ impl App {
                 let late = text == crate::chat_tools::text_call::NOTICE
                     && session.status == Status::Complete;
                 if session.attempt == event.attempt && (session.status.active() || late) {
-                    self.notice = text.clone();
+                    self.notice.clone_from(text);
                 }
                 return;
             }

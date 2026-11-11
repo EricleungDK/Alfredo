@@ -1365,12 +1365,9 @@ pub(crate) fn run_bounded(
             Err(mpsc::RecvTimeoutError::Disconnected) => break None,
         }
     };
-    let out = match read {
-        Some(Ok(out)) => out,
-        _ => {
-            stop(&mut child);
-            return Err("cannot read git output".into());
-        }
+    let Some(Ok(out)) = read else {
+        stop(&mut child);
+        return Err("cannot read git output".into());
     };
     let status = if out.len() >= limit {
         stop(&mut child);

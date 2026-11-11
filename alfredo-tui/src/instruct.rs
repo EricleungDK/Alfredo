@@ -450,7 +450,7 @@ impl Instructions {
     fn finish(&mut self, id: u64, status: String, notice: bool) {
         if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
             item.done = true;
-            item.status = status.clone();
+            item.status.clone_from(&status);
         }
         if notice {
             self.notice = Some(status);
