@@ -246,3 +246,86 @@ fn stdout_filling_the_limit_exactly_leaves_no_room_for_stderr() {
     assert_eq!(receipt.stdout, REPLACEMENT.repeat(200));
     assert_eq!(receipt.stderr, "");
 }
+
+// Issue #688: a NUL byte in command output is valid UTF-8 but is not allowed in a
+// receipt string. It is replaced with U+FFFD like an invalid byte, and the receipt
+// keeps the true status and exit code instead of becoming a contract failure.
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[test]
+fn a_nul_on_stdout_is_replaced_and_the_command_still_completes() {
+    if !sandbox_works() {
+        return;
+    }
+    let receipt = run("nul-stdout", "printf 'a\\0b'", 4096);
+    assert_eq!(receipt.status, "completed", "{receipt:?}");
+    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(receipt.stdout, "a\u{FFFD}b");
+    assert!(receipt.error_code.is_empty(), "{receipt:?}");
+}
+
+#[test]
+fn a_nul_on_stderr_is_replaced_and_a_failing_exit_code_is_kept() {
+    if !sandbox_works() {
+        return;
+    }
+    let receipt = run("nul-stderr", "printf 'x\\0y' >&2; exit 3", 4096);
+    assert_eq!(receipt.status, "failed", "{receipt:?}");
+    assert_eq!(receipt.exit_code, Some(3));
+    assert_eq!(receipt.stderr, "x\u{FFFD}y");
+}
+
+#[test]
+fn nul_mixed_with_invalid_bytes_never_turns_a_failure_into_a_pass() {
+    if !sandbox_works() {
+        return;
+    }
+    let receipt = run("nul-mixed", "printf '\\0\\377\\0ok\\0'; exit 1", 4096);
+    assert_eq!(receipt.status, "failed", "{receipt:?}");
+    assert_eq!(receipt.exit_code, Some(1));
+    assert_eq!(receipt.stdout, "\u{FFFD}\u{FFFD}\u{FFFD}ok\u{FFFD}");
+}
+
+#[test]
+fn receipt_byte_counts_and_digests_describe_the_replaced_strings() {
+    if !sandbox_works() {
+        return;
+    }
+    let receipt = run("nul-digest", "printf 'a\\0b'; printf '\\0\\0' >&2", 4096);
+    assert_eq!(receipt.status, "completed", "{receipt:?}");
+    assert_eq!(receipt.stdout, "a\u{FFFD}b");
+    assert_eq!(receipt.stderr, "\u{FFFD}\u{FFFD}");
+    assert_eq!(receipt.stdout_bytes, 5);
+    assert_eq!(receipt.stderr_bytes, 6);
+    assert_eq!(receipt.stdout_sha256, sha256_hex(&receipt.stdout));
+    assert_eq!(receipt.stderr_sha256, sha256_hex(&receipt.stderr));
+    // A NUL is not the same output as the character that replaces it.
+    let literal = run("nul-digest-literal", "printf 'a\\357\\277\\275b'", 4096);
+    assert_eq!(literal.stdout, receipt.stdout);
+    assert_eq!(literal.stdout_sha256, receipt.stdout_sha256);
+}
+
+#[test]
+fn nul_output_replaced_with_longer_text_is_still_bounded_by_the_limit() {
+    if !sandbox_works() {
+        return;
+    }
+    // 200 NULs fit the captured limit but become 600 bytes; 512 holds 170 of them.
+    let script = "i=0; while [ $i -lt 200 ]; do printf '\\0'; i=$((i+1)); done";
+    let receipt = run("nul-bounded", script, 512);
+    assert_eq!(receipt.status, "output-limit", "{receipt:?}");
+    assert_eq!(receipt.stdout, REPLACEMENT.repeat(170), "{receipt:?}");
+    assert_eq!(receipt.stdout_bytes, 510);
+    assert_eq!(receipt.stdout_sha256, sha256_hex(&receipt.stdout));
+    // Exactly at the limit stays completed.
+    let receipt = run("nul-at-limit", script, 600);
+    assert_eq!(receipt.status, "completed", "{receipt:?}");
+    assert_eq!(receipt.stdout, REPLACEMENT.repeat(200));
+}

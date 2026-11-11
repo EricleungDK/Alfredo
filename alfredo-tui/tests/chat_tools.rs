@@ -1212,6 +1212,33 @@ fn a_failing_command_with_non_utf8_stderr_keeps_its_exit_code_and_stderr() {
 }
 
 #[test]
+fn a_command_that_prints_a_nul_keeps_its_exit_code_and_output() {
+    if !sandbox_works() {
+        return;
+    }
+    let workspace = Workspace::new();
+    let result = workspace.run("run_command", json!({"command": "printf 'a\\0b\\n'"}));
+    assert!(result.starts_with("exit code 0"), "{result}");
+    assert!(result.contains("a\u{FFFD}b"), "{result}");
+    assert!(!result.contains("sandbox"), "{result}");
+    assert!(!result.contains("output passed"), "{result}");
+}
+
+#[test]
+fn a_failing_command_with_a_nul_on_stderr_keeps_its_exit_code_and_stderr() {
+    if !sandbox_works() {
+        return;
+    }
+    let workspace = Workspace::new();
+    let result = workspace.run(
+        "run_command",
+        json!({"command": "printf 'bad\\0byte\\n' >&2; exit 3"}),
+    );
+    assert!(result.starts_with("exit code 3"), "{result}");
+    assert!(result.contains("bad\u{FFFD}byte"), "{result}");
+}
+
+#[test]
 fn output_over_the_byte_limit_is_still_reported_as_a_limit_hit() {
     if !sandbox_works() {
         return;
