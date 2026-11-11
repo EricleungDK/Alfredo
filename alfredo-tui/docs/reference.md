@@ -1904,6 +1904,7 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   a model that asks for one more is stopped and the reply ends with `[Stopped: tool step
   limit reached after 8 rounds; ask again to continue]` (N is the actual cap). A failed request ends the turn as
   usual (Ctrl+R retries the whole turn). Esc cancels between or during rounds.
+  From the third identical failing read call (same tool and arguments, result starting `error:`) in one turn, that result ends with `[note: this exact call failed 3 times this turn; change the arguments or answer from what you already know]`; the turn and the round cap are unchanged.
 - **Empty reply.** A turn whose final round ends with no text (and no tool call; a
   `propose_plan` hand-off always has its note) fails with `Model returned no text; Ctrl+R
   retries or send again`, shown as a transcript row and in the status line instead of a
