@@ -1212,11 +1212,23 @@ impl ProcessLauncher for SystemProcessLauncher {
                 (ProcessOutcomeStatus::Completed, String::new())
             }
         });
-        if std::str::from_utf8(&stdout).is_err() || std::str::from_utf8(&stderr).is_err() {
-            stdout.clear();
-            stderr.clear();
-            status = ProcessOutcomeStatus::OutputLimit;
-            "Process output was not valid UTF-8 and was rejected.".clone_into(&mut error_message);
+        // Receipt strings must be UTF-8, but a stray byte (Latin-1 text, a binary
+        // fragment) says nothing about how the process ended: replace it with U+FFFD
+        // and keep the real status and exit code. Replacement grows each bad byte to
+        // three, so the decoded text is re-bounded to the same output limit; only a
+        // genuine overshoot of that limit changes the status.
+        stdout = lossy_utf8(stdout);
+        stderr = lossy_utf8(stderr);
+        let limit = request.limits.output_limit_bytes;
+        if stdout.len() + stderr.len() > limit {
+            truncate_to_char_boundary(&mut stderr, limit.saturating_sub(stdout.len()));
+            truncate_to_char_boundary(&mut stdout, limit);
+            if status == ProcessOutcomeStatus::Completed {
+                status = ProcessOutcomeStatus::OutputLimit;
+                error_message = format!(
+                    "Process output exceeded the {limit}-byte aggregate limit once invalid UTF-8 was replaced."
+                );
+            }
         }
         if !error_message.is_empty()
             && matches!(
@@ -1245,6 +1257,29 @@ impl ProcessLauncher for SystemProcessLauncher {
             error_message,
         })
     }
+}
+
+/// Valid UTF-8 is returned untouched (no copy); invalid bytes become U+FFFD.
+fn lossy_utf8(bytes: Vec<u8>) -> Vec<u8> {
+    match String::from_utf8(bytes) {
+        Ok(text) => text.into_bytes(),
+        Err(error) => String::from_utf8_lossy(error.as_bytes())
+            .into_owned()
+            .into_bytes(),
+    }
+}
+
+/// Shorten valid UTF-8 `bytes` to at most `max` bytes without splitting a character.
+fn truncate_to_char_boundary(bytes: &mut Vec<u8>, max: usize) {
+    if bytes.len() <= max {
+        return;
+    }
+    let mut end = max;
+    // Valid UTF-8 starts with a lead byte, so this stops at index 0 at the latest.
+    while (bytes[end] & 0xC0) == 0x80 {
+        end -= 1;
+    }
+    bytes.truncate(end);
 }
 
 fn append_bounded_diagnostic(output: &mut Vec<u8>, diagnostic: &str, budget: usize) {
