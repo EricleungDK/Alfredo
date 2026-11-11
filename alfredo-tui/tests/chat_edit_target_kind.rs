@@ -35,7 +35,11 @@ impl Drop for Workspace {
 
 fn mkfifo(path: &Path) {
     let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
-    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "mkfifo failed");
+    assert_eq!(
+        unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) },
+        0,
+        "mkfifo failed"
+    );
 }
 
 /// Opens a FIFO for writing without blocking. A reader stuck in a blocking open (the bug
@@ -53,17 +57,28 @@ fn is_fifo(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_fifo())
 }
 
-fn vm_hwm_kb() -> u64 {
+#[cfg(target_os = "linux")]
+fn proc_status_kb(key: &str) -> u64 {
     fs::read_to_string("/proc/self/status")
         .unwrap()
         .lines()
-        .find(|l| l.starts_with("VmHWM:"))
+        .find(|l| l.starts_with(key))
         .unwrap()
         .split_whitespace()
         .nth(1)
         .unwrap()
         .parse()
         .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+fn vm_hwm_kb() -> u64 {
+    proc_status_kb("VmHWM:")
+}
+
+#[cfg(target_os = "linux")]
+fn vm_rss_kb() -> u64 {
+    proc_status_kb("VmRSS:")
 }
 
 fn edit_call(path: &str) -> ToolCall {
@@ -117,15 +132,27 @@ fn an_edit_card_for_an_oversized_target_does_not_read_it_into_memory() {
         .unwrap()
         .set_len(1 << 30)
         .unwrap(); // 1 GiB, sparse
-    // VmHWM is the process peak and only rises, so reset it first (Linux >= 4.0): the
-    // growth measured below is then this call's alone, whatever earlier tests allocated.
+                   // VmHWM is the process peak and only rises, so reset it first (Linux >= 4.0): the
+                   // growth measured below is then this call's alone, whatever earlier tests allocated.
     fs::write("/proc/self/clear_refs", "5").expect("reset the peak RSS counter");
     let before = vm_hwm_kb();
+    // The reset must have brought the peak down to the current RSS, or the growth below
+    // would measure nothing.
+    assert!(
+        before <= vm_rss_kb() + 1024,
+        "peak RSS was not reset: {before} kB"
+    );
     let got = approval::card(&ws.0, &edit_call("big.txt")).map(|_| ());
     let grew_mb = vm_hwm_kb().saturating_sub(before) / 1024;
     let error = got.expect_err("an oversized edit target was accepted");
-    assert!(error.contains("over the 1048576-byte edit limit"), "{error}");
-    assert!(grew_mb < 64, "peak RSS grew {grew_mb} MiB for a 1 GiB target");
+    assert!(
+        error.contains("over the 1048576-byte edit limit"),
+        "{error}"
+    );
+    assert!(
+        grew_mb < 64,
+        "peak RSS grew {grew_mb} MiB for a 1 GiB target"
+    );
 }
 
 #[test]
@@ -145,7 +172,10 @@ fn an_approved_edit_whose_target_became_a_fifo_is_refused_promptly() {
     // Nothing was written: the swapped-in FIFO is still there, not replaced by a file.
     let still_fifo = is_fifo(&target);
     release_fifo(&target);
-    assert!(matches!(got, Ok(Err(_))), "apply on a FIFO: {got:?} (Timeout = blocked)");
+    assert!(
+        matches!(got, Ok(Err(_))),
+        "apply on a FIFO: {got:?} (Timeout = blocked)"
+    );
     assert!(still_fifo, "apply replaced the FIFO");
 }
 
@@ -153,7 +183,15 @@ fn an_approved_edit_whose_target_became_a_fifo_is_refused_promptly() {
 fn a_missing_write_target_still_fingerprints_as_absent() {
     let ws = Workspace::new("absent");
     let card = approval::card(&ws.0, &write_call("new.txt")).expect("card for a new file");
-    assert!(card.fingerprint.ends_with(":absent"), "{}", card.fingerprint);
+    assert!(
+        card.fingerprint.ends_with(":absent"),
+        "{}",
+        card.fingerprint
+    );
     let card = approval::card(&ws.0, &write_call("deep/new.txt")).expect("card under new dirs");
-    assert!(card.fingerprint.contains(":absent+dirs:"), "{}", card.fingerprint);
+    assert!(
+        card.fingerprint.contains(":absent+dirs:"),
+        "{}",
+        card.fingerprint
+    );
 }
