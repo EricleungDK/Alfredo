@@ -369,6 +369,147 @@ async fn a_configured_cap_stops_the_loop_after_that_many_rounds() {
     let _ = fs::remove_dir_all(root);
 }
 
+const REPEAT_NOTE: &str = "[note: this exact call failed 3 times this turn; change the arguments or answer from what you already know]";
+
+/// Run one turn whose model makes `script[i]` as call `i` (one call per round) and then
+/// answers; every tool result in order (issue #673).
+async fn scripted_results(
+    tag: &str,
+    script: Vec<(&'static str, serde_json::Value)>,
+) -> Vec<String> {
+    let root = workspace(tag);
+    let addr = ollama_fixture::reserve();
+    let rounds = script.len();
+    let fixture = ollama_fixture::serve(addr, move |_, index| {
+        if index < rounds {
+            tool_call(script[index].0, script[index].1.clone())
+        } else {
+            done("ok")
+        }
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert("go");
+    let messages = session.begin().unwrap();
+    for event in run(&fixture.endpoint, &root, messages).await {
+        session.apply(event.attempt, event.update);
+    }
+    assert_eq!(session.status, Status::Complete);
+    let _ = fs::remove_dir_all(root);
+    session
+        .tool_steps(1)
+        .iter()
+        .flat_map(|step| step.results.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_third_identical_failing_read_call_and_later_ones_end_with_the_note() {
+    let script = vec![("read_file", json!({"path":"nope.txt"})); 6];
+    let results = scripted_results("repeat-note", script).await;
+    assert_eq!(results.len(), 6);
+    for (index, result) in results.iter().enumerate() {
+        assert!(result.starts_with("error: "), "{index}: {result}");
+        assert_eq!(
+            result.ends_with(REPEAT_NOTE),
+            index >= 2,
+            "{index}: {result}"
+        );
+    }
+    assert_eq!(results[0], results[1]);
+    assert!(results[2].starts_with(&results[0]));
+}
+
+#[tokio::test]
+async fn identical_calls_in_one_reply_count_toward_the_third() {
+    let root = workspace("repeat-one-reply");
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, index| {
+        if index == 0 {
+            let calls: Vec<_> = (0..4)
+                .map(|_| json!({"function":{"name":"read_file","arguments":{"path":"nope.txt"}}}))
+                .collect();
+            Reply::Stream(
+                vec![
+                    format!(
+                        "{}\n",
+                        json!({"message":{"content":"","tool_calls":calls},"done":false})
+                    )
+                    .into_bytes(),
+                    format!("{}\n", json!({"message":{"content":""},"done":true})).into_bytes(),
+                ],
+                Duration::ZERO,
+            )
+        } else {
+            done("ok")
+        }
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert("go");
+    let messages = session.begin().unwrap();
+    for event in run(&fixture.endpoint, &root, messages).await {
+        session.apply(event.attempt, event.update);
+    }
+    let results = &session.tool_steps(1)[0].results;
+    let noted: Vec<bool> = results.iter().map(|r| r.ends_with(REPEAT_NOTE)).collect();
+    assert_eq!(noted, [false, false, true, true]);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn different_arguments_or_a_different_tool_are_counted_apart() {
+    let script = vec![
+        ("read_file", json!({"path":"nope.txt"})),
+        ("read_file", json!({"path":"other.txt"})),
+        ("read_file", json!({"path":"nope.txt"})),
+        ("read_file", json!({"path":"other.txt"})),
+        ("list_files", json!({"path":"nope.txt"})),
+        ("read_file", json!({"path":"nope.txt"})),
+    ];
+    let results = scripted_results("repeat-apart", script).await;
+    let noted: Vec<bool> = results.iter().map(|r| r.ends_with(REPEAT_NOTE)).collect();
+    assert_eq!(noted, [false, false, false, false, false, true]);
+}
+
+#[tokio::test]
+async fn failures_split_by_a_success_still_count_toward_the_third() {
+    let script = vec![
+        ("read_file", json!({"path":"nope.txt"})),
+        ("read_file", json!({"path":"README.md"})),
+        ("read_file", json!({"path":"nope.txt"})),
+        ("read_file", json!({"path":"nope.txt"})),
+    ];
+    let results = scripted_results("repeat-split", script).await;
+    let noted: Vec<bool> = results.iter().map(|r| r.ends_with(REPEAT_NOTE)).collect();
+    assert_eq!(noted, [false, false, false, true]);
+}
+
+#[tokio::test]
+async fn an_identical_call_that_succeeds_never_gets_the_note() {
+    let script = vec![("read_file", json!({"path":"README.md"})); 5];
+    let results = scripted_results("repeat-success", script).await;
+    assert_eq!(results.len(), 5);
+    for result in &results {
+        assert!(!result.starts_with("error: "), "{result}");
+        assert!(
+            !result.contains("[note: this exact call failed"),
+            "{result}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_repeated_denied_mutating_call_keeps_its_result_unchanged() {
+    let script = vec![("write_file", json!({"path":"x.txt","content":"hi"})); 5];
+    let results = scripted_results("repeat-denied", script).await;
+    assert_eq!(results.len(), 5);
+    for result in &results {
+        assert_eq!(
+            result,
+            "error: write_file needs approval, which is not available here"
+        );
+    }
+}
+
 #[test]
 fn max_turns_accepts_one_to_thirty_two_and_names_the_range_otherwise() {
     assert_eq!(chat_tools::parse_max_turns(""), Ok(None));
