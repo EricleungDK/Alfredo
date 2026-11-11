@@ -298,21 +298,6 @@ pub(crate) fn open_confined(
     confine_opened(workspace, file)
 }
 
-/// [`open_confined`] for a path that may not exist yet (issue #689: an edit's target is
-/// fingerprinted before it is known to exist). `Ok(None)` when nothing is there; every
-/// other refusal is the same as [`open_confined`]'s.
-#[cfg(unix)]
-pub(crate) fn open_confined_if_present(
-    workspace: &Path,
-    resolved: &Path,
-) -> Result<Option<(std::fs::File, u64)>, String> {
-    match open_nonblocking(resolved) {
-        Ok(file) => confine_opened(workspace, file).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(open_error(error)),
-    }
-}
-
 /// Opens `resolved` for reading without following a symlink as the last component and
 /// without waiting for a writer (a FIFO opens at once and is then refused by
 /// [`confine_opened`]).
@@ -402,15 +387,6 @@ pub(crate) fn open_confined(
     Err("confined reads are not supported on this platform; refused".into())
 }
 
-/// Confined reads need Unix file descriptors; other platforms refuse them.
-#[cfg(not(unix))]
-pub(crate) fn open_confined_if_present(
-    _workspace: &Path,
-    _resolved: &Path,
-) -> Result<Option<(std::fs::File, u64)>, String> {
-    Err("confined reads are not supported on this platform; refused".into())
-}
-
 /// Workspace-relative display form with `/` separators.
 pub(crate) fn display(root: &Path, path: &Path) -> String {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -424,7 +400,27 @@ pub(crate) fn display(root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod cap_tests {
-    use super::cap_to;
+    use super::{cap_to, open_confined};
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_reached_after_the_check_is_refused_by_name() {
+        // A target that becomes a symlink between resolve and open is refused with the
+        // symlink message (issue #689), not the raw OS error.
+        let root = std::env::temp_dir().join(format!("alfredo-689-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("real.txt"), "x\n").unwrap();
+        std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).unwrap();
+        let error = open_confined(&root, &root.join("link.txt")).err();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("became a symbolic link after the workspace check")),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn budgeted_cut_keeps_the_body_of_a_header_plus_one_long_line() {

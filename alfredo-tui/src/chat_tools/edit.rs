@@ -1,7 +1,7 @@
 //! Mutating tier (issue #235): `write_file` and `edit_file` on the Coding Workspace
 //! working tree. Each call pauses for owner Approval; [`preview`] builds the card
 //! (and refuses invalid calls before asking), the run functions re-check and write.
-use super::{display, excluded, open_confined_if_present, resolve, text_arg, Tier, Tool};
+use super::{display, excluded, open_confined, resolve, text_arg, Tier, Tool};
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
 
@@ -96,19 +96,19 @@ pub(crate) fn fingerprint(
 }
 
 /// The bytes of the regular file at `target` inside `root`, at most [`MAX_FILE`] of them;
-/// `None` when nothing is there. Issue #689: the file is opened without waiting for a
-/// writer, so a FIFO is refused rather than blocking the call; its size is checked before
-/// any byte is read; and the read stops one byte past the limit, so a file that grows after
-/// the size check is refused without being read whole.
+/// `None` when nothing is there. Issue #689: the file is opened by [`open_confined`], which
+/// refuses a FIFO without waiting for a writer. The read stops one byte past the limit, so
+/// an oversized file (or one that grows after a size check) is refused after at most
+/// `MAX_FILE + 1` bytes, never read whole.
 fn read_bounded(root: &Path, target: &Path) -> Result<Option<Vec<u8>>, String> {
     use std::io::Read;
-    let Some((file, len)) = open_confined_if_present(root, target)? else {
-        return Ok(None);
-    };
-    if len > MAX_FILE as u64 {
-        return Err(over_limit());
+    match std::fs::symlink_metadata(target) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
     }
-    let mut bytes = Vec::with_capacity(len as usize);
+    let (file, _) = open_confined(root, target)?;
+    let mut bytes = Vec::new();
     file.take(MAX_FILE as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
@@ -824,6 +824,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_missing_target_reads_as_absent_an_unreadable_one_is_an_error() {
+        // Issue #689: `a.txt/x` has a regular file as its parent, so the lookup fails with
+        // ENOTDIR. That is an error, not a missing file.
+        let dir = temp_dir("enotdir");
+        std::fs::write(dir.join("a.txt"), "x\n").unwrap();
+        let result = read_bounded(&dir, &dir.join("a.txt/x"));
+        let missing = read_bounded(&dir, &dir.join("absent.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(result.is_err(), "{result:?}");
+        assert!(matches!(missing, Ok(None)), "{missing:?}");
     }
 
     fn leftovers(dir: &Path) -> Vec<String> {
