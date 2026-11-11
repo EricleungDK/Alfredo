@@ -477,15 +477,20 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         terminal = self.terminal(resume=True, width=220)
         for command in ('/run 1', '/accept 1', '/cancel-task 1', '/repair 1 try again'):
             terminal.send(command + '\r')
-            self.screen_has(terminal, 'Task #1 is running; ')
-            self.screen_has(terminal, '/recover 1 if its worker died')
+            # One predicate on one screen read: the footer is redrawn in pieces.
+            self.wait_until(
+                'refusal names the status and recovery',
+                lambda: 'Task #1 is running; ' in terminal.screen()
+                and '/recover 1 if its worker died' in terminal.screen())
             screen = terminal.screen()
             for internal in ('acquire a new worker owner', 'start paused', 'no evidence receipt',
                              'needs a proposed or approved'):
                 self.assertNotIn(internal, screen, command)
             # Replace the footer so the next command's message is its own.
             terminal.send(b'/tasks #1\r')
-            self.wait_until('footer replaced', lambda: 'Task #1 is running; ' not in terminal.screen())
+            # Wait for the replacement itself, not for the old text to vanish (a mid-draw
+            # screen lacks it too), so the next command never lands on a pending filter.
+            self.screen_has(terminal, 'Task filter applied')
         self.screen_has(terminal, 'Stage')
         self.screen_has(terminal, '/recover 1 records interruption without replay')
         screen = terminal.screen()
@@ -769,8 +774,7 @@ class AutopilotTerminalSmoke(unittest.TestCase):
     def test_go_refused_repo_config_from_the_task_view_shows_the_fix_command_at_80_columns(self):
         self.git('config', '--local', 'core.excludesFile', '/x')
         terminal = self.terminal(resume=False, height=24, width=80)
-        terminal.send(b'\x1bOQ')  # F2: task view
-        self.wait_until('task view open', lambda: 'Chat 1' not in terminal.screen())
+        self.open_task_view(terminal)
         terminal.send('/go add something\r')
         self.screen_has(terminal, 'git config --local --unset core.excludesFile')
         # The footer points at the chat rows, so they must be on screen, not behind the task view.
@@ -790,6 +794,19 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         terminal.send('/plan touch files\r')
         self.screen_has(terminal, 'Not saved or approved', 60)
         self.wait_until('draft finished', lambda: 'Esc cancel plan' not in terminal.screen())
+
+    def open_task_view(self, terminal):
+        # A redraw can swallow F2, so press it again until the task view's own footer is on
+        # screen (runbook section 6). "Chat 1" absent is not proof: a mid-draw screen lacks it.
+        deadline = time.monotonic() + 60
+        while True:
+            terminal.send(b'\x1bOQ')  # F2: task view
+            try:
+                self.wait_until('task view open', lambda: 'F2 chat' in terminal.screen(), 3)
+                return
+            except AssertionError:
+                if time.monotonic() > deadline:
+                    raise
 
     def assert_lint_refusal_rows(self, terminal):
         # The chat row wraps, so wait on the words, not the screen text.
@@ -819,8 +836,7 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.commit_big_files()
         terminal = self.terminal(resume=False, height=24, width=80)
         self.open_big_draft(terminal)
-        terminal.send(b'\x1bOQ')  # F2: task view
-        self.wait_until('task view open', lambda: 'Chat 1' not in terminal.screen())
+        self.open_task_view(terminal)
         terminal.send('/go\r')
         self.assert_lint_refusal_rows(terminal)
         self.quit(terminal)
