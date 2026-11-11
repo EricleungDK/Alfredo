@@ -1212,9 +1212,9 @@ impl ProcessLauncher for SystemProcessLauncher {
                 (ProcessOutcomeStatus::Completed, String::new())
             }
         });
-        // Receipt strings must be UTF-8, but a stray byte (Latin-1 text, a binary
-        // fragment) says nothing about how the process ended: replace it with U+FFFD
-        // and keep the real status and exit code. Replacement grows each bad byte to
+        // Receipt strings must be UTF-8 without NUL, but a stray byte (Latin-1 text, a binary
+        // fragment, a NUL) says nothing about how the process ended: replace it with U+FFFD
+        // and keep the real status and exit code. Replacement grows each bad byte or NUL to
         // three, so the decoded text is re-bounded to the same output limit; only a
         // genuine overshoot of that limit changes the status.
         stdout = lossy_utf8(stdout);
@@ -1259,14 +1259,17 @@ impl ProcessLauncher for SystemProcessLauncher {
     }
 }
 
-/// Valid UTF-8 is returned untouched (no copy); invalid bytes become U+FFFD.
+/// Valid UTF-8 without NUL is returned untouched (no copy). Invalid bytes and NUL, which
+/// a receipt string may not hold, become U+FFFD; the result never contains a NUL.
 fn lossy_utf8(bytes: Vec<u8>) -> Vec<u8> {
-    match String::from_utf8(bytes) {
-        Ok(text) => text.into_bytes(),
-        Err(error) => String::from_utf8_lossy(error.as_bytes())
-            .into_owned()
-            .into_bytes(),
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    };
+    if text.contains('\0') {
+        return text.replace('\0', "\u{FFFD}").into_bytes();
     }
+    text.into_bytes()
 }
 
 /// Shorten valid UTF-8 `bytes` to at most `max` bytes without splitting a character.
