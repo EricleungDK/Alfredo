@@ -2342,6 +2342,12 @@ pub fn lint_refusal_view(message: &str, command: &str) -> Option<(String, Vec<St
     ))
 }
 
+/// How the interactive TUI shows the refusal of a second `/go` while a run is active.
+/// `None` for any other message.
+pub fn active_refusal_view(_message: &str, _command: &str) -> Option<(String, Vec<String>)> {
+    None
+}
+
 /// The goal autopilot shows for a plan it adopts: the `/plan` prompt.
 fn plan_goal(plan: &crate::planner::Plan) -> Result<String, String> {
     let goal = clean(plan.prompt.trim(), 4096);
