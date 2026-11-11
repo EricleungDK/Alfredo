@@ -483,6 +483,33 @@ async fn failures_split_by_a_success_still_count_toward_the_third() {
     assert_eq!(noted, [false, false, false, true]);
 }
 
+#[tokio::test]
+async fn an_identical_call_that_succeeds_never_gets_the_note() {
+    let script = vec![("read_file", json!({"path":"README.md"})); 5];
+    let results = scripted_results("repeat-success", script).await;
+    assert_eq!(results.len(), 5);
+    for result in &results {
+        assert!(!result.starts_with("error: "), "{result}");
+        assert!(
+            !result.contains("[note: this exact call failed"),
+            "{result}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_repeated_denied_mutating_call_keeps_its_result_unchanged() {
+    let script = vec![("write_file", json!({"path":"x.txt","content":"hi"})); 5];
+    let results = scripted_results("repeat-denied", script).await;
+    assert_eq!(results.len(), 5);
+    for result in &results {
+        assert_eq!(
+            result,
+            "error: write_file needs approval, which is not available here"
+        );
+    }
+}
+
 #[test]
 fn max_turns_accepts_one_to_thirty_two_and_names_the_range_otherwise() {
     assert_eq!(chat_tools::parse_max_turns(""), Ok(None));
