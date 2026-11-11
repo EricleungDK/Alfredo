@@ -32,6 +32,14 @@ impl Fixture {
         Self::with_waiting_check(false)
     }
     fn with_waiting_check(wait: bool) -> Self {
+        Self::with_check_tail(if wait {
+            "; import signal; signal.pause()"
+        } else {
+            ""
+        })
+    }
+    /// A counted check whose Python source ends with `tail`.
+    fn with_check_tail(tail: &str) -> Self {
         let root = std::env::temp_dir().join(format!(
             "alfredo-check-recovery-{}-{}",
             std::process::id(),
@@ -54,8 +62,7 @@ impl Fixture {
                     "-B".into(),
                     "-c".into(),
                     format!(
-                        "from pathlib import Path; p=Path('count'); p.write_text(str(int(p.read_text())+1)); print('COUNTED_CHECK_RESULT', flush=True){}",
-                        if wait { "; import signal; signal.pause()" } else { "" }
+                        "from pathlib import Path; p=Path('count'); p.write_text(str(int(p.read_text())+1)); print('COUNTED_CHECK_RESULT', flush=True){tail}"
                     ),
                 ],
             },
@@ -187,6 +194,25 @@ fn signal_and_park() -> ! {
     loop {
         thread::park();
     }
+}
+
+/// Issue #678: a passing check whose output holds one stray non-UTF-8 byte is still a
+/// completed, exit-0 check; it must not read as an output-limit failure.
+#[test]
+fn passing_check_that_prints_a_non_utf8_byte_still_completes_with_exit_zero() {
+    let fixture = Fixture::with_check_tail(
+        "; import sys; sys.stdout.buffer.write(b'caf\\xe9\\n'); sys.stdout.buffer.flush()",
+    );
+    let owner = fixture.store.claim_worker(1).unwrap();
+    let (task, directory) = fixture.run();
+    let receipt = execute(&directory, &task);
+    drop(owner);
+    assert!(
+        receipt.stdout.contains("COUNTED_CHECK_RESULT"),
+        "{receipt:?}"
+    );
+    assert!(receipt.stdout.contains("caf\u{FFFD}"), "{receipt:?}");
+    assert!(receipt.error_code.is_empty(), "{receipt:?}");
 }
 
 #[test]

@@ -1132,3 +1132,69 @@ fn a_repository_config_cannot_make_discovery_run_programs() {
     assert!(!ran.exists(), "repository fsmonitor ran");
     let _ = fs::remove_file(&ran);
 }
+
+// Issue #678: one non-UTF-8 byte in a sandboxed command's output must not turn a
+// finished command into a false "output limit" failure that hides its output.
+
+/// True when bubblewrap can start a sandbox here; the sandboxed tests skip otherwise.
+fn sandbox_works() -> bool {
+    let ok = std::process::Command::new("/usr/bin/bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+            "/bin/true",
+        ])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !ok {
+        eprintln!("SKIP: bubblewrap unavailable; sandboxed run_command not exercised");
+    }
+    ok
+}
+
+#[test]
+fn a_command_that_prints_a_non_utf8_byte_keeps_its_exit_code_and_output() {
+    if !sandbox_works() {
+        return;
+    }
+    let workspace = Workspace::new();
+    let result = workspace.run("run_command", json!({"command": "printf 'caf\\351\\n'"}));
+    assert!(result.starts_with("exit code 0"), "{result}");
+    assert!(result.contains("caf\u{FFFD}"), "{result}");
+    assert!(!result.contains("output passed"), "{result}");
+    assert!(!result.contains("killed"), "{result}");
+}
+
+#[test]
+fn a_failing_command_with_non_utf8_stderr_keeps_its_exit_code_and_stderr() {
+    if !sandbox_works() {
+        return;
+    }
+    let workspace = Workspace::new();
+    let result = workspace.run(
+        "run_command",
+        json!({"command": "printf 'ok\\n'; printf 'bad \\351 byte\\n' >&2; exit 3"}),
+    );
+    assert!(result.starts_with("exit code 3"), "{result}");
+    assert!(result.contains("ok"), "{result}");
+    assert!(result.contains("bad \u{FFFD} byte"), "{result}");
+    assert!(!result.contains("output passed"), "{result}");
+}
+
+#[test]
+fn output_over_the_byte_limit_is_still_reported_as_a_limit_hit() {
+    if !sandbox_works() {
+        return;
+    }
+    let workspace = Workspace::new();
+    let result = workspace.run(
+        "run_command",
+        json!({"command": "while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"}),
+    );
+    assert!(result.starts_with("exit code 125"), "{result}");
+    assert!(result.contains("output passed"), "{result}");
+}

@@ -2884,6 +2884,67 @@ mod tests {
         fs::remove_dir_all(root).expect("test fixture should be removable");
     }
 
+    #[test]
+    fn system_launcher_decodes_non_utf8_output_lossily_and_keeps_the_true_outcome() {
+        if trusted_bwrap_path().is_none() {
+            return;
+        }
+        let (request, root) = system_test_request(
+            "shadow-rust-system-lossy-utf8",
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "printf 'caf\\351\\n'; printf 'bad \\351\\n' >&2; exit 3".to_owned(),
+            ],
+            ExecutionLimits {
+                timeout_seconds: 2.0,
+                output_limit_bytes: 4096,
+                address_space_bytes: 8 * 1024 * 1024 * 1024,
+                file_size_bytes: 2 * 1024 * 1024 * 1024,
+                open_file_limit: 1024,
+                process_count_limit: 256,
+                descendant_grace_seconds: 0.1,
+            },
+        );
+        let receipt = RustExecutionProvider::new()
+            .execute(&request)
+            .expect("system provider should return a receipt");
+        assert_eq!(receipt.status, "failed", "{receipt:?}");
+        assert_eq!(receipt.exit_code, Some(3));
+        assert_eq!(receipt.stdout, "caf\u{FFFD}\n");
+        assert_eq!(receipt.stderr, "bad \u{FFFD}\n");
+        assert_eq!(receipt.stdout_bytes, receipt.stdout.len());
+        assert!(receipt.error_code.is_empty(), "{receipt:?}");
+        fs::remove_dir_all(root).expect("test fixture should be removable");
+    }
+
+    #[test]
+    fn system_launcher_completes_when_one_byte_of_output_is_not_utf8() {
+        if trusted_bwrap_path().is_none() {
+            return;
+        }
+        let (request, root) = system_test_request(
+            "shadow-rust-system-lossy-complete",
+            vec!["/usr/bin/printf".to_owned(), "caf\\351\\n".to_owned()],
+            ExecutionLimits {
+                timeout_seconds: 2.0,
+                output_limit_bytes: 4096,
+                address_space_bytes: 8 * 1024 * 1024 * 1024,
+                file_size_bytes: 2 * 1024 * 1024 * 1024,
+                open_file_limit: 1024,
+                process_count_limit: 256,
+                descendant_grace_seconds: 0.1,
+            },
+        );
+        let receipt = RustExecutionProvider::new()
+            .execute(&request)
+            .expect("system provider should return a receipt");
+        assert_eq!(receipt.status, "completed", "{receipt:?}");
+        assert_eq!(receipt.exit_code, Some(0));
+        assert_eq!(receipt.stdout, "caf\u{FFFD}\n");
+        fs::remove_dir_all(root).expect("test fixture should be removable");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn system_launcher_hides_host_sysv_ipc_segments_from_the_sandbox() {
