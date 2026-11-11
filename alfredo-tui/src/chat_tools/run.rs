@@ -56,6 +56,11 @@ const REPLY_FLOOR_TOKENS: usize = crate::provider::NUM_PREDICT_FLOOR as usize;
 pub const NEAR_LIMIT_NOTE: &str = "error: not shown; the conversation is near its size limit, answer with what you have or ask for a narrower range";
 /// Result text when the `--num-ctx` window has no room left for a tool result.
 pub const WINDOW_FULL_NOTE: &str = "error: not shown; the context window (--num-ctx) is nearly full, answer with what you have or ask for a narrower range";
+/// Appended to a read call's `error:` result from its third identical failure in a turn
+/// (issue #673).
+pub const REPEAT_NOTE: &str = "[note: this exact call failed 3 times this turn; change the arguments or answer from what you already know]";
+/// Identical failures of one read call after which [`REPEAT_NOTE`] is added.
+const REPEAT_AFTER: u32 = 3;
 /// Shown in the reply when the step cap stops the loop.
 pub const STEP_CAP_NOTICE: &str = "Stopped: tool step limit reached";
 
@@ -178,6 +183,8 @@ pub async fn run_turn_limited(
     // Set once a round's results were squeezed out: the next round is offered no tools
     // so the model answers with what it has.
     let mut last_round = false;
+    // Failed read calls so far this turn, by tool name and canonical arguments.
+    let mut failures: std::collections::HashMap<(String, String), u32> = Default::default();
     loop {
         if last_round && !plain {
             provider = provider.with_tools(Vec::new());
@@ -278,6 +285,7 @@ pub async fn run_turn_limited(
                 .find(|tool| tool.name == call.name)
                 .map(|tool| tool.tier);
             let wrote = matches!(tier, Some(Tier::Mutating | Tier::Push));
+            let mut ran_read = false;
             let mut result = match tier {
                 _ if index >= MAX_CALLS => {
                     format!("error: not run; at most {MAX_CALLS} tool calls per reply, ask again")
@@ -311,6 +319,7 @@ pub async fn run_turn_limited(
                     room.note.to_string()
                 }
                 _ => {
+                    ran_read = tier == Some(Tier::Read);
                     let budget = Budget::new(round_limit - read_spent, cancel.flag());
                     let started = std::time::Instant::now();
                     let result = blocking(workspace, call, room.limit, &budget).await;
@@ -318,6 +327,17 @@ pub async fn run_turn_limited(
                     result
                 }
             };
+            // A read call that fails the same way again and again: from the third time
+            // this turn the result says so (issue #673). Only calls that ran count.
+            if ran_read && result.starts_with("error:") {
+                let key = (call.name.clone(), call.arguments.to_string());
+                let seen = failures.entry(key).or_insert(0);
+                *seen += 1;
+                if *seen >= REPEAT_AFTER {
+                    result.push(' ');
+                    result.push_str(REPEAT_NOTE);
+                }
+            }
             // The session refuses a result past the conversation limit. Results were
             // budgeted above; if this one still would not fit, a read result becomes a
             // note (a write's short report is kept, so the model knows it happened)
