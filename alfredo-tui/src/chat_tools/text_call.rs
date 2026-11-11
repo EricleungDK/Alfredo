@@ -12,6 +12,7 @@ const CLOSE: &str = "</tool_call>";
 /// Whether the whole trimmed `reply` is one JSON object `{"name", "arguments"}` naming a
 /// registered tool, or only `<tool_call>` blocks that each do. Prose around the call, code
 /// fences and unknown tool names do not match.
+#[must_use]
 pub fn is_text_tool_call(reply: &str) -> bool {
     let text = reply.trim();
     if text.starts_with(OPEN) {

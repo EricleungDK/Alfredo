@@ -94,7 +94,7 @@ pub(crate) fn text(root: &Path, path: &Path) -> Result<String, String> {
 fn contents(file: std::fs::File, len: u64) -> Result<String, String> {
     if len > MAX_FILE {
         return Err(format!(
-            "file is {len} bytes, over the {MAX_FILE}-byte read limit; use grep"
+            "file is {len} bytes, over the {MAX_FILE}-byte read limit; grep can't search it either; use run_command (for example grep -n PATTERN FILE)"
         ));
     }
     let mut bytes = Vec::new();
@@ -136,15 +136,16 @@ fn read_file_window(root: &Path, arguments: &Value, limit: usize) -> Result<Stri
         Some(value) => value
             .as_u64()
             .filter(|line| *line >= 1)
-            .ok_or("start_line must be a positive integer")? as usize,
+            .map(|line| usize::try_from(line).unwrap_or(usize::MAX))
+            .ok_or("start_line must be a positive integer")?,
     };
     let end = match arguments.get("end_line") {
         None | Some(Value::Null) => usize::MAX,
         Some(value) => value
             .as_u64()
-            .filter(|line| *line >= 1 && *line as usize >= start)
-            .ok_or("end_line must be a positive integer not before start_line")?
-            as usize,
+            .map(|line| usize::try_from(line).unwrap_or(usize::MAX))
+            .filter(|line| *line >= 1 && *line >= start)
+            .ok_or("end_line must be a positive integer not before start_line")?,
     };
     let full = resolve_read(root, path)?;
     let content = text(root, &full).map_err(|error| format!("{path}: {error}"))?;

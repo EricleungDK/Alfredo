@@ -124,13 +124,12 @@ impl AtLookup {
             .map(|(_, listing)| Arc::clone(listing));
         let (root, fragment) = (request.root.clone(), request.fragment.clone());
         let handle = crate::wake::spawn_blocking(runtime, move || {
-            let (listing, fresh) = match cached {
-                Some(listing) => (listing, None),
-                None => {
-                    let listing = Arc::new(chat_mentions::listing(&root));
-                    let fresh = (!listing.is_empty()).then(|| (root.clone(), Arc::clone(&listing)));
-                    (listing, fresh)
-                }
+            let (listing, fresh) = if let Some(listing) = cached {
+                (listing, None)
+            } else {
+                let listing = Arc::new(chat_mentions::listing(&root));
+                let fresh = (!listing.is_empty()).then(|| (root.clone(), Arc::clone(&listing)));
+                (listing, fresh)
             };
             let paths = chat_mentions::complete_listed(&root, &listing, &fragment);
             Done {

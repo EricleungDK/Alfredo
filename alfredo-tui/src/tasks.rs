@@ -1763,7 +1763,7 @@ impl TaskStore {
                     .find(|item| item.id == *task)
                     .ok_or_else(|| unknown_task(*task))?;
                 item.validate_assignment(model)?;
-                item.model = model.clone();
+                item.model.clone_from(model);
                 item.status = TaskStatus::Proposed;
                 Ok(*task)
             }
@@ -2072,7 +2072,7 @@ impl TaskStore {
                     return Err("Stale or mismatched worker result".into());
                 }
                 bound.evidence_sha256 = Some(evidence_sha256.clone());
-                bound.detail = detail.clone();
+                bound.detail.clone_from(detail);
                 item.status = status.clone();
                 Ok(*task)
             }

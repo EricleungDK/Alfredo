@@ -186,7 +186,11 @@ impl HealthView {
 
     /// The live window the server reports for `model`, if it is resident and says so.
     pub fn observed_window(&self, model: &str) -> Option<u32> {
-        let state = self.inner.state.lock().unwrap();
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.fixed.is_some() {
             return None;
         }
@@ -293,15 +297,14 @@ impl Monitor {
                 } else {
                     None
                 };
-                poller.update(|state| match observed {
-                    Ok(running) => {
+                poller.update(|state| {
+                    if let Ok(running) = observed {
                         state.reachable = Some(Ok(()));
                         state.set_running(running);
                         if catalog.is_some() {
                             state.installed = catalog;
                         }
-                    }
-                    Err(_) => {
+                    } else {
                         if !matches!(state.reachable, Some(Err(_))) {
                             state.reachable = Some(Err(Instant::now()));
                         }

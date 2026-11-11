@@ -652,13 +652,12 @@ pub(crate) fn diff(old: &str, new: &str) -> String {
     let (old_mid, new_mid) = (&old[head..old.len() - tail], &new[head..new.len() - tail]);
     let mut lines = vec![];
     if !old_mid.is_empty() || !new_mid.is_empty() {
-        match edit_script(old_mid, new_mid) {
-            Some(script) => hunks(&script, old_mid, new_mid, head, &mut lines),
-            None => {
-                lines.push(format!("@@ line {} @@", head + 1));
-                lines.extend(old_mid.iter().map(|l| format!("-{l}")));
-                lines.extend(new_mid.iter().map(|l| format!("+{l}")));
-            }
+        if let Some(script) = edit_script(old_mid, new_mid) {
+            hunks(&script, old_mid, new_mid, head, &mut lines);
+        } else {
+            lines.push(format!("@@ line {} @@", head + 1));
+            lines.extend(old_mid.iter().map(|l| format!("-{l}")));
+            lines.extend(new_mid.iter().map(|l| format!("+{l}")));
         }
     }
     let notes = ending_notes(old_text, new_text);

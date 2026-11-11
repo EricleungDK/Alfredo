@@ -172,6 +172,11 @@ pub fn unsaved_work(evidence: &Evidence) -> bool {
         || evidence.patch.starts_with("Diff unavailable")
 }
 
+/// A full 40-hex-digit commit id: the only shape a saved candidate ref can be named by.
+pub fn is_full_commit_id(commit: &str) -> bool {
+    commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Decide, per run that still has a worktree directory, whether it may be removed.
 pub async fn plan(store: &TaskStore) -> Result<Plan, String> {
     let snapshot = store.snapshot()?;
@@ -250,45 +255,42 @@ pub async fn plan(store: &TaskStore) -> Result<Plan, String> {
                 continue;
             }
         };
-        match &evidence.candidate_commit {
-            Some(commit) => {
-                let name = format!("refs/alfredo/candidates/{commit}");
-                let valid = commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit());
-                let resolved = if valid {
-                    git(
-                        &workspace,
-                        &[
-                            "rev-parse",
-                            "--verify",
-                            "--quiet",
-                            &format!("{name}^{{commit}}"),
-                        ],
-                    )
-                    .await
-                    .ok()
-                } else {
-                    None
-                };
-                if resolved.as_deref().map(str::trim) != Some(commit.as_str()) {
-                    keep("candidate ref is missing");
-                    continue;
-                }
+        if let Some(commit) = &evidence.candidate_commit {
+            let name = format!("refs/alfredo/candidates/{commit}");
+            let valid = is_full_commit_id(commit);
+            let resolved = if valid {
+                git(
+                    &workspace,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("{name}^{{commit}}"),
+                    ],
+                )
+                .await
+                .ok()
+            } else {
+                None
+            };
+            if resolved.as_deref().map(str::trim) != Some(commit.as_str()) {
+                keep("candidate ref is missing");
+                continue;
             }
-            None => {
-                // Failed and cancelled runs save no candidate; their diff is in the evidence,
-                // unless it could not be captured.
-                if unsaved_work(&evidence) {
-                    keep("partial work was not captured in the evidence");
-                    continue;
-                }
-                if matches!(
-                    evidence.status,
-                    TaskStatus::ReviewReady | TaskStatus::Accepted
-                ) || outcome == "accepted"
-                {
-                    keep("candidate commit was never saved");
-                    continue;
-                }
+        } else {
+            // Failed and cancelled runs save no candidate; their diff is in the evidence,
+            // unless it could not be captured.
+            if unsaved_work(&evidence) {
+                keep("partial work was not captured in the evidence");
+                continue;
+            }
+            if matches!(
+                evidence.status,
+                TaskStatus::ReviewReady | TaskStatus::Accepted
+            ) || outcome == "accepted"
+            {
+                keep("candidate commit was never saved");
+                continue;
             }
         }
         let canonical = fs::canonicalize(&worktree).ok();
@@ -363,46 +365,43 @@ fn plural(count: usize) -> &'static str {
 
 fn report(plan: &Plan, done: Option<&Outcome>) -> String {
     let mut lines = vec!["Clean finished runs' worktrees".to_owned(), String::new()];
-    match done {
-        Some(done) => {
+    if let Some(done) = done {
+        lines.push(format!(
+            "Removed {} worktree{} · freed {}",
+            done.removed.len(),
+            plural(done.removed.len()),
+            size_label(done.bytes())
+        ));
+        for entry in &done.removed {
             lines.push(format!(
-                "Removed {} worktree{} · freed {}",
-                done.removed.len(),
-                plural(done.removed.len()),
-                size_label(done.bytes())
+                "  #{} {} {} · {}",
+                entry.task,
+                entry.run,
+                entry.outcome,
+                size_label(entry.bytes)
             ));
-            for entry in &done.removed {
-                lines.push(format!(
-                    "  #{} {} {} · {}",
-                    entry.task,
-                    entry.run,
-                    entry.outcome,
-                    size_label(entry.bytes)
-                ));
-            }
-            for (run, error) in &done.failed {
-                lines.push(format!("  kept {run}: {error}"));
-            }
-            if let Some(note) = &done.prune_note {
-                lines.push(note.clone());
-            }
         }
-        None => {
+        for (run, error) in &done.failed {
+            lines.push(format!("  kept {run}: {error}"));
+        }
+        if let Some(note) = &done.prune_note {
+            lines.push(note.clone());
+        }
+    } else {
+        lines.push(format!(
+            "Would remove {} worktree{} · {}",
+            plan.remove.len(),
+            plural(plan.remove.len()),
+            size_label(plan.bytes())
+        ));
+        for entry in &plan.remove {
             lines.push(format!(
-                "Would remove {} worktree{} · {}",
-                plan.remove.len(),
-                plural(plan.remove.len()),
-                size_label(plan.bytes())
+                "  #{} {} {} · {}",
+                entry.task,
+                entry.run,
+                entry.outcome,
+                size_label(entry.bytes)
             ));
-            for entry in &plan.remove {
-                lines.push(format!(
-                    "  #{} {} {} · {}",
-                    entry.task,
-                    entry.run,
-                    entry.outcome,
-                    size_label(entry.bytes)
-                ));
-            }
         }
     }
     let keep = done.map_or(&plan.keep, |done| &done.keep);

@@ -424,20 +424,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // A mission flag names a mission of one repository: without --workspace, that is the
     // repository containing the current directory, never a silently dropped flag.
     if let (Some(name), None, false) = (&mission, &workspace, select) {
-        match runtime.block_on(alfredo_tui::selection::repository_root(&starting))? {
-            Some(root) => workspace = Some(root),
-            None => {
-                let flag = if start_new_mission {
-                    "--new-mission"
-                } else {
-                    "--mission"
-                };
-                return Err(format!(
-                    "{flag} {name} needs a Git repository: {} is not one. cd into a repository, or pass --workspace DIR",
-                    starting.display()
-                )
-                .into());
-            }
+        if let Some(root) = runtime.block_on(alfredo_tui::selection::repository_root(&starting))? {
+            workspace = Some(root);
+        } else {
+            let flag = if start_new_mission {
+                "--new-mission"
+            } else {
+                "--mission"
+            };
+            return Err(format!(
+                "{flag} {name} needs a Git repository: {} is not one. cd into a repository, or pass --workspace DIR",
+                starting.display()
+            )
+            .into());
         }
     }
     let state_dir = state_dir.ok_or("Set --state-dir or ALFREDO_STATE_DIR")?;
@@ -509,28 +508,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Err(error) => notice = format!("Automatic open failed: {error}"),
         }
     }
-    let mut work = match launched {
-        Some(work) => work,
-        None => {
-            // After a failed automatic open, start from the path box so any repository can be chosen.
-            let (starting, workspace) = match workspace {
-                Some(path) if automatic => (path, None),
-                workspace => (starting, workspace),
-            };
-            let Some(choice) = alfredo_tui::selection::choose(
-                &runtime,
-                &starting,
-                workspace,
-                mission,
-                start_new_mission,
-                &state_dir,
-                &notice,
-            )?
-            else {
-                return Ok(());
-            };
-            launch(choice)?
-        }
+    let mut work = if let Some(work) = launched {
+        work
+    } else {
+        // After a failed automatic open, start from the path box so any repository can be chosen.
+        let (starting, workspace) =
+            alfredo_tui::selection::selector_start(starting, workspace, automatic);
+        let Some(choice) = alfredo_tui::selection::choose(
+            &runtime,
+            &starting,
+            workspace,
+            mission,
+            start_new_mission,
+            &state_dir,
+            &notice,
+        )?
+        else {
+            return Ok(());
+        };
+        launch(choice)?
     };
     work.tasks.refresh(&runtime);
     if let Some(goal) = &go_goal {
@@ -1121,7 +1117,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         work.app.models_visible = false;
                                         work.tasks.set_visible(false);
                                     }
-                                    None => work.app.notice = error.clone(),
+                                    None => work.app.notice.clone_from(&error),
                                 }
                             }
                             alfredo_tui::console_command::CommandState::Refused {
@@ -1134,7 +1130,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         && matches!(&command.intent, alfredo_tui::command_intent::Intent::Planner { request }
                             if matches!(request.operation, alfredo_tui::planner_command::Operation::Cancel { .. }))
                     {
-                        work.app.notice = work.tasks.planner.notice.clone();
+                        work.app.notice.clone_from(&work.tasks.planner.notice);
                     }
                     work.app.sessions[origin].set_command_state(&command.id, state);
                     dirty = true;
@@ -1822,21 +1818,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 work.app.notice = "Wait for the command intent to finish saving before switching work".into();
                                 continue;
                             }
-                            match work.can_switch() {
-                                Err(error) => work.app.notice = error,
-                                Ok(()) => {
-                                    let selected = alfredo_tui::selection::choose_in_terminal_with(
-                                        &runtime,
-                                        work.workspace(),
-                                        None,
-                                        None,
-                                        false,
-                                        &state_dir,
-                                        "",
-                                        &mut terminal,
-                                        &mut input,
-                                    );
-                                    match selected {
+                            if let Err(error) = work.can_switch() {
+                                work.app.notice = error;
+                            } else {
+                                let selected = alfredo_tui::selection::choose_in_terminal_with(
+                                    &runtime,
+                                    work.workspace(),
+                                    None,
+                                    None,
+                                    false,
+                                    &state_dir,
+                                    "",
+                                    &mut terminal,
+                                    &mut input,
+                                );
+                                match selected {
                                         Ok(Some(choice)) => {
                                             work.app.sessions[index].remember_submission();
                                             work.app.sessions[index].clear_draft();
@@ -1876,8 +1872,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                         Err(error) => work.app.notice = format!("Workspace selection failed: {error}; current work retained"),
                                     }
-                                    terminal.clear()?;
-                                }
+                                terminal.clear()?;
                             }
                         }
                         KeyCode::Enter

@@ -427,6 +427,21 @@ impl Drop for Guard {
     }
 }
 
+/// Where the startup selector begins. After a failed automatic open, an explicit
+/// `--workspace` becomes the path box's starting directory and is no longer preselected;
+/// with `--select` or a mission flag both stay as given.
+#[must_use]
+pub fn selector_start(
+    starting: PathBuf,
+    workspace: Option<PathBuf>,
+    automatic: bool,
+) -> (PathBuf, Option<PathBuf>) {
+    match workspace {
+        Some(path) if automatic => (path, None),
+        workspace => (starting, workspace),
+    }
+}
+
 pub fn choose(
     runtime: &Runtime,
     starting: &Path,

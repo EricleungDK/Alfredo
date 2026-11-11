@@ -570,7 +570,7 @@ fn grep_on_one_unsearchable_file_returns_its_read_error() {
     let big = ws.run("grep", json!({"pattern": "needle", "path": "big.log"}));
     assert_eq!(
         big.trim(),
-        "error: big.log: file is 5242888 bytes, over the 4194304-byte read limit; use grep"
+        "error: big.log: file is 5242888 bytes, over the 4194304-byte read limit; grep can't search it either; use run_command (for example grep -n PATTERN FILE)"
     );
     let latin = ws.run("grep", json!({"pattern": "needle", "path": "latin.txt"}));
     assert_eq!(
@@ -579,6 +579,32 @@ fn grep_on_one_unsearchable_file_returns_its_read_error() {
     );
     let bin = ws.run("grep", json!({"pattern": "needle", "path": "bin.dat"}));
     assert_eq!(bin.trim(), "error: bin.dat: binary file; not shown");
+}
+
+// Issue #686: the over-limit hint must not point at grep, which cannot search that file.
+#[test]
+fn oversize_file_hint_points_at_run_command_for_read_and_grep() {
+    let ws = Workspace::new();
+    write_unsearchable(&ws);
+    let hint = "file is 5242888 bytes, over the 4194304-byte read limit; grep can't search it either; use run_command (for example grep -n PATTERN FILE)";
+    let one = ws.run("grep", json!({"pattern": "needle", "path": "big.log"}));
+    assert!(!one.ends_with("use grep"), "{one}");
+    assert!(!one.contains("no matches"), "{one}");
+    assert!(one.contains("run_command"), "{one}");
+    assert_eq!(one.trim(), format!("error: big.log: {hint}"));
+    let read = ws.run("read_file", json!({"path": "big.log"}));
+    assert!(
+        !read.ends_with("use grep") && read.contains("run_command"),
+        "{read}"
+    );
+    assert!(
+        read.contains("5242888 bytes") && read.contains("4194304-byte"),
+        "{read}"
+    );
+    assert!(read.trim_end().ends_with(hint), "{read}");
+    // The workspace-wide note names the same tool.
+    let all = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(all.contains("use run_command grep for these"), "{all}");
 }
 
 #[test]

@@ -511,6 +511,10 @@ impl Ollama {
 
     /// Resident model names with the live window (`context_length`) when `/api/ps`
     /// reports one; same probe as `running_models`.
+    ///
+    /// # Errors
+    /// Returns the failure text when the server is unreachable, answers late or with an
+    /// HTTP error, sends more than 1 MiB, or sends a response that cannot be parsed.
     pub async fn running_windows(&self) -> Result<Vec<(String, Option<u32>)>, String> {
         tokio::time::timeout(HEALTH_DEADLINE, async {
             let mut endpoint = self.endpoint.clone();

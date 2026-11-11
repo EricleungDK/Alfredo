@@ -499,7 +499,7 @@ impl TaskControl {
             match result {
                 Ok(mut projection) => {
                     self.refresh_transient = 0;
-                    projection.notice = self.notice.clone();
+                    projection.notice.clone_from(&self.notice);
                     self.apply_outcome(Ok(projection));
                 }
                 Err(refusal) => self.background_refresh_failed(&refusal),
