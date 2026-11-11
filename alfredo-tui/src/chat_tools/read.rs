@@ -32,14 +32,14 @@ const MAX_LINE: usize = 200;
 pub const READ_FILE: Tool = Tool {
     name: "read_file",
     tier: Tier::Read,
-    description: "Read a UTF-8 text file in the Coding Workspace (the owner's repository working tree). Returns numbered lines (line<TAB>text). Long files are cut and over-long lines are shown cut; call again with start_line to continue.",
+    description: "Read a UTF-8 text file in the Coding Workspace. Returns numbered lines (line<TAB>text); long files and lines are cut, so call again with start_line to continue.",
     parameters: || {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path relative to the repository root, e.g. README.md or src/main.rs"},
-                "start_line": {"type": "integer", "description": "First line to return (1-based, default 1)"},
-                "end_line": {"type": "integer", "description": "Last line to return, inclusive (not before start_line; default: end of file)"}
+                "path": {"type": "string", "description": "File path relative to the repository root, e.g. src/main.rs"},
+                "start_line": {"type": "integer", "description": "First line (1-based, default 1)"},
+                "end_line": {"type": "integer", "description": "Last line (inclusive)"}
             },
             "required": ["path"]
         })
