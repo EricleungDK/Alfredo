@@ -531,7 +531,7 @@ impl TaskControl {
                 })
             };
             if request.is_some() {
-                self.scope_retry = request.clone();
+                self.scope_retry.clone_from(&request);
             }
             self.pending = true;
             self.writing = request.is_some();

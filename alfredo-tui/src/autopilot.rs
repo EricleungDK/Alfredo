@@ -682,8 +682,8 @@ impl Autopilot {
     }
 
     fn set_notice(&mut self, tasks: &mut TaskControl, notice: String) {
-        tasks.notice = notice.clone();
-        self.notice = notice.clone();
+        tasks.notice.clone_from(&notice);
+        self.notice.clone_from(&notice);
         if let Some(saved) = self.saved.as_mut() {
             saved.notice = notice;
         }
@@ -1097,37 +1097,36 @@ impl Autopilot {
                 let status = self
                     .status(tasks)
                     .ok_or("No autopilot goal; use /go GOAL")?;
-                let report = match self.report() {
-                    Some(summary) => summary.to_owned(),
-                    None => {
-                        let mut lines = vec![
-                            format!(
-                                "{} Autopilot {}",
-                                status.state.marker(),
-                                status.state.label()
-                            ),
-                            clean(&status.goal, 400),
-                            String::new(),
-                            format!(
-                                "{:<LABEL$}{}/{} accepted",
-                                "Tasks", status.done, status.total
-                            ),
-                            format!("{:<LABEL$}{}", "Repairs", status.repairs),
-                            format!(
-                                "{:<LABEL$}{}",
-                                "Elapsed",
-                                crate::dashboard::clock(status.elapsed)
-                            ),
-                        ];
-                        if let Some(warning) = self.saved.as_ref().and_then(Saved::dirty_warning) {
-                            lines.push(format!("{:<LABEL$}{warning}", "Warning"));
-                        }
-                        if !self.notice.is_empty() {
-                            lines.push(String::new());
-                            lines.push(format!("{:<LABEL$}{}", "Note", clean(&self.notice, 400)));
-                        }
-                        lines.join("\n")
+                let report = if let Some(summary) = self.report() {
+                    summary.to_owned()
+                } else {
+                    let mut lines = vec![
+                        format!(
+                            "{} Autopilot {}",
+                            status.state.marker(),
+                            status.state.label()
+                        ),
+                        clean(&status.goal, 400),
+                        String::new(),
+                        format!(
+                            "{:<LABEL$}{}/{} accepted",
+                            "Tasks", status.done, status.total
+                        ),
+                        format!("{:<LABEL$}{}", "Repairs", status.repairs),
+                        format!(
+                            "{:<LABEL$}{}",
+                            "Elapsed",
+                            crate::dashboard::clock(status.elapsed)
+                        ),
+                    ];
+                    if let Some(warning) = self.saved.as_ref().and_then(Saved::dirty_warning) {
+                        lines.push(format!("{:<LABEL$}{warning}", "Warning"));
                     }
+                    if !self.notice.is_empty() {
+                        lines.push(String::new());
+                        lines.push(format!("{:<LABEL$}{}", "Note", clean(&self.notice, 400)));
+                    }
+                    lines.join("\n")
                 };
                 tasks.set_visible(true);
                 tasks.planner.visible = false;
@@ -1785,17 +1784,14 @@ impl Autopilot {
         let saved = self.saved.as_ref().unwrap().clone();
         if let Some(request) = &saved.plan_request {
             let error = if draft_matches(tasks, request) {
-                match tasks.planner.draft.as_ref().map(unattended_lint) {
-                    Some(Err(error)) => {
-                        // Same effect as /plan-cancel: discard the unsaved draft.
-                        tasks.planner.cancel();
-                        tasks.planner.draft = None;
-                        error
-                    }
-                    _ => {
-                        self.advance(Phase::Saving);
-                        return Ok(None);
-                    }
+                if let Some(Err(error)) = tasks.planner.draft.as_ref().map(unattended_lint) {
+                    // Same effect as /plan-cancel: discard the unsaved draft.
+                    tasks.planner.cancel();
+                    tasks.planner.draft = None;
+                    error
+                } else {
+                    self.advance(Phase::Saving);
+                    return Ok(None);
                 }
             } else {
                 clean(
@@ -2351,6 +2347,7 @@ const ACTIVE_REFUSAL_FIX: &str = "”; /pause or /stop and let workers finish be
 /// How the interactive TUI shows the refusal of a `/go` while a run is active, which the
 /// one-line footer would cut before its fix: the footer says why, and the chat rows carry
 /// the whole sentence (#672). `None` for any other message.
+#[must_use]
 pub fn active_refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
     if !message.starts_with(ACTIVE_REFUSAL_PREFIX) || !message.ends_with(ACTIVE_REFUSAL_FIX) {
         return None;

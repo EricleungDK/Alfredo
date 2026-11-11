@@ -184,7 +184,8 @@ pub async fn run_turn_limited(
     // so the model answers with what it has.
     let mut last_round = false;
     // Failed read calls so far this turn, by tool name and canonical arguments.
-    let mut failures: std::collections::HashMap<(String, String), u32> = Default::default();
+    let mut failures: std::collections::HashMap<(String, String), u32> =
+        std::collections::HashMap::new();
     loop {
         if last_round && !plain {
             provider = provider.with_tools(Vec::new());

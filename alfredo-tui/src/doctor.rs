@@ -264,7 +264,7 @@ pub async fn inspect(
         let conversations = ConversationStore::open(&store, conversation)?;
         // An explicit --model is the run's model; otherwise the restored one is checked.
         if let (false, Some(snapshot)) = (explicit_model, conversations.load()?) {
-            model = snapshot.sessions[snapshot.selected].model.clone();
+            model.clone_from(&snapshot.sessions[snapshot.selected].model);
         }
         Ok(())
     })();

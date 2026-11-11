@@ -1216,7 +1216,7 @@ impl ProcessLauncher for SystemProcessLauncher {
             stdout.clear();
             stderr.clear();
             status = ProcessOutcomeStatus::OutputLimit;
-            error_message = "Process output was not valid UTF-8 and was rejected.".to_owned();
+            "Process output was not valid UTF-8 and was rejected.".clone_into(&mut error_message);
         }
         if !error_message.is_empty()
             && matches!(
