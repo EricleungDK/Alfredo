@@ -524,6 +524,48 @@ fn grep_still_searches_a_file_of_exactly_the_read_limit() {
     assert!(!out.contains("not searched"), "{out}");
 }
 
+#[test]
+fn grep_with_only_skipped_files_puts_the_note_on_the_line_after_no_matches() {
+    let ws = Workspace::new();
+    fs::write(ws.root.join("bin.dat"), b"\0needle\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert_eq!(
+        out,
+        "no matches\n[not searched: bin.dat (binary); use run_command grep for these]"
+    );
+}
+
+#[test]
+fn grep_cuts_a_skipped_file_name_only_past_forty_characters() {
+    let ws = Workspace::new();
+    let exact = format!("a{}.dat", "x".repeat(35));
+    let over = format!("b{}.dat", "x".repeat(36));
+    assert_eq!((exact.chars().count(), over.chars().count()), (40, 41));
+    fs::write(ws.root.join(&exact), b"\0needle\n").unwrap();
+    fs::write(ws.root.join(&over), b"\0needle\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(out.contains(&format!("{exact} (binary)")), "{out}");
+    assert!(
+        out.contains(&format!("{}\u{2026} (binary)", &over[..40])),
+        "{out}"
+    );
+}
+
+#[test]
+fn skipped_oversize_files_do_not_use_up_the_grep_scan_budget() {
+    let ws = Workspace::new();
+    // 20 sparse files of 5 MiB: charged 4 MiB each they would pass the 64 MiB budget.
+    for n in 0..20 {
+        let file = fs::File::create(ws.root.join(format!("a{n:02}.log"))).unwrap();
+        file.set_len(5 * 1024 * 1024).unwrap();
+    }
+    fs::write(ws.root.join("zz.txt"), "a needle here\n").unwrap();
+    let out = ws.run("grep", json!({"pattern": "needle"}));
+    assert!(out.starts_with("zz.txt:1:a needle here\n"), "{out}");
+    assert!(!out.contains("[stopped"), "{out}");
+    assert!(out.contains("and 15 more"), "{out}");
+}
+
 // Issue #343: discovery honours git's ignore rules.
 
 /// A Workspace whose `.git` is a real repository (the plain one has a fake `.git`).
