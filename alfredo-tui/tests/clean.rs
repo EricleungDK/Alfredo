@@ -587,3 +587,80 @@ fn only_a_full_forty_digit_hex_commit_id_names_a_candidate_ref() {
     assert!(!clean::is_full_commit_id(&"a".repeat(41)));
     assert!(!clean::is_full_commit_id(""));
 }
+
+#[tokio::test]
+async fn rejected_run_whose_evidence_claims_review_ready_without_a_candidate_is_kept() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new();
+    let task = fixture.task("claim.txt");
+    let baseline = fixture.git(&["rev-parse", "HEAD"]).trim().to_string();
+    fixture.action(Action::Start {
+        task,
+        baseline: baseline.clone(),
+        inputs: vec![],
+    });
+    let run = fixture.store.snapshot().unwrap().tasks[task as usize - 1]
+        .run
+        .clone()
+        .unwrap()
+        .id;
+    let directory = fixture.store.run_directory(&run).unwrap();
+    fs::create_dir_all(&directory).unwrap();
+    fixture.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        directory.join("worktree").to_str().unwrap(),
+    ]);
+    // Evidence says the run was review-ready, yet it names no saved candidate.
+    let evidence = serde_json::to_vec(&worker::Evidence {
+        agent: None,
+        run: run.clone(),
+        baseline,
+        status: TaskStatus::ReviewReady,
+        detail: "claimed".into(),
+        failure_code: None,
+        patch: String::new(),
+        candidate_commit: None,
+        model_metrics: None,
+        generation: None,
+        project_notes: None,
+        check: Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "request_id": "check:run", "request_digest": "d",
+                "effect": "local-agent", "status": "completed", "started_at": "0",
+                "ended_at": "1", "exit_code": 0, "stdout": "", "stderr": "OK",
+                "stdout_bytes": 0, "stderr_bytes": 2, "stdout_sha256": "",
+                "stderr_sha256": "", "effect_started": true,
+                "reconciliation_required": false, "error_code": "", "error_message": "",
+                "receipt_id": "r", "owner_pid": null, "owner_identity": "",
+                "process_pid": null, "process_identity": "", "provider": "fixture"
+            }))
+            .unwrap(),
+        ),
+    })
+    .unwrap();
+    fs::write(directory.join("evidence.json"), &evidence).unwrap();
+    fixture.action(Action::Finish {
+        task,
+        run,
+        status: TaskStatus::ReviewReady,
+        evidence_sha256: format!("{:x}", Sha256::digest(&evidence)),
+        detail: "claimed".into(),
+    });
+    // The reviewer rejects it, so the outcome is not "accepted"; only the evidence
+    // status says the work should have a candidate.
+    fixture.action(Action::Review {
+        task,
+        accept: false,
+    });
+
+    let plan = clean::plan(&fixture.store).await.unwrap();
+    assert!(!removable(&plan, task), "{:?}", plan.remove.len());
+    assert!(
+        kept(&plan, task).unwrap().contains("never saved"),
+        "{:?}",
+        plan.keep
+    );
+}
