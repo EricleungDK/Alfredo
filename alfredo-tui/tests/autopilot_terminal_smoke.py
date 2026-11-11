@@ -477,15 +477,20 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         terminal = self.terminal(resume=True, width=220)
         for command in ('/run 1', '/accept 1', '/cancel-task 1', '/repair 1 try again'):
             terminal.send(command + '\r')
-            self.screen_has(terminal, 'Task #1 is running; ')
-            self.screen_has(terminal, '/recover 1 if its worker died')
+            # One predicate on one screen read: the footer is redrawn in pieces.
+            self.wait_until(
+                'refusal names the status and recovery',
+                lambda: 'Task #1 is running; ' in terminal.screen()
+                and '/recover 1 if its worker died' in terminal.screen())
             screen = terminal.screen()
             for internal in ('acquire a new worker owner', 'start paused', 'no evidence receipt',
                              'needs a proposed or approved'):
                 self.assertNotIn(internal, screen, command)
             # Replace the footer so the next command's message is its own.
             terminal.send(b'/tasks #1\r')
-            self.wait_until('footer replaced', lambda: 'Task #1 is running; ' not in terminal.screen())
+            # Wait for the replacement itself, not for the old text to vanish (a mid-draw
+            # screen lacks it too), so the next command never lands on a pending filter.
+            self.screen_has(terminal, 'Task filter applied')
         self.screen_has(terminal, 'Stage')
         self.screen_has(terminal, '/recover 1 records interruption without replay')
         screen = terminal.screen()
