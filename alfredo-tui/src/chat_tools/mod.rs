@@ -294,15 +294,49 @@ pub(crate) fn open_confined(
     workspace: &Path,
     resolved: &Path,
 ) -> Result<(std::fs::File, u64), String> {
+    let file = open_nonblocking(resolved).map_err(open_error)?;
+    confine_opened(workspace, file)
+}
+
+/// [`open_confined`] for a path that may not exist yet (issue #689: an edit's target is
+/// fingerprinted before it is known to exist). `Ok(None)` when nothing is there; every
+/// other refusal is the same as [`open_confined`]'s.
+#[cfg(unix)]
+pub(crate) fn open_confined_if_present(
+    workspace: &Path,
+    resolved: &Path,
+) -> Result<Option<(std::fs::File, u64)>, String> {
+    match open_nonblocking(resolved) {
+        Ok(file) => confine_opened(workspace, file).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(open_error(error)),
+    }
+}
+
+/// Opens `resolved` for reading without following a symlink as the last component and
+/// without waiting for a writer (a FIFO opens at once and is then refused by
+/// [`confine_opened`]).
+#[cfg(unix)]
+fn open_nonblocking(resolved: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
         .open(resolved)
-        .map_err(|error| match error.raw_os_error() {
-            Some(libc::ELOOP) => "became a symbolic link after the workspace check; refused".into(),
-            _ => error.to_string(),
-        })?;
+}
+
+#[cfg(unix)]
+fn open_error(error: std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(libc::ELOOP) => "became a symbolic link after the workspace check; refused".into(),
+        _ => error.to_string(),
+    }
+}
+
+/// The checks every confined open makes once the handle exists: a regular file whose
+/// location is inside the workspace (see [`confined_handle`]).
+#[cfg(unix)]
+fn confine_opened(workspace: &Path, file: std::fs::File) -> Result<(std::fs::File, u64), String> {
     let metadata = file.metadata().map_err(|error| error.to_string())?;
     if !metadata.is_file() {
         return Err("not a regular file".into());
@@ -365,6 +399,15 @@ pub(crate) fn open_confined(
     _workspace: &Path,
     _resolved: &Path,
 ) -> Result<(std::fs::File, u64), String> {
+    Err("confined reads are not supported on this platform; refused".into())
+}
+
+/// Confined reads need Unix file descriptors; other platforms refuse them.
+#[cfg(not(unix))]
+pub(crate) fn open_confined_if_present(
+    _workspace: &Path,
+    _resolved: &Path,
+) -> Result<Option<(std::fs::File, u64)>, String> {
     Err("confined reads are not supported on this platform; refused".into())
 }
 

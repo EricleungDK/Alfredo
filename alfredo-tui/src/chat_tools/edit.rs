@@ -1,7 +1,7 @@
 //! Mutating tier (issue #235): `write_file` and `edit_file` on the Coding Workspace
 //! working tree. Each call pauses for owner Approval; [`preview`] builds the card
 //! (and refuses invalid calls before asking), the run functions re-check and write.
-use super::{display, excluded, resolve, text_arg, Tier, Tool};
+use super::{display, excluded, open_confined_if_present, resolve, text_arg, Tier, Tool};
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
 
@@ -75,12 +75,12 @@ pub(crate) fn fingerprint(
             new_dirs,
         } = resolve_target(root, path, name == "write_file")?;
         let at = display(root, &target);
-        match std::fs::read(&target) {
-            Ok(bytes) => {
+        match read_bounded(root, &target)? {
+            Some(bytes) => {
                 use sha2::{Digest, Sha256};
                 Ok(format!("{at}:{:x}", Sha256::digest(&bytes)))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            None => {
                 let dirs = new_dirs
                     .iter()
                     .map(|dir| display(root, dir))
@@ -91,9 +91,35 @@ pub(crate) fn fingerprint(
                     Ok(format!("{at}:absent+dirs:{}", dirs.join(",")))
                 }
             }
-            Err(error) => Err(error.to_string()),
         }
     }))
+}
+
+/// The bytes of the regular file at `target` inside `root`, at most [`MAX_FILE`] of them;
+/// `None` when nothing is there. Issue #689: the file is opened without waiting for a
+/// writer, so a FIFO is refused rather than blocking the call; its size is checked before
+/// any byte is read; and the read stops one byte past the limit, so a file that grows after
+/// the size check is refused without being read whole.
+fn read_bounded(root: &Path, target: &Path) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read;
+    let Some((file, len)) = open_confined_if_present(root, target)? else {
+        return Ok(None);
+    };
+    if len > MAX_FILE as u64 {
+        return Err(over_limit());
+    }
+    let mut bytes = Vec::with_capacity(len as usize);
+    file.take(MAX_FILE as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_FILE {
+        return Err(over_limit());
+    }
+    Ok(Some(bytes))
+}
+
+fn over_limit() -> String {
+    format!("file is over the {MAX_FILE}-byte edit limit")
 }
 
 /// The file a `write_file/edit_file` call changes and its workspace-relative display form
@@ -477,16 +503,12 @@ pub(crate) fn refuse_read_only(metadata: &std::fs::Metadata, shown: &str) -> Res
     Ok(())
 }
 
-fn read_existing(path: &Path) -> Result<String, String> {
-    let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if !metadata.is_file() {
-        return Err("not a regular file".into());
-    }
-    if metadata.len() as usize > MAX_FILE {
-        return Err(format!("file is over the {MAX_FILE}-byte edit limit"));
-    }
-    String::from_utf8(std::fs::read(path).map_err(|e| e.to_string())?)
-        .map_err(|_| "not a UTF-8 text file".into())
+/// The text of the regular file at `path`, read through [`read_bounded`]. The card's
+/// fingerprint and this read are separate reads, but both go through the same bounded
+/// reader, so both have the same bounds.
+fn read_existing(root: &Path, path: &Path) -> Result<String, String> {
+    let bytes = read_bounded(root, path)?.ok_or_else(|| "no such file or directory".to_string())?;
+    String::from_utf8(bytes).map_err(|_| "not a UTF-8 text file".into())
 }
 
 /// (target, current content if any, new content, directories to create first)
@@ -508,7 +530,7 @@ fn plan_write(
             &std::fs::metadata(&target).map_err(|e| e.to_string())?,
             path,
         )?;
-        Some(read_existing(&target)?)
+        Some(read_existing(root, &target)?)
     } else {
         None
     };
@@ -545,7 +567,7 @@ fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String)
     if let Ok(metadata) = std::fs::metadata(&target) {
         refuse_read_only(&metadata, path)?;
     }
-    let current = read_existing(&target)?;
+    let current = read_existing(root, &target)?;
     // A file whose every line ends in CRLF is matched and edited as LF text (the model
     // sees `\r` as nothing), then written back with CRLF. Mixed files are matched on
     // exact bytes and the replacement is inserted as given.
