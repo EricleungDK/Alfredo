@@ -1728,7 +1728,7 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `read_file` | `path`, optional `start_line` | Numbered lines (`N<TAB>text`) of a UTF-8 text file; long files are cut with `[truncated at line N of M; call read_file with start_line=…]`; a line longer than the output budget is cut at a character boundary and followed by `[line N is M bytes; showed the first K]` |
+| `read_file` | `path`, optional `start_line`, optional inclusive `end_line` (not before `start_line`; unknown arguments such as `offset` or `limit` are named in a leading `[note: unknown argument(s) … ignored; accepted: …]`) | Numbered lines (`N<TAB>text`) of a UTF-8 text file; long files are cut with `[truncated at line N of M; call read_file with start_line=…]`; a line longer than the output budget is cut at a character boundary and followed by `[line N is M bytes; showed the first K]` |
 | `list_files` | optional `path` (directory), `glob` | Files below it, one relative path per line, depth first in name order; at most 500. Files git ignores are left out (see below). `glob` keeps only matching paths (see below) |
 | `grep` | `pattern` (literal text), optional `path`, `ignore_case`, `glob` | `path:line:text` per match; at most 200 matches, lines cut to 200 characters; ignored files are not searched (see below). A zero-match search for a pattern with regex syntax says `no matches (grep matches literal text, not regular expressions; …)` |
 | `git_status` | none | Current branch with upstream ahead/behind, then changed, staged and untracked files (`XY path`) |

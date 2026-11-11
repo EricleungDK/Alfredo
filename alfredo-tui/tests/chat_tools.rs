@@ -119,6 +119,136 @@ fn read_file_returns_numbered_workspace_text() {
     assert!(from.contains("2\t    println!"), "{from}");
 }
 
+impl Workspace {
+    /// A 5,000-line `big.txt` ("line N" on line N), far over the output budget.
+    fn big(&self) {
+        let text: String = (1..=5000).map(|n| format!("line {n}\n")).collect();
+        fs::write(self.root.join("big.txt"), text).unwrap();
+    }
+}
+
+#[test]
+fn read_file_end_line_returns_exactly_the_requested_window() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let output = workspace.run(
+        "read_file",
+        json!({"path": "big.txt", "start_line": 10, "end_line": 12}),
+    );
+    assert_eq!(output, "10\tline 10\n11\tline 11\n12\tline 12\n");
+}
+
+#[test]
+fn read_file_end_line_equal_to_start_line_returns_one_line() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let output = workspace.run(
+        "read_file",
+        json!({"path": "big.txt", "start_line": 7, "end_line": 7}),
+    );
+    assert_eq!(output, "7\tline 7\n");
+}
+
+#[test]
+fn read_file_end_line_without_start_line_reads_from_the_top() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let output = workspace.run("read_file", json!({"path": "big.txt", "end_line": 2}));
+    assert_eq!(output, "1\tline 1\n2\tline 2\n");
+}
+
+#[test]
+fn read_file_end_line_at_the_last_line_returns_it_without_a_hint() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let output = workspace.run(
+        "read_file",
+        json!({"path": "big.txt", "start_line": 5000, "end_line": 5000}),
+    );
+    assert_eq!(output, "5000\tline 5000\n");
+}
+
+#[test]
+fn read_file_end_line_past_the_end_returns_to_the_last_line_without_error() {
+    let workspace = Workspace::new();
+    let output = workspace.run(
+        "read_file",
+        json!({"path": "src/main.rs", "start_line": 2, "end_line": 999}),
+    );
+    assert_eq!(output, "2\t    println!(\"hi\");\n3\t}\n");
+}
+
+#[test]
+fn read_file_end_line_still_stops_at_the_output_budget_with_a_hint() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let output = workspace.run("read_file", json!({"path": "big.txt", "end_line": 5000}));
+    assert!(output.len() <= MAX_OUTPUT, "{}", output.len());
+    assert!(output.contains("[truncated at line "), "{output}");
+}
+
+#[test]
+fn read_file_note_leaves_the_continuation_hint_intact_on_a_long_file() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let output = workspace.run("read_file", json!({"path": "big.txt", "limit": 3}));
+    assert!(
+        output.starts_with("[note: unknown argument limit ignored;"),
+        "{output}"
+    );
+    assert!(output.len() <= MAX_OUTPUT, "{}", output.len());
+    assert!(output.ends_with("to continue]"), "{output}");
+}
+
+#[test]
+fn read_file_end_line_before_start_line_is_an_error() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let message = "error: end_line must be a positive integer not before start_line";
+    let before = workspace.run(
+        "read_file",
+        json!({"path": "big.txt", "start_line": 10, "end_line": 9}),
+    );
+    assert_eq!(before, message);
+    let zero = workspace.run("read_file", json!({"path": "big.txt", "end_line": 0}));
+    assert_eq!(zero, message);
+}
+
+#[test]
+fn read_file_end_line_that_is_not_an_integer_is_an_error() {
+    let workspace = Workspace::new();
+    workspace.big();
+    let message = "error: end_line must be a positive integer not before start_line";
+    for bad in [json!("12"), json!(-3), json!(2.5), json!(true)] {
+        let output = workspace.run("read_file", json!({"path": "big.txt", "end_line": bad}));
+        assert_eq!(output, message, "{bad}");
+    }
+}
+
+#[test]
+fn read_file_notes_offset_and_limit_as_unknown_arguments() {
+    let workspace = Workspace::new();
+    let output = workspace.run(
+        "read_file",
+        json!({"path": "README.md", "offset": 100, "limit": 5}),
+    );
+    assert_eq!(
+        output,
+        "[note: unknown arguments limit, offset ignored; accepted: path, start_line, end_line]\n1\t# Demo\n2\tA tiny demo project.\n"
+    );
+}
+
+#[test]
+fn read_file_schema_lists_end_line() {
+    let tool = chat_tools::TOOLS
+        .iter()
+        .find(|tool| tool.name == "read_file")
+        .unwrap();
+    let schema = (tool.parameters)();
+    assert_eq!(schema["properties"]["end_line"]["type"], "integer");
+    assert_eq!(schema["required"], json!(["path"]));
+}
+
 #[test]
 fn paths_outside_the_workspace_are_refused() {
     let workspace = Workspace::new();
