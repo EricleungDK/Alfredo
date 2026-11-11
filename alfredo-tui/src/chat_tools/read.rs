@@ -798,7 +798,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
     #[test]
     fn grep_stops_at_the_wall_deadline() {
         let dir = tree(5, 100);
