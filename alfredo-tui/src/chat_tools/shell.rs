@@ -845,6 +845,13 @@ mod tests {
     }
 
     #[test]
+    fn fit_leaves_a_result_of_exactly_the_limit_alone_even_with_a_long_header() {
+        let text = sample(&"h".repeat(300), "line", 3, "boom");
+        assert_eq!(fit(text.clone(), text.len()), text);
+        assert_ne!(fit(text.clone(), text.len() - 1), text);
+    }
+
+    #[test]
     fn fit_keeps_header_stderr_and_the_last_stdout_line_with_markers() {
         let text = sample(
             "exit code 1 \u{b7} sandboxed",
