@@ -710,7 +710,7 @@ pub(crate) fn call_clock() -> Clock {
 }
 
 /// `git -C root ARGS` with the hardened environment, pinned to the git directory that
-/// [`verified_git_dir`] checked (issue #359). The verification draws on `clock`.
+/// [`verified_git_dir_within`] checked (issue #359). The verification draws on `clock`.
 fn git_command_within(root: &Path, args: &[&str], clock: Clock) -> Result<Command, String> {
     let verified = verified_git_dir_within(root, clock, Config::Hardened)?;
     let mut command = hardened_command(root)?;
@@ -720,7 +720,7 @@ fn git_command_within(root: &Path, args: &[&str], clock: Clock) -> Result<Comman
 }
 
 /// `git -C root` with the hardened environment; discovery stops above the parent. Not
-/// pinned: only [`verified_git_dir`] runs it unpinned, to learn where the repository is.
+/// pinned: only [`verified_git_dir_within`] runs it unpinned, to learn where the repository is.
 fn hardened_command(root: &Path) -> Result<Command, String> {
     let ceiling = root
         .canonicalize()
@@ -854,29 +854,16 @@ pub(crate) fn global_excludes() -> Option<PathBuf> {
     (path.is_absolute() && path.is_file()).then_some(path)
 }
 
-/// The git directories of the Coding Workspace's repository, verified by
-/// [`verified_git_dir`] (issue #359).
+/// The git directory of the Coding Workspace's repository, verified by
+/// [`verified_git_dir_within`] (issue #359).
 pub(crate) struct VerifiedGit {
     /// The directory git works in: `<root>/.git`, or `<common>/worktrees/<name>` of a linked
     /// worktree.
     pub(crate) git_dir: PathBuf,
-    /// `git_dir` itself, or the main repository's `.git` for a linked worktree.
-    pub(crate) common_dir: PathBuf,
 }
 
 /// Refusal when the workspace's repository is not its own (issue #359).
 const OUTSIDE: &str = "the workspace's .git points outside the Coding Workspace (its git directory is neither the workspace's own nor a linked worktree of it); git tools refuse";
-
-/// Where git keeps the repository of the Coding Workspace at `root`, verified before any
-/// git call trusts it (issue #359). Accepted: `root/.git` as a real directory that is both
-/// the git and the common directory; or `root/.git` as a gitfile to a linked worktree
-/// `<common>/worktrees/<name>`, where `<common>` is a directory and the entry's `gitdir`
-/// file points back at `root/.git`. Anything else, including a `commondir` file that
-/// leads elsewhere, is refused. Paths are compared canonically, so symlinks, `..`, relative
-/// back-references and whitespace in the gitfile cannot hide another repository.
-pub(crate) fn verified_git_dir(root: &Path, config: Config) -> Result<VerifiedGit, String> {
-    verified_git_dir_within(root, call_clock(), config)
-}
 
 /// The git configuration a check runs under: the read tier's hardened one, or a write's,
 /// which also reads the owner's global config (identity and `safe.directory`).
@@ -886,8 +873,15 @@ pub(crate) enum Config {
     Owner,
 }
 
-/// [`verified_git_dir`] whose one git call draws on `clock`. A repository config that blocks
-/// git (a FIFO include) is then an error within the caller's budget.
+/// Where git keeps the repository of the Coding Workspace at `root`, verified before any
+/// git call trusts it (issue #359). Accepted: `root/.git` as a real directory that is both
+/// the git and the common directory; or `root/.git` as a gitfile to a linked worktree
+/// `<common>/worktrees/<name>`, where `<common>` is a directory and the entry's `gitdir`
+/// file points back at `root/.git`. Anything else, including a `commondir` file that
+/// leads elsewhere, is refused. Paths are compared canonically, so symlinks, `..`, relative
+/// back-references and whitespace in the gitfile cannot hide another repository. Its one git
+/// call draws on `clock`: a repository config that blocks git (a FIFO include) is then an
+/// error within the caller's budget.
 pub(crate) fn verified_git_dir_within(
     root: &Path,
     clock: Clock,
@@ -945,10 +939,7 @@ pub(crate) fn verified_git_dir_within(
     // every object store git reads (its own and the alternates it names) is walked for links
     // and kept inside the repository: a link or a borrowed store shows another repository.
     walk_repository(&git_dir, &common_dir, clock)?;
-    Ok(VerifiedGit {
-        git_dir,
-        common_dir,
-    })
+    Ok(VerifiedGit { git_dir })
 }
 
 /// The refusal for a symbolic link at `shown` (see [`shown_path`]), issue #492.

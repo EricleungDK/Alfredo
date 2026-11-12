@@ -897,8 +897,13 @@ fn sandbox_cannot_read_cargo_credentials_child() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #622, option (a): the root `.git` of a linked worktree is hidden from sandboxed runs,
+/// along with the shared Git directory it points to, so `git log` there finds no repository
+/// and the note names the chat git tools. This replaces the earlier expectation (#236) that
+/// `git log` works sandboxed in a linked worktree, which let a committed secret be read from
+/// that repository's history.
 #[test]
-fn git_works_sandboxed_in_a_linked_worktree() {
+fn git_history_is_hidden_sandboxed_in_a_linked_worktree() {
     if !sandbox_works() {
         return;
     }
@@ -924,8 +929,12 @@ fn git_works_sandboxed_in_a_linked_worktree() {
     let wt = base.join("wt");
     let card = approval::card(&wt, &call(json!({"command": "git log --oneline -1"}))).unwrap();
     let result = approval::apply(&wt, &card).unwrap();
-    assert!(result.starts_with("exit code 0"), "{result}");
-    assert!(result.contains(" a"), "{result}");
+    assert!(result.starts_with("exit code 128"), "{result}");
+    assert!(result.contains("not a git repository"), "{result}");
+    assert!(
+        result.contains("use the git_status, git_branch, git_log and git_diff tools"),
+        "{result}"
+    );
     let _ = fs::remove_dir_all(base);
 }
 

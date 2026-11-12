@@ -1,6 +1,7 @@
 //! Issue #517: the bubblewrap sandbox must drop every capability. Run as root, bwrap
 //! otherwise keeps CAP_SYS_ADMIN inside its user namespace, so a sandboxed command can
-//! remount the read-only `.git` bind read-write and write through it to the host.
+//! remount a read-only bind read-write and write through it to the host. The bind is the
+//! one over the workspace's `.git` (an empty read-only directory since #622).
 //! The argv-shape checks live in-crate (`src/execution.rs` tests), because the argv
 //! builders are crate-private.
 use alfredo_tui::{chat_tools, model::ToolCall};
@@ -22,7 +23,8 @@ impl Drop for Cleanup {
     }
 }
 
-/// A Coding Workspace with a `.git` directory, as the chat sandbox binds it read-only.
+/// A Coding Workspace with a `.git` directory. The chat sandbox hides it with an empty
+/// read-only directory (issue #622), which is the bind the remount test attacks.
 fn workspace(tag: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "alfredo-cap-drop-{tag}-{}-{}",
@@ -121,6 +123,6 @@ fn a_sandboxed_command_cannot_remount_the_git_bind_writable_as_root() {
     );
     assert!(
         !root.join(".git/escaped").exists(),
-        "a sandboxed command wrote through a remounted .git bind: {output}"
+        "a sandboxed command wrote through a remounted .git mask: {output}"
     );
 }

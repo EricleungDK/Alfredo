@@ -9,9 +9,11 @@
 //!
 //! The walk is bounded and does not follow symbolic links. It includes git-ignored files,
 //! which are exactly the ones a `.gitignore` leaves out of Git. Only the workspace's own
-//! root `.git` is exempt: the sandbox already binds it read-only, and Git needs it. Every
-//! nested `.git` (a vendored clone, a submodule's gitfile) is an ordinary secret entry and
-//! is masked, because it can hold credentials in `.git/config`. When the walk cannot finish
+//! root `.git` is skipped by the walk: [`git_mask`] hides it as a whole in every sandboxed
+//! run instead (issue #622), because its object store holds secrets that were committed
+//! and later removed. Every nested `.git` (a vendored clone, a submodule's gitfile) is an
+//! ordinary secret entry and is masked, because it can hold credentials in `.git/config`.
+//! When the walk cannot finish
 //! (an unreadable directory, the visit or depth budget, the mask cap, a secret-named
 //! symbolic link or a name that is not UTF-8), it refuses, so the caller runs nothing
 //! rather than run unmasked.
@@ -188,7 +190,8 @@ impl Scan {
                 ));
             }
             let name = entry.file_name();
-            // Only the workspace's own `.git` is exempt; a nested one is masked below.
+            // Only the workspace's own `.git` is skipped; `git_mask` hides it (issue #622).
+            // A nested one is masked below.
             if relative.is_empty() && name.to_str() == Some(".git") {
                 continue;
             }
@@ -311,6 +314,50 @@ impl Drop for EmptyDir {
     }
 }
 
+/// The mask over the workspace's own root `.git` for one sandboxed run (issue #622). Git's
+/// object store, config and any linked worktree's common directory are read from there, so
+/// the sandbox gets no `.git` at all: a directory is bound over with an empty read-only
+/// directory, and a gitfile with `/dev/null`. The mask lives as long as the run.
+pub(crate) struct GitMask {
+    /// The host path bound read-only over the workspace's `.git`.
+    source: String,
+    /// Present for a directory mask; removed when the run ends.
+    _empty: Option<EmptyDir>,
+}
+
+impl GitMask {
+    /// The host path to bind read-only over the workspace's `.git`.
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+/// The mask for the workspace's root `.git` at `git`, or `None` when there is none. It
+/// inspects the entry itself, so a symbolic link is never followed to a repository elsewhere;
+/// a symbolic link is refused, because the sandbox binds only canonical paths and a link's
+/// target is outside the workspace.
+pub(crate) fn git_mask(git: &Path) -> Result<Option<GitMask>, String> {
+    let meta = match fs::symlink_metadata(git) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if meta.file_type().is_symlink() {
+        return Err("it is a symbolic link, which the sandbox cannot hide".to_string());
+    }
+    if meta.is_dir() {
+        let empty = EmptyDir::create()?;
+        return Ok(Some(GitMask {
+            source: empty.path().to_string(),
+            _empty: Some(empty),
+        }));
+    }
+    Ok(Some(GitMask {
+        source: "/dev/null".to_string(),
+        _empty: None,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +430,35 @@ mod tests {
             ]
         );
         assert_eq!(masks.files, vec![text(&root.join("ptr/.git"))]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_root_git_mask_is_an_empty_directory_or_dev_null_and_never_follows_a_link() {
+        let root = scratch("git-mask");
+        fs::create_dir_all(root.join(".git/objects")).unwrap();
+        fs::write(root.join(".git/objects/pack.pack"), "history").unwrap();
+        let dir = git_mask(&root.join(".git")).unwrap().unwrap();
+        assert!(Path::new(dir.source()).is_dir(), "{}", dir.source());
+        assert_eq!(fs::read_dir(dir.source()).unwrap().count(), 0);
+        let dir_source = dir.source().to_string();
+        drop(dir);
+        assert!(
+            !Path::new(&dir_source).exists(),
+            "the empty directory outlived the run"
+        );
+        fs::remove_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join("gitfile"), "gitdir: /elsewhere/.git\n").unwrap();
+        fs::write(root.join(".git"), "gitdir: /elsewhere/.git\n").unwrap();
+        assert_eq!(
+            git_mask(&root.join(".git")).unwrap().unwrap().source(),
+            "/dev/null"
+        );
+        fs::remove_file(root.join(".git")).unwrap();
+        std::os::unix::fs::symlink(root.join("gitfile"), root.join(".git")).unwrap();
+        assert!(git_mask(&root.join(".git")).is_err());
+        fs::remove_file(root.join(".git")).unwrap();
+        assert!(git_mask(&root.join(".git")).unwrap().is_none());
         let _ = fs::remove_dir_all(root);
     }
 
