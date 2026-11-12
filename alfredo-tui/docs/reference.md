@@ -902,7 +902,7 @@ in the same namespace. Legacy
 approvals acquire no implicit permissions.
 
 A mission holds at most 256 tasks: plan tasks and repairs both count, and finished tasks
-are never reclaimed. At 205 tasks (80%) the first command that reaches it adds the notice
+are never reclaimed. At 205 tasks (80%) the first time a refresh sees 205 or more tasks it adds the notice
 `Task list 80% full (205/256); start a new mission before it fills`, once per terminal.
 At the limit `/go`, `/plan` and `--go GOAL --headless` refuse before any planner request
 with `Task capacity reached: this mission has 256 of 256 tasks …; start a new mission
