@@ -109,6 +109,11 @@ fn gate(decision: Decision, log: Option<Log>) -> (Gate, Arc<Mutex<Vec<approval::
 /// One turn: the model asks for `first`, then answers "done". Returns the tool
 /// result the model got back.
 async fn turn(root: &Path, first: Reply, gate: Gate) -> (Session, String) {
+    turn_in(root, first, gate, None).await
+}
+
+/// [`turn`] with the provider's `--num-ctx` window set.
+async fn turn_in(root: &Path, first: Reply, gate: Gate, num_ctx: Option<u32>) -> (Session, String) {
     let addr = ollama_fixture::reserve();
     let first = Mutex::new(Some(first));
     let fixture = ollama_fixture::serve(addr, move |_, index| {
@@ -118,7 +123,9 @@ async fn turn(root: &Path, first: Reply, gate: Gate) -> (Session, String) {
             done("done")
         }
     });
-    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5)).unwrap();
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5))
+        .unwrap()
+        .with_num_ctx(num_ctx);
     let mut session = Session::new("fixture".into());
     session.insert("run it");
     let messages = session.begin().unwrap();
@@ -1099,5 +1106,71 @@ fn a_cwd_swapped_after_the_preview_is_refused() {
     let error = approval::apply(&root, &card).unwrap_err();
     assert!(error.contains("cwd"), "{error}");
     assert!(!root.join("other/ran").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+/// 600 progress lines, a failure reason on stderr, then exit 1 (issue #692).
+const NOISY_FAILURE: &str = "i=0; while [ $i -lt 600 ]; do echo \"progress line $i padding padding\"; i=$((i+1)); done; echo 'ERROR: the real failure reason' >&2; exit 1";
+
+#[tokio::test]
+async fn a_tight_window_keeps_the_exit_code_stderr_and_last_stdout_line() {
+    if !sandbox_works() {
+        return;
+    }
+    let root = workspace("tightfit");
+    let (gate, _) = gate(Decision::Approve, None);
+    let (_, result) = turn_in(
+        &root,
+        tool_call("run_command", json!({"command": NOISY_FAILURE})),
+        gate,
+        Some(4096),
+    )
+    .await;
+    assert!(result.contains("exit code 1"), "{result}");
+    assert!(result.contains("the real failure reason"), "{result}");
+    assert!(result.contains("progress line 599"), "{result}");
+    assert!(result.contains("[\u{2026}"), "cut is marked: {result}");
+    assert!(result.len() < 2000, "{}", result.len());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_timeout_under_a_tight_window_keeps_its_header_and_output_tail() {
+    let root = workspace("tighttimeout");
+    let (gate, _) = gate(Decision::Approve, None);
+    let command = "i=0; while [ $i -lt 600 ]; do echo \"progress line $i padding padding\"; i=$((i+1)); done; echo 'ERROR: stuck on purpose' >&2; sleep 30";
+    let (_, result) = turn_in(
+        &root,
+        tool_call(
+            "run_command",
+            json!({"command": command, "escalate": true, "timeout_seconds": 1}),
+        ),
+        gate,
+        Some(4096),
+    )
+    .await;
+    assert!(result.contains("timed out after 1s"), "{result}");
+    assert!(result.contains("stuck on purpose"), "{result}");
+    assert!(result.contains("progress line 599"), "{result}");
+    assert!(result.len() < 2000, "{}", result.len());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_tight_window_cuts_multibyte_output_on_character_boundaries() {
+    let root = workspace("tightutf8");
+    let (gate, _) = gate(Decision::Approve, None);
+    let command = "i=0; while [ $i -lt 900 ]; do echo \"\u{e9}\u{e9}\u{e9} line $i \u{e9}\u{e9}\u{e9}\u{e9}\"; i=$((i+1)); done; echo '\u{e9}rror: caf\u{e9} failed' >&2; exit 2";
+    let (_, result) = turn_in(
+        &root,
+        tool_call("run_command", json!({"command": command, "escalate": true})),
+        gate,
+        Some(4096),
+    )
+    .await;
+    assert!(result.contains("exit code 2"), "{result}");
+    assert!(result.contains("caf\u{e9} failed"), "{result}");
+    assert!(result.contains("line 899"), "{result}");
+    assert!(result.len() < 2000, "{}", result.len());
     let _ = fs::remove_dir_all(root);
 }

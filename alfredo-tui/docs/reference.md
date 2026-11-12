@@ -1881,6 +1881,9 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   the prompt estimate. A budgeted `read_file` is sized to the budget, so it still ends on
   a whole line with the `[truncated at line N of M; call read_file with start_line=…]`
   continuation line; other budget cuts end on a newline before the marker.
+  A `run_command` result is the exception: a budget cut keeps its exit-code header and the
+  ends of stderr and stdout (stderr gets at least a third of the room), each cut section
+  starting `[… N earlier bytes cut]` (issue #692).
   Under the 128 KiB conversation limit a result is cut to what fits
   with 4 KiB left for the answer. When less than 256 bytes would remain, the result is
   replaced by `error: not shown; the conversation is near its size limit, answer with what

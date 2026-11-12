@@ -762,6 +762,68 @@ fn report(plan: &Plan, ran: Ran, hidden: usize) -> Result<String, String> {
     }
 }
 
+const STDOUT_MARK: &str = "\nstdout:\n";
+const STDERR_MARK: &str = "\nstderr:\n";
+
+/// `text` cut to `budget` bytes, keeping its end, with a marker line in front when cut.
+fn keep_end(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let marker = format!("[\u{2026} {} earlier bytes cut]\n", text.len());
+    let room = budget.saturating_sub(marker.len());
+    let mut start = text.len() - room;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let marker = format!("[\u{2026} {start} earlier bytes cut]\n");
+    format!("{marker}{}", &text[start..])
+}
+
+/// `text` cut to `budget` bytes, keeping its start, with a marker line after when cut.
+fn keep_start(text: &str, budget: usize) -> String {
+    const MARKER: &str = "\n[\u{2026} rest cut]";
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let mut end = budget.saturating_sub(MARKER.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{MARKER}", &text[..end])
+}
+
+/// Fit a [`report`] into `limit` bytes (issue #692). A tight chat budget used to cut the
+/// report's front, dropping stderr and the end of stdout, which is where a failure shows.
+/// This keeps the exit-code header, then splits what is left between the stderr and
+/// stdout tails (stderr first, at least a third of the room), each marked when cut.
+/// Text that is not a report is cut by the ordinary [`super::cap_to`].
+pub fn fit(result: String, limit: usize) -> String {
+    let limit = limit.min(super::MAX_OUTPUT);
+    if result.len() <= limit {
+        return result;
+    }
+    let Some(out_at) = result.find(STDOUT_MARK) else {
+        return super::cap_to(result, limit);
+    };
+    let body = out_at + STDOUT_MARK.len();
+    let Some(err_at) = result[body..].rfind(STDERR_MARK).map(|at| at + body) else {
+        return super::cap_to(result, limit);
+    };
+    let header = keep_start(&result[..out_at], limit / 2);
+    let stdout = &result[body..err_at];
+    let stderr = &result[err_at + STDERR_MARK.len()..];
+    let room = limit.saturating_sub(header.len() + STDOUT_MARK.len() + STDERR_MARK.len());
+    let err_share = stderr
+        .len()
+        .min((room / 3).max(room.saturating_sub(stdout.len())));
+    format!(
+        "{header}{STDOUT_MARK}{}{STDERR_MARK}{}",
+        keep_end(stdout, room - err_share),
+        keep_end(stderr, err_share)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
