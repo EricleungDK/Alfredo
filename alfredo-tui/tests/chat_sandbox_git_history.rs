@@ -362,7 +362,7 @@ fn an_owner_gitfile_is_left_unchanged_by_sandboxed_commands() {
         );
     }
     let found = run(&wt, "git rev-parse --git-dir ; echo rc=$?");
-    assert!(found.contains("not a git repository"), "{found}");
+    assert!(refused_without_discovery(&found), "{found}");
     assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), gitfile);
 }
 
