@@ -28,6 +28,9 @@ pub mod text_call;
 pub mod undo;
 
 pub use run::{parse_max_turns, run_turn, run_turn_limited, MAX_STEPS, STEP_CAP_NOTICE};
+/// Fits a `run_command` report to a byte budget (issue #692); public for tests.
+#[doc(hidden)]
+pub use shell::fit as fit_run_command;
 pub use shell::stop_all as stop_running_commands;
 pub use shell::CANCELLED_RESULT;
 
