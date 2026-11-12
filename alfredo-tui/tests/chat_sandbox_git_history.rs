@@ -94,6 +94,51 @@ fn run(root: &Path, command: &str) -> String {
     )
 }
 
+/// True when `out` (from `<git command> ; echo rc=$?`) shows git failing without discovering
+/// a repository: a non-zero `rc=` and one of git's "no repository here" messages. Git words
+/// this differently by version: 2.43 says "not a git repository"; 2.56 reports the masked
+/// gitfile as "not a regular file". A successful `rev-parse` path, or `rc=0`, is rejected.
+fn refused_without_discovery(out: &str) -> bool {
+    let failed = out
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("rc="))
+        .and_then(|code| code.trim().parse::<i32>().ok())
+        .is_some_and(|code| code != 0);
+    let no_repository = out.lines().any(|line| {
+        line.starts_with("fatal: ")
+            && (line.contains("not a git repository") || line.contains("not a regular file"))
+    });
+    failed && no_repository
+}
+
+#[test]
+fn refused_without_discovery_accepts_both_git_wordings() {
+    let old = "fatal: not a git repository: '/w/wt/.git'\nrc=128\n";
+    let old_plain = "fatal: not a git repository (or any parent up to mount point /)\nrc=128\n";
+    let new = "rc=128\nfatal: not a regular file: '/w/wt/.git'\n";
+    for out in [old, old_plain, new] {
+        assert!(refused_without_discovery(out), "{out}");
+    }
+}
+
+#[test]
+fn refused_without_discovery_rejects_a_discovered_repository() {
+    for out in [
+        "/tmp/x/.git\nrc=0\n",
+        "/tmp/x/.git\n",
+        "rc=0\n",
+        "",
+        // a failure with no "no repository" message is not proof the mask held
+        "rc=128\n",
+        "rc=1\nerror: something else\n",
+        // the wording alone, with a discovered path and success
+        "/tmp/x/.git\nfatal: not a git repository\nrc=0\n",
+    ] {
+        assert!(!refused_without_discovery(out), "{out}");
+    }
+}
+
 #[test]
 fn a_committed_then_removed_secret_is_not_readable_from_git_history_in_the_sandbox() {
     let root = workspace("repro");
