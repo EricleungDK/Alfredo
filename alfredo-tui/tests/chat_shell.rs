@@ -930,7 +930,13 @@ fn git_history_is_hidden_sandboxed_in_a_linked_worktree() {
     let card = approval::card(&wt, &call(json!({"command": "git log --oneline -1"}))).unwrap();
     let result = approval::apply(&wt, &card).unwrap();
     assert!(result.starts_with("exit code 128"), "{result}");
-    assert!(result.contains("not a git repository"), "{result}");
+    // Git words "no repository here" by version: 2.43 says "not a git repository"; 2.56 says
+    // "not a regular file" for the masked gitfile. Either way git failed (exit 128 above).
+    assert!(
+        result.contains("fatal: not a git repository")
+            || result.contains("fatal: not a regular file"),
+        "{result}"
+    );
     assert!(
         result.contains("use the git_status, git_branch, git_log and git_diff tools"),
         "{result}"
