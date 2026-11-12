@@ -901,6 +901,20 @@ bytes as `tasks-vN-backup.json` for the source version before publishing schema 
 in the same namespace. Legacy
 approvals acquire no implicit permissions.
 
+A mission holds at most 256 tasks: plan tasks and repairs both count, and finished tasks
+are never reclaimed. At 205 tasks (80%) the first command that reaches it adds the notice
+`Task list 80% full (205/256); start a new mission before it fills`, once per terminal.
+At the limit `/go`, `/plan` and `--go GOAL --headless` refuse before any planner request
+with `Task limit reached: this mission has 256 of 256 tasks …; start a new mission
+(alfredo-tui --new-mission NAME, or Start New Mission in the mission picker) to keep
+planning`; headless exits 2 with nothing on stdout and starts no run, so `--resume
+--headless` has nothing to resume (`--headless` always opens the default mission, so
+start the new mission in the terminal). A plan that does not fit says how many slots it
+needs and how many are free. If the limit is reached while a `/go` run is under way
+(the plan does not fit, or a repair is needed), the run ends `failed` with the same
+sentence instead of pausing, because `/resume` could not succeed. The full mission stays
+readable; a new mission starts with an empty task list.
+
 `/repair ID reason` proposes a linked repair for a failed, rejected or cancelled
 run with verified retained evidence. It inherits the parent model, dependencies and
 file/check policy, requires fresh `/approve NEW_ID`, and then `/run NEW_ID` starts

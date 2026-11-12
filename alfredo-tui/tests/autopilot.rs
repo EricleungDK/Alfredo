@@ -4497,6 +4497,13 @@ fn go_at_task_capacity_refuses_before_planning_and_names_the_fix() {
         assert!(error.contains("Start New Mission"), "{error}");
     }
     assert_eq!(go, plan, "one sentence, whichever command was typed");
+    // The typed-intent path (what the console records) refuses the same way.
+    for text in [
+        "/plan Make answer return 42",
+        "/plan-revise Make it smaller",
+    ] {
+        assert_eq!(control.prepare_command(text, "fixture").unwrap_err(), go);
+    }
     thread::sleep(Duration::from_millis(100));
     assert_eq!(server.count(), 0, "a planner request was sent");
     assert!(!autopilot.running());
@@ -4541,6 +4548,34 @@ fn go_at_task_capacity_refuses_before_planning_and_names_the_fix() {
         256,
         "the full mission is untouched"
     );
+}
+
+/// `drive`, returning the text of every command autopilot submitted.
+fn drive_recording(
+    autopilot: &mut Autopilot,
+    control: &mut TaskControl,
+    runtime: &Runtime,
+    until: impl Fn(&Autopilot, &TaskControl) -> bool,
+) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let (mut submitted, mut refreshed) = (vec![], Instant::now());
+    while !until(autopilot, control) {
+        control.poll();
+        if let Some(submission) = autopilot.tick(runtime, control) {
+            submitted.push(submission.text.clone());
+            let _ = control.dispatch_prepared(runtime, &submission.intent);
+        }
+        if let Ok(Some(request)) = control.prepare_dispatch() {
+            let _ = control.dispatch_prepared(runtime, &Intent::DispatchRun { request });
+        }
+        if refreshed.elapsed() > Duration::from_millis(100) {
+            control.refresh_background(runtime);
+            refreshed = Instant::now();
+        }
+        assert!(Instant::now() < deadline, "Timed out: {submitted:?}");
+        thread::sleep(Duration::from_millis(3));
+    }
+    submitted
 }
 
 fn settled_or_paused(autopilot: &Autopilot, control: &TaskControl) -> bool {
@@ -4594,12 +4629,11 @@ fn a_plan_that_cannot_fit_ends_failed_not_paused_and_never_offers_resume() {
             1,
         )
         .unwrap();
-    drive(
-        &mut autopilot,
-        &mut control,
-        &runtime,
-        "capacity stop",
-        settled_or_paused,
+    let submitted = drive_recording(&mut autopilot, &mut control, &runtime, settled_or_paused);
+    // Stopped before a save that could only be refused, not after three refusals.
+    assert!(
+        !submitted.iter().any(|text| text.contains("/plan-save")),
+        "{submitted:?}"
     );
     assert_failed_at_capacity(&mut autopilot, &mut control, &runtime);
     let report = autopilot.report().unwrap().to_string();
@@ -4634,15 +4668,73 @@ fn a_repair_needed_at_the_task_limit_ends_failed_with_the_remedy() {
             2,
         )
         .unwrap();
+    let submitted = drive_recording(&mut autopilot, &mut control, &runtime, settled_or_paused);
+    assert!(
+        !submitted.iter().any(|text| text.contains("/repair")),
+        "{submitted:?}"
+    );
+    assert_failed_at_capacity(&mut autopilot, &mut control, &runtime);
+    assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 256);
+}
+
+#[test]
+fn a_slot_taken_after_go_started_still_ends_failed_before_any_planner_request() {
+    let fixture = Fixture::new();
+    pad_tasks(&fixture.store, 255);
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .command(
+            &runtime,
+            &mut control,
+            "/go Make answer return 42",
+            "fixture",
+            1,
+        )
+        .unwrap();
+    // Another terminal on the same mission takes the last slot.
+    pad_tasks(&fixture.store, 256);
+    control.refresh(&runtime);
     drive(
         &mut autopilot,
         &mut control,
         &runtime,
-        "repair at the limit",
+        "last slot taken",
         settled_or_paused,
     );
     assert_failed_at_capacity(&mut autopilot, &mut control, &runtime);
-    assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 256);
+    assert_eq!(server.count(), 0, "a planner request was sent");
+}
+
+#[test]
+fn bare_go_refuses_an_open_draft_that_does_not_fit_and_keeps_it() {
+    let fixture = Fixture::new();
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    open_draft(&mut control, &runtime);
+    pad_tasks(&fixture.store, 255);
+    control.refresh(&runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while control.pending || control.snapshot.as_ref().map(|s| s.tasks.len()) != Some(255) {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 1)
+        .unwrap_err();
+    assert!(
+        error.contains("2 task slots") && error.contains("1 free"),
+        "{error}"
+    );
+    assert!(error.contains("--new-mission NAME"), "{error}");
+    assert!(!autopilot.running());
+    assert!(control.planner.checkpoint().is_some(), "the draft is kept");
+    assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 255);
 }
 
 /// Issue #470: `/go` start checks uncommitted changes, and a nested gitfile to a FIFO makes

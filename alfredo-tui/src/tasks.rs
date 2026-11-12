@@ -11,7 +11,8 @@ use std::{
 };
 
 const MAX_STORE: usize = 4 * 1024 * 1024;
-const MAX_TASKS: usize = 256;
+/// A mission holds at most this many tasks (plan tasks and repairs alike; none is reclaimed).
+pub const MAX_TASKS: usize = 256;
 const MAX_RECEIPTS: usize = 4096;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 pub type Result<T> = std::result::Result<T, String>;
@@ -23,6 +24,31 @@ fn after_write(wrote: bool, reason: String) -> Refusal {
     } else {
         Refusal::Denied(reason)
     }
+}
+
+/// The way out of a full task list: the limit is per mission, so a new mission starts empty.
+/// `--headless` always opens the default mission, so this needs the terminal.
+const NEW_MISSION: &str =
+    "start a new mission (alfredo-tui --new-mission NAME, or Start New Mission in the mission picker)";
+
+/// The one refusal for a task list that cannot take `needed` more tasks (used for every
+/// capacity check, before and after any planner request).
+pub fn capacity_refusal(used: usize, needed: usize) -> String {
+    let free = MAX_TASKS.saturating_sub(used);
+    if needed <= 1 {
+        format!(
+            "Task limit reached: this mission has {used} of {MAX_TASKS} tasks and finished tasks are never reclaimed; {NEW_MISSION} to keep planning"
+        )
+    } else {
+        format!(
+            "Task limit reached: this plan needs {needed} task slots but only {free} free ({used} of {MAX_TASKS} used); {NEW_MISSION} to keep planning"
+        )
+    }
+}
+
+/// Whether `text` is a task-limit refusal (a stop that retrying can never fix).
+pub fn is_capacity_refusal(text: &str) -> bool {
+    text.contains("Task limit reached: ")
 }
 
 pub fn unknown_task(task: u64) -> String {
@@ -431,6 +457,21 @@ pub fn review_template(task: u64, criteria: usize) -> String {
 }
 
 impl Snapshot {
+    /// How many more tasks (plan tasks or repairs) this mission can take.
+    pub fn free_task_slots(&self) -> usize {
+        MAX_TASKS.saturating_sub(self.tasks.len())
+    }
+
+    /// Set once the list is 80% full, so the owner can start a new mission before it fills.
+    pub fn task_list_warning(&self) -> Option<String> {
+        (self.tasks.len() * 5 >= MAX_TASKS * 4).then(|| {
+            format!(
+                "Task list 80% full ({}/{MAX_TASKS}); start a new mission before it fills",
+                self.tasks.len()
+            )
+        })
+    }
+
     pub fn architecture_failures(&self, mut id: u64) -> usize {
         let mut runs = BTreeSet::new();
         for _ in 0..self.tasks.len() {
@@ -1771,7 +1812,7 @@ impl TaskStore {
             Action::Plan { plan } => {
                 plan.validate()?;
                 if snapshot.tasks.len() + plan.tasks.len() > MAX_TASKS {
-                    return Err("Task capacity reached".into());
+                    return Err(capacity_refusal(snapshot.tasks.len(), plan.tasks.len()));
                 }
                 let first = snapshot.tasks.len() as u64 + 1;
                 if let Some(origin) = &plan.architecture {
@@ -1856,7 +1897,7 @@ impl TaskStore {
                     );
                 }
                 if snapshot.tasks.len() == MAX_TASKS {
-                    return Err("Task capacity reached".into());
+                    return Err(capacity_refusal(snapshot.tasks.len(), 1));
                 }
                 let id = snapshot.tasks.len() as u64 + 1;
                 let unique: BTreeSet<_> = dependencies.iter().collect();
@@ -1903,7 +1944,7 @@ impl TaskStore {
                     return Err("An unresolved repair already exists for this task".into());
                 }
                 if snapshot.tasks.len() == MAX_TASKS {
-                    return Err("Task capacity reached".into());
+                    return Err(capacity_refusal(snapshot.tasks.len(), 1));
                 }
                 let id = snapshot.tasks.len() as u64 + 1;
                 snapshot.tasks.push(Task {

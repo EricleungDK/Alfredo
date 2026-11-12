@@ -316,6 +316,14 @@ impl Planner {
     ) -> Result<Option<crate::planner_command::Request>, String> {
         use crate::planner_command::{Operation, Request};
         let text = text.trim();
+        // Before any planner request: with no free slot nothing generated could be saved.
+        if ["/plan ", "/plan-revise ", "/architect-revise "]
+            .iter()
+            .any(|verb| text.starts_with(verb))
+            && snapshot.free_task_slots() == 0
+        {
+            return Err(crate::tasks::capacity_refusal(snapshot.tasks.len(), 1));
+        }
         let draft = self.checkpoint();
         let base = draft.as_ref().map(SavedDraft::digest).transpose()?;
         let operation = if text == "/plan-cancel" {

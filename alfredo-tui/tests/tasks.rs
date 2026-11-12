@@ -711,6 +711,20 @@ fn assert_names_limit_and_remedy(error: &str) {
 }
 
 #[test]
+fn a_new_mission_escapes_the_task_limit_and_the_full_one_is_untouched() {
+    let fixture = Fixture::new();
+    let full = fixture.store("full");
+    pad_tasks(&full, 256);
+    let fresh = fixture.store("fresh");
+    fresh.select_mission(true).unwrap();
+    assert!(fresh.snapshot().unwrap().tasks.is_empty());
+    fresh.transact(proposal("first", 0, vec![])).unwrap();
+    assert_eq!(full.snapshot().unwrap().tasks.len(), 256);
+    // The remedy is a mission the limit does not follow; naming an existing one is refused.
+    assert!(full.select_mission(true).is_err());
+}
+
+#[test]
 fn propose_at_the_task_limit_names_the_limit_and_the_remedy() {
     let fixture = Fixture::new();
     let store = fixture.store("full");
