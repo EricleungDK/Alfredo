@@ -661,6 +661,166 @@ fn near_full_journal_refuses_a_claim_without_room_for_both_workers() {
     store.transact(capacity_finish(&store, &snapshot)).unwrap();
 }
 
+/// Fill `store` with proposed tasks through the store API (the receipts must match).
+fn pad_tasks(store: &TaskStore, to: usize) -> alfredo_tui::tasks::Snapshot {
+    let mut snapshot = store.snapshot().unwrap();
+    while snapshot.tasks.len() < to {
+        snapshot = store
+            .transact(Request {
+                correlation: format!("pad-{}", snapshot.revision),
+                expected_revision: snapshot.revision,
+                action: Action::Propose {
+                    title: "filler".into(),
+                    model: "fixture".into(),
+                    dependencies: vec![],
+                },
+            })
+            .unwrap()
+            .0;
+    }
+    snapshot
+}
+
+fn plan_of(tasks: usize) -> alfredo_tui::planner::Plan {
+    alfredo_tui::planner::Plan {
+        prompt: "goal".into(),
+        planner: "fixture".into(),
+        tasks: (0..tasks)
+            .map(|index| alfredo_tui::planner::Step {
+                title: format!("Step {index}"),
+                acceptance: vec![],
+                model: "fixture".into(),
+                dependencies: vec![],
+                policy: policy(),
+            })
+            .collect(),
+        context: None,
+        scope: None,
+        architecture: None,
+        usage: None,
+    }
+}
+
+/// Issue #696: a refusal at the task limit names the limit and the way out, and the way
+/// out is a new mission: its task list starts empty while the full one is untouched.
+fn assert_names_limit_and_remedy(error: &str) {
+    assert!(error.contains("256"), "no limit named: {error}");
+    assert!(error.contains("--new-mission NAME"), "no remedy: {error}");
+    assert!(error.contains("Start New Mission"), "no remedy: {error}");
+    assert_ne!(error, "Task capacity reached");
+}
+
+#[test]
+fn a_new_mission_escapes_the_task_limit_and_the_full_one_is_untouched() {
+    let fixture = Fixture::new();
+    let full = fixture.store("full");
+    pad_tasks(&full, 256);
+    let fresh = fixture.store("fresh");
+    fresh.select_mission(true).unwrap();
+    assert!(fresh.snapshot().unwrap().tasks.is_empty());
+    fresh.transact(proposal("first", 0, vec![])).unwrap();
+    assert_eq!(full.snapshot().unwrap().tasks.len(), 256);
+    // The remedy is a mission the limit does not follow; naming an existing one is refused.
+    assert!(full.select_mission(true).is_err());
+}
+
+#[test]
+fn only_the_task_limit_refusals_read_as_capacity_refusals() {
+    use alfredo_tui::tasks::{capacity_refusal, is_capacity_refusal};
+    assert!(is_capacity_refusal(&capacity_refusal(256, 1)));
+    assert!(is_capacity_refusal(&capacity_refusal(254, 3)));
+    for other in [
+        "Task receipt capacity reached",
+        "Task storage capacity reached (4 MiB)",
+        "Command history capacity reached; start another conversation",
+        "Unknown task 3; the task panel lists ids",
+        "",
+    ] {
+        assert!(!is_capacity_refusal(other), "{other}");
+    }
+}
+
+#[test]
+fn propose_at_the_task_limit_names_the_limit_and_the_remedy() {
+    let fixture = Fixture::new();
+    let store = fixture.store("full");
+    let snapshot = pad_tasks(&store, 256);
+    let error = refusal(
+        &fixture,
+        &store,
+        snapshot.revision,
+        Action::Propose {
+            title: "one more".into(),
+            model: "fixture".into(),
+            dependencies: vec![],
+        },
+    );
+    assert_names_limit_and_remedy(&error);
+}
+
+#[test]
+fn plan_save_that_does_not_fit_says_how_many_slots_it_needs_and_how_many_are_free() {
+    let fixture = Fixture::new();
+    let store = fixture.store("nearly-full");
+    let snapshot = pad_tasks(&store, 254);
+    let error = refusal(
+        &fixture,
+        &store,
+        snapshot.revision,
+        Action::Plan { plan: plan_of(3) },
+    );
+    assert!(error.contains("3 task slots"), "{error}");
+    assert!(error.contains("2 free"), "{error}");
+    assert_names_limit_and_remedy(&error);
+    // A plan that fits the two free slots is still saved.
+    store
+        .transact(Request {
+            correlation: "fits".into(),
+            expected_revision: snapshot.revision,
+            action: Action::Plan { plan: plan_of(2) },
+        })
+        .unwrap();
+}
+
+#[test]
+fn repair_at_the_task_limit_names_the_limit_and_the_remedy() {
+    let fixture = Fixture::new();
+    let (store, snapshot) = capacity_seed(&fixture);
+    store.transact(capacity_finish(&store, &snapshot)).unwrap();
+    let snapshot = pad_tasks(&store, 256);
+    let error = refusal(
+        &fixture,
+        &store,
+        snapshot.revision,
+        Action::Repair {
+            task: 1,
+            reason: "fix it".into(),
+        },
+    );
+    assert_names_limit_and_remedy(&error);
+}
+
+#[test]
+fn task_list_warns_at_eighty_percent() {
+    let fixture = Fixture::new();
+    let store = fixture.store("filling");
+    pad_tasks(&store, 203);
+    let (control, messages) = run_then_render(
+        &store,
+        &["/task Next one", "/task And another", "/task Yet another"],
+    );
+    // 204 of 256 is below 80%; 205 is the first count at or over it.
+    assert!(!messages[0].contains("80% full"), "{}", messages[0]);
+    assert!(
+        messages[1].contains("Task list 80% full (205/256); start a new mission before it fills"),
+        "{}",
+        messages[1]
+    );
+    // One time: the next command that adds a task does not repeat it.
+    assert!(!messages[2].contains("80% full"), "{}", messages[2]);
+    assert_eq!(control.snapshot.as_ref().unwrap().tasks.len(), 206);
+}
+
 #[test]
 fn dispatch_selects_approved_work_only_after_accepted_dependencies_and_once_per_approval() {
     use alfredo_tui::{dispatch::Dispatch, tasks::WorkPolicy};

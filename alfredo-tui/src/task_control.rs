@@ -78,6 +78,8 @@ pub struct TaskControl {
     background_receiver: mpsc::Receiver<Checked>,
     /// Consecutive transient (busy) background refreshes while dispatch is on.
     refresh_transient: u32,
+    /// The 80%-full task list notice was shown (once per terminal session).
+    capacity_warned: bool,
     refreshing: bool,
     pub snapshot: Option<Snapshot>,
     observed_revision: Option<u64>,
@@ -213,6 +215,7 @@ impl TaskControl {
             background_sender,
             background_receiver,
             refresh_transient: 0,
+            capacity_warned: false,
             refreshing: false,
             snapshot: None,
             observed_revision: None,
@@ -794,6 +797,18 @@ impl TaskControl {
                 }
                 self.remember_initial_work_focus();
                 self.notice = notice;
+                if !self.capacity_warned {
+                    if let Some(warning) =
+                        self.snapshot.as_ref().and_then(Snapshot::task_list_warning)
+                    {
+                        self.capacity_warned = true;
+                        self.notice = if self.notice.is_empty() {
+                            warning
+                        } else {
+                            format!("{} · {warning}", self.notice)
+                        };
+                    }
+                }
             }
             Err(error) => {
                 self.notice = if self.retry.is_some() {

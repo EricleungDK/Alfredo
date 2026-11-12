@@ -1,6 +1,17 @@
 use super::{Action, NodeId, Projection, Refusal, Request, Runtime, TaskControl};
 
 impl TaskControl {
+    /// Refuse before any planner request when the mission has no free task slot (#696):
+    /// nothing a planner returned could be saved.
+    fn task_headroom(&self) -> Result<(), String> {
+        match &self.snapshot {
+            Some(snapshot) if snapshot.free_task_slots() == 0 => {
+                Err(crate::tasks::capacity_refusal(snapshot.tasks.len(), 1))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Capture targets and revisions now. This method never starts work or writes state.
     pub fn prepare_command(
         &mut self,
@@ -648,6 +659,7 @@ impl TaskControl {
         }
         if let Some(id) = text.trim().strip_prefix("/architect-revise ") {
             let task = id.parse().map_err(|_| USAGE_ARCHITECT_REVISE)?;
+            self.task_headroom()?;
             let provider = self
                 .provider
                 .clone()
@@ -685,6 +697,7 @@ impl TaskControl {
             return Ok(());
         }
         if let Some(prompt) = text.trim().strip_prefix("/plan ") {
+            self.task_headroom()?;
             let revision = self
                 .snapshot
                 .as_ref()
@@ -710,6 +723,7 @@ impl TaskControl {
             return Err("Usage: /plan-revise REQUEST".into());
         }
         if let Some(request) = text.trim().strip_prefix("/plan-revise ") {
+            self.task_headroom()?;
             let revision = self
                 .snapshot
                 .as_ref()

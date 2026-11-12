@@ -701,6 +701,14 @@ impl Autopilot {
             return Err("Usage: /go GOAL, or /go to run the open plan (GOAL is 1–4096 bytes without control characters)".into());
         }
         self.admit(model, max_repairs, tasks)?;
+        // Before any planner request: a full task list can never take the plan (#696).
+        if let Some(snapshot) = tasks
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.free_task_slots() == 0)
+        {
+            return Err(crate::tasks::capacity_refusal(snapshot.tasks.len(), 1));
+        }
         if tasks.planner.active() || tasks.planner.checkpoint().is_some() {
             if self.stopped_draft(tasks) {
                 return Err("The stopped autopilot's plan draft is open; /resume to continue it or /plan-cancel to discard".into());
@@ -741,6 +749,16 @@ impl Autopilot {
                 .validate()
                 .map_err(|error| format!("The open plan draft is not valid: {error}"))?;
             lint_refusal(&draft.plan)?;
+            if let Some(snapshot) = tasks
+                .snapshot
+                .as_ref()
+                .filter(|snapshot| draft.plan.tasks.len() > snapshot.free_task_slots())
+            {
+                return Err(crate::tasks::capacity_refusal(
+                    snapshot.tasks.len(),
+                    draft.plan.tasks.len(),
+                ));
+            }
             let goal = plan_goal(&draft.plan)?;
             return self.begin(
                 &goal,
@@ -1539,6 +1557,10 @@ impl Autopilot {
                 })
             }
             Ok(None) => None,
+            Err(error) if crate::tasks::is_capacity_refusal(&error) => {
+                self.fail(tasks, error);
+                None
+            }
             Err(error) => {
                 self.halt(tasks, format!("Autopilot paused: {error}"));
                 None
@@ -1897,6 +1919,15 @@ impl Autopilot {
             );
             return Ok(None);
         }
+        // The draft is final: if it cannot fit, saving can never succeed, so stop for good.
+        if let Some(refusal) = tasks.snapshot.as_ref().and_then(|snapshot| {
+            let needed = tasks.planner.draft.as_ref()?.tasks.len();
+            (needed > snapshot.free_task_slots())
+                .then(|| crate::tasks::capacity_refusal(snapshot.tasks.len(), needed))
+        }) {
+            self.fail(tasks, refusal);
+            return Ok(None);
+        }
         let intent = tasks
             .prepare_command("/plan-save", &saved.model)?
             .ok_or("Plan save unavailable")?;
@@ -2004,6 +2035,12 @@ impl Autopilot {
                     format!("requeue-{}", head.id),
                     format!("/requeue {}", head.id),
                 )),
+                TaskStatus::Failed if snapshot.free_task_slots() == 0 => {
+                    // A repair is a task too: with none free it can never be proposed.
+                    let refusal = crate::tasks::capacity_refusal(snapshot.tasks.len(), 1);
+                    self.fail(tasks, refusal);
+                    return Ok(None);
+                }
                 TaskStatus::Failed => {
                     let reason =
                         clean(&format!("autopilot: {}", failure_detail(tasks, head)), 1800);
