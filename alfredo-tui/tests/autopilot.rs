@@ -4709,6 +4709,71 @@ fn a_slot_taken_after_go_started_still_ends_failed_before_any_planner_request() 
 }
 
 #[test]
+fn bare_go_accepts_an_open_draft_that_exactly_fits_the_free_slots() {
+    let fixture = Fixture::new();
+    pad_tasks(&fixture.store, 254);
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    open_draft(&mut control, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    // Two tasks, two free slots: the plan fits exactly and runs to the end.
+    autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 1)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "exact fit",
+        finished,
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Done, "{status:?}");
+    assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 256);
+}
+
+/// Only a task-limit refusal ends a run as failed; any other refusal of the autopilot's own
+/// command still pauses it, so `/resume` can retry once the cause is fixed.
+#[test]
+fn a_refusal_that_is_not_the_task_limit_still_pauses_the_run() {
+    let fixture = Fixture::new();
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .command(
+            &runtime,
+            &mut control,
+            "/go Make answer return 42 and add app",
+            "fixture",
+            1,
+        )
+        .unwrap();
+    // A scope gate that blocks dispatch: `/dispatch on` is refused with the gate's label.
+    control.scope_status.blocked = true;
+    control.scope_status.label = "Scope gate blocks dispatch".into();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !settled_or_paused(&autopilot, &control) {
+        control.poll();
+        if let Some(submission) = autopilot.tick(&runtime, &mut control) {
+            let _ = control.dispatch_prepared(&runtime, &submission.intent);
+        }
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(3));
+    }
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Paused, "{status:?}");
+    assert!(
+        autopilot.notice().contains("Scope gate blocks dispatch"),
+        "{}",
+        autopilot.notice()
+    );
+    assert!(autopilot.paused_run(&control).is_some());
+}
+
+#[test]
 fn bare_go_refuses_an_open_draft_that_does_not_fit_and_keeps_it() {
     let fixture = Fixture::new();
     let server = plan_server();

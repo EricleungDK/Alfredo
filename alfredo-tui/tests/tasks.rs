@@ -725,6 +725,22 @@ fn a_new_mission_escapes_the_task_limit_and_the_full_one_is_untouched() {
 }
 
 #[test]
+fn only_the_task_limit_refusals_read_as_capacity_refusals() {
+    use alfredo_tui::tasks::{capacity_refusal, is_capacity_refusal};
+    assert!(is_capacity_refusal(&capacity_refusal(256, 1)));
+    assert!(is_capacity_refusal(&capacity_refusal(254, 3)));
+    for other in [
+        "Task receipt capacity reached",
+        "Task storage capacity reached (4 MiB)",
+        "Command history capacity reached; start another conversation",
+        "Unknown task 3; the task panel lists ids",
+        "",
+    ] {
+        assert!(!is_capacity_refusal(other), "{other}");
+    }
+}
+
+#[test]
 fn propose_at_the_task_limit_names_the_limit_and_the_remedy() {
     let fixture = Fixture::new();
     let store = fixture.store("full");
