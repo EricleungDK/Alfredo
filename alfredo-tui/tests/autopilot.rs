@@ -4436,6 +4436,215 @@ fn go_refuses_repository_config_at_once_naming_the_key_and_the_fix() {
     }
 }
 
+/// Fill the store with proposed tasks through the store API (receipts must match).
+fn pad_tasks(store: &TaskStore, to: usize) {
+    let mut snapshot = store.snapshot().unwrap();
+    while snapshot.tasks.len() < to {
+        snapshot = store
+            .transact(Request {
+                correlation: format!("pad-{}", snapshot.revision),
+                expected_revision: snapshot.revision,
+                action: Action::Propose {
+                    title: "filler".into(),
+                    model: "fixture".into(),
+                    dependencies: vec![],
+                },
+            })
+            .unwrap()
+            .0;
+    }
+}
+
+fn control_on(store: &TaskStore, server: &Server, runtime: &Runtime) -> TaskControl {
+    let mut control = TaskControl::new(store.clone());
+    control.set_provider(server.provider());
+    control.refresh(runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while control.pending || control.scope_status.revision.is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(2));
+    }
+    control
+}
+
+/// Issue #696: at the 256-task limit nothing can be planned or saved, so `/go` and `/plan`
+/// refuse before any planner request with the limit and the way out, no run is recorded
+/// (nothing to `/resume`), and a new mission plans and dispatches again.
+#[test]
+fn go_at_task_capacity_refuses_before_planning_and_names_the_fix() {
+    let fixture = Fixture::new();
+    pad_tasks(&fixture.store, 256);
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    let go = autopilot
+        .command(
+            &runtime,
+            &mut control,
+            "/go Make answer return 42",
+            "fixture",
+            1,
+        )
+        .expect_err("/go must be refused at the limit");
+    let plan = control
+        .command(&runtime, "/plan Make answer return 42", "fixture")
+        .expect_err("/plan must be refused at the limit");
+    for error in [&go, &plan] {
+        assert!(error.contains("256"), "{error}");
+        assert!(error.contains("--new-mission NAME"), "{error}");
+        assert!(error.contains("Start New Mission"), "{error}");
+    }
+    assert_eq!(go, plan, "one sentence, whichever command was typed");
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(server.count(), 0, "a planner request was sent");
+    assert!(!autopilot.running());
+    assert!(autopilot.status(&control).is_none(), "no run was recorded");
+    let status = autopilot
+        .command(&runtime, &mut control, "/autopilot", "fixture", 1)
+        .unwrap_err();
+    assert!(!status.contains("paused"), "{status}");
+    assert!(autopilot.paused_run(&control).is_none());
+    assert!(autopilot
+        .command(&runtime, &mut control, "/resume", "fixture", 1)
+        .is_err());
+
+    // The remedy: a new mission has an empty task list, so `/go` plans and dispatches again.
+    let fresh = TaskStore::new(&fixture.root.join("state"), &fixture.workspace, "fresh").unwrap();
+    fresh.select_mission(true).unwrap();
+    let mut control = control_on(&fresh, &server, &runtime);
+    let mut autopilot =
+        Autopilot::open(&fresh.conversation_directory().unwrap(), "default").unwrap();
+    autopilot
+        .command(
+            &runtime,
+            &mut control,
+            "/go Make answer return 42 and add app",
+            "fixture",
+            1,
+        )
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "new mission",
+        finished,
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Done, "{status:?}");
+    assert_eq!((status.done, status.total), (2, 2));
+    assert!(planner_requests(&server) > 0);
+    assert_eq!(
+        fixture.store.snapshot().unwrap().tasks.len(),
+        256,
+        "the full mission is untouched"
+    );
+}
+
+fn settled_or_paused(autopilot: &Autopilot, control: &TaskControl) -> bool {
+    finished(autopilot, control)
+        || autopilot
+            .status(control)
+            .is_some_and(|status| status.state == RunState::Paused)
+}
+
+/// A capacity stop after the run began is final: `failed` (so `/resume` and
+/// `--resume --headless` are not offered), with the sentence naming limit and remedy.
+fn assert_failed_at_capacity(
+    autopilot: &mut Autopilot,
+    control: &mut TaskControl,
+    runtime: &Runtime,
+) {
+    let status = autopilot.status(control).unwrap();
+    assert_eq!(
+        status.state,
+        RunState::Failed,
+        "{status:?} {}",
+        autopilot.notice()
+    );
+    let report = autopilot.report().unwrap().to_string();
+    for expected in ["256", "--new-mission NAME", "Start New Mission"] {
+        assert!(report.contains(expected), "{report}");
+    }
+    assert!(!report.contains("no effect after"), "{report}");
+    assert!(!report.contains("/resume"), "{report}");
+    assert!(autopilot.paused_run(control).is_none());
+    assert!(autopilot.reentrant_run(control).is_none());
+    assert!(autopilot
+        .command(runtime, control, "/resume", "fixture", 1)
+        .is_err());
+}
+
+#[test]
+fn a_plan_that_cannot_fit_ends_failed_not_paused_and_never_offers_resume() {
+    let fixture = Fixture::new();
+    pad_tasks(&fixture.store, 255);
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .command(
+            &runtime,
+            &mut control,
+            "/go Make answer return 42 and add app",
+            "fixture",
+            1,
+        )
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "capacity stop",
+        settled_or_paused,
+    );
+    assert_failed_at_capacity(&mut autopilot, &mut control, &runtime);
+    let report = autopilot.report().unwrap().to_string();
+    assert!(
+        report.contains("2 task slots") && report.contains("1 free"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_repair_needed_at_the_task_limit_ends_failed_with_the_remedy() {
+    let fixture = Fixture::new();
+    pad_tasks(&fixture.store, 254);
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            two_task_plan()
+        } else if worker_prompt(request).starts_with("Implement this task: Make answer") {
+            bad_calc()
+        } else {
+            app()
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .command(
+            &runtime,
+            &mut control,
+            "/go Make answer return 42 and add app",
+            "fixture",
+            2,
+        )
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "repair at the limit",
+        settled_or_paused,
+    );
+    assert_failed_at_capacity(&mut autopilot, &mut control, &runtime);
+    assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 256);
+}
+
 /// Issue #470: `/go` start checks uncommitted changes, and a nested gitfile to a FIFO makes
 /// `git status` block forever. The start must return within its deadline, and its notice
 /// must name the timeout instead of hanging or reporting a clean tree.

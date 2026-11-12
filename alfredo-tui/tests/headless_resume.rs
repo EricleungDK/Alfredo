@@ -2,6 +2,7 @@
 //! stopped, without planning again; every other failed run stays "nothing to resume".
 mod ollama_fixture;
 
+use alfredo_tui::tasks::{Action, Request, TaskStore};
 use ollama_fixture::{done, Fixture, Reply};
 use serde_json::{json, Value};
 use std::{
@@ -305,5 +306,57 @@ fn resume_headless_after_any_other_failure_exits_2_nothing_to_resume() {
     );
     assert_eq!(planner_requests(&fixture), 1);
     assert_eq!(worker_requests(&fixture), before, "no task ran");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Issue #696: at the 256-task limit `--go` is a setup refusal before any planner request
+/// (exit 2, nothing on stdout, the limit and the way out on stderr) and leaves no paused
+/// run, so `--resume --headless` has nothing to resume.
+#[test]
+fn go_at_the_task_limit_is_refused_before_planning_and_leaves_nothing_to_resume() {
+    let root = repository("capacity");
+    let store = TaskStore::new(&root.join("state"), &root.join("workspace"), "default").unwrap();
+    let mut snapshot = store.snapshot().unwrap();
+    while snapshot.tasks.len() < 256 {
+        snapshot = store
+            .transact(Request {
+                correlation: format!("pad-{}", snapshot.revision),
+                expected_revision: snapshot.revision,
+                action: Action::Propose {
+                    title: "filler".into(),
+                    model: "fixture".into(),
+                    dependencies: vec![],
+                },
+            })
+            .unwrap()
+            .0;
+    }
+    let fixture = server(&Arc::new(AtomicU8::new(ANSWER)));
+    let output = go(&root, &fixture, &["--headless"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(
+        output.stdout.is_empty(),
+        "setup errors print nothing on stdout"
+    );
+    for expected in [
+        "--go refused",
+        "256",
+        "--new-mission NAME",
+        "Start New Mission",
+    ] {
+        assert!(err.contains(expected), "{expected}: {err}");
+    }
+    assert!(!err.contains("no effect after"), "{err}");
+    assert_eq!(planner_requests(&fixture), 0, "a planner request was sent");
+    assert_eq!(worker_requests(&fixture), 0);
+    let output = go(&root, &fixture, &["--resume", "--headless"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("nothing to resume"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(planner_requests(&fixture), 0);
     let _ = fs::remove_dir_all(&root);
 }
