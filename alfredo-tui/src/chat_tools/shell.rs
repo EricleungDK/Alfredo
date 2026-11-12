@@ -762,9 +762,174 @@ fn report(plan: &Plan, ran: Ran, hidden: usize) -> Result<String, String> {
     }
 }
 
+const STDOUT_MARK: &str = "\nstdout:\n";
+const STDERR_MARK: &str = "\nstderr:\n";
+
+/// `text` cut to `budget` bytes, keeping its end, with a marker line in front when cut.
+fn keep_end(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let marker = format!("[\u{2026} {} earlier bytes cut]\n", text.len());
+    let room = budget.saturating_sub(marker.len());
+    let mut start = text.len() - room;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let marker = format!("[\u{2026} {start} earlier bytes cut]\n");
+    format!("{marker}{}", &text[start..])
+}
+
+/// `text` cut to `budget` bytes, keeping its start, with a marker line after when cut.
+fn keep_start(text: &str, budget: usize) -> String {
+    const MARKER: &str = "\n[\u{2026} rest cut]";
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let mut end = budget.saturating_sub(MARKER.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{MARKER}", &text[..end])
+}
+
+/// Fit a [`report`] into `limit` bytes (issue #692). A tight chat budget used to cut the
+/// report's front, dropping stderr and the end of stdout, which is where a failure shows.
+/// This keeps the exit-code header, then splits what is left between the stderr and
+/// stdout tails (stderr first, at least a third of the room), each marked when cut.
+/// Text that is not a report is cut by the ordinary [`super::cap_to`].
+pub(crate) fn fit(result: String, limit: usize) -> String {
+    let limit = limit.min(super::MAX_OUTPUT);
+    if result.len() <= limit {
+        return result;
+    }
+    let Some(out_at) = result.find(STDOUT_MARK) else {
+        return super::cap_to(result, limit);
+    };
+    let body = out_at + STDOUT_MARK.len();
+    let Some(err_at) = result[body..].rfind(STDERR_MARK).map(|at| at + body) else {
+        return super::cap_to(result, limit);
+    };
+    let header = keep_start(&result[..out_at], limit / 2);
+    let stdout = &result[body..err_at];
+    let stderr = &result[err_at + STDERR_MARK.len()..];
+    let room = limit.saturating_sub(header.len() + STDOUT_MARK.len() + STDERR_MARK.len());
+    let err_share = stderr
+        .len()
+        .min((room / 3).max(room.saturating_sub(stdout.len())));
+    format!(
+        "{header}{STDOUT_MARK}{}{STDERR_MARK}{}",
+        keep_end(stdout, room - err_share),
+        keep_end(stderr, err_share)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample(header: &str, line: &str, out_lines: usize, err: &str) -> String {
+        let out: String = (0..out_lines)
+            .map(|i| format!("{line} {i}\n"))
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        format!("{header}\nstdout:\n{out}\nstderr:\n{err}")
+    }
+
+    #[test]
+    fn fit_returns_a_result_that_fits_unchanged() {
+        let text = sample("exit code 1 \u{b7} sandboxed", "line", 5, "boom");
+        assert_eq!(fit(text.clone(), text.len()), text);
+        assert_eq!(fit(text.clone(), 10_000), text);
+    }
+
+    #[test]
+    fn fit_keeps_header_stderr_and_the_last_stdout_line_with_markers() {
+        let text = sample(
+            "exit code 1 \u{b7} sandboxed",
+            "progress line",
+            600,
+            "ERROR: real",
+        );
+        let fitted = fit(text.clone(), 1500);
+        assert!(fitted.len() <= 1500, "{}", fitted.len());
+        assert!(
+            fitted.starts_with("exit code 1 \u{b7} sandboxed\nstdout:\n"),
+            "{fitted}"
+        );
+        assert!(fitted.ends_with("\nstderr:\nERROR: real"), "{fitted}");
+        assert!(fitted.contains("progress line 599"), "{fitted}");
+        assert!(fitted.contains("earlier bytes cut]"), "{fitted}");
+        assert!(!fitted.contains("progress line 0\n"), "{fitted}");
+    }
+
+    #[test]
+    fn fit_marks_a_cut_stderr_and_gives_it_a_third_of_the_room() {
+        let err = "e".repeat(5000);
+        let text = sample("exit code 1", "out", 2000, &err);
+        let fitted = fit(text, 900);
+        let (out, err) = fitted.split_once("\nstderr:\n").unwrap();
+        assert!(fitted.len() <= 900, "{}", fitted.len());
+        assert!(
+            err.starts_with("[\u{2026} ") && err.contains(" earlier bytes cut]\n"),
+            "{err}"
+        );
+        assert!(
+            err.len() >= 200,
+            "stderr keeps about a third: {}",
+            err.len()
+        );
+        assert!(out.contains("earlier bytes cut]"), "{out}");
+        assert!(out.ends_with("out 1999"), "{out}");
+    }
+
+    #[test]
+    fn fit_never_cuts_inside_a_character() {
+        for limit in 256..700 {
+            let text = sample(
+                "exit code 2",
+                "\u{e9}\u{e9}\u{e9} \u{4e2d}\u{6587}",
+                400,
+                &"\u{e9}".repeat(900),
+            );
+            let fitted = fit(text, limit);
+            assert!(fitted.len() <= limit, "{limit}: {}", fitted.len());
+            assert!(fitted.contains("earlier bytes cut]"), "{limit}");
+        }
+    }
+
+    #[test]
+    fn fit_keeps_the_timeout_and_cancel_headers() {
+        for header in [
+            "error: timed out after 7s (host); the command and its child processes were killed",
+            "cancelled (sandboxed); the command and its child processes were killed",
+        ] {
+            let text = sample(header, "tick", 800, "last words");
+            let fitted = fit(text, 400);
+            assert!(fitted.len() <= 400, "{}", fitted.len());
+            assert!(fitted.starts_with(header), "{fitted}");
+            assert!(fitted.contains("tick 799"), "{fitted}");
+            assert!(fitted.ends_with("last words"), "{fitted}");
+        }
+    }
+
+    #[test]
+    fn fit_cuts_an_oversized_header_with_a_marker_and_keeps_the_sections() {
+        let header = format!("exit code 1\n{}", "n".repeat(2000));
+        let text = sample(&header, "x", 300, "bad");
+        let fitted = fit(text, 600);
+        assert!(fitted.len() <= 600, "{}", fitted.len());
+        assert!(fitted.starts_with("exit code 1\n"), "{fitted}");
+        assert!(fitted.contains("[\u{2026} rest cut]"), "{fitted}");
+        assert!(fitted.ends_with("\nstderr:\nbad"), "{fitted}");
+    }
+
+    #[test]
+    fn fit_falls_back_to_the_plain_cap_for_text_without_sections() {
+        let text = "error: nope ".repeat(200);
+        assert_eq!(fit(text.clone(), 300), crate::chat_tools::cap_to(text, 300));
+    }
 
     #[test]
     fn a_missing_bubblewrap_suggests_escalation_and_runs_nothing() {

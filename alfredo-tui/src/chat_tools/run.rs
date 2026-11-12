@@ -311,7 +311,12 @@ pub async fn run_turn_limited(
                             &sender,
                         )
                         .await;
-                        cap_to(result, room.limit.max(MIN_RESULT))
+                        let limit = room.limit.max(MIN_RESULT);
+                        if call.name == "run_command" {
+                            super::shell::fit(result, limit)
+                        } else {
+                            cap_to(result, limit)
+                        }
                     }
                 },
                 _ if read_spent >= round_limit => ROUND_LIMIT_NOTE.to_string(),
