@@ -37,18 +37,18 @@ pub fn capacity_refusal(used: usize, needed: usize) -> String {
     let free = MAX_TASKS.saturating_sub(used);
     if needed <= 1 {
         format!(
-            "Task limit reached: this mission has {used} of {MAX_TASKS} tasks and finished tasks are never reclaimed; {NEW_MISSION} to keep planning"
+            "Task capacity reached: this mission has {used} of {MAX_TASKS} tasks and finished tasks are never reclaimed; {NEW_MISSION} to keep planning"
         )
     } else {
         format!(
-            "Task limit reached: this plan needs {needed} task slots but only {free} free ({used} of {MAX_TASKS} used); {NEW_MISSION} to keep planning"
+            "Task capacity reached: this plan needs {needed} task slots but only {free} free ({used} of {MAX_TASKS} used); {NEW_MISSION} to keep planning"
         )
     }
 }
 
 /// Whether `text` is a task-limit refusal (a stop that retrying can never fix).
 pub fn is_capacity_refusal(text: &str) -> bool {
-    text.contains("Task limit reached: ")
+    text.contains("Task capacity reached: ")
 }
 
 pub fn unknown_task(task: u64) -> String {

@@ -905,7 +905,7 @@ A mission holds at most 256 tasks: plan tasks and repairs both count, and finish
 are never reclaimed. At 205 tasks (80%) the first command that reaches it adds the notice
 `Task list 80% full (205/256); start a new mission before it fills`, once per terminal.
 At the limit `/go`, `/plan` and `--go GOAL --headless` refuse before any planner request
-with `Task limit reached: this mission has 256 of 256 tasks …; start a new mission
+with `Task capacity reached: this mission has 256 of 256 tasks …; start a new mission
 (alfredo-tui --new-mission NAME, or Start New Mission in the mission picker) to keep
 planning`; headless exits 2 with nothing on stdout and starts no run, so `--resume
 --headless` has nothing to resume (`--headless` always opens the default mission, so
