@@ -297,15 +297,34 @@ pub(crate) fn open_confined(
     workspace: &Path,
     resolved: &Path,
 ) -> Result<(std::fs::File, u64), String> {
+    let file = open_nonblocking(resolved).map_err(open_error)?;
+    confine_opened(workspace, file)
+}
+
+/// Opens `resolved` for reading without following a symlink as the last component and
+/// without waiting for a writer (a FIFO opens at once and is then refused by
+/// [`confine_opened`]).
+#[cfg(unix)]
+fn open_nonblocking(resolved: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
         .open(resolved)
-        .map_err(|error| match error.raw_os_error() {
-            Some(libc::ELOOP) => "became a symbolic link after the workspace check; refused".into(),
-            _ => error.to_string(),
-        })?;
+}
+
+#[cfg(unix)]
+fn open_error(error: std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(libc::ELOOP) => "became a symbolic link after the workspace check; refused".into(),
+        _ => error.to_string(),
+    }
+}
+
+/// The checks every confined open makes once the handle exists: a regular file whose
+/// location is inside the workspace (see [`confined_handle`]).
+#[cfg(unix)]
+fn confine_opened(workspace: &Path, file: std::fs::File) -> Result<(std::fs::File, u64), String> {
     let metadata = file.metadata().map_err(|error| error.to_string())?;
     if !metadata.is_file() {
         return Err("not a regular file".into());
@@ -384,7 +403,27 @@ pub(crate) fn display(root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod cap_tests {
-    use super::cap_to;
+    use super::{cap_to, open_confined};
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_reached_after_the_check_is_refused_by_name() {
+        // A target that becomes a symlink between resolve and open is refused with the
+        // symlink message (issue #689), not the raw OS error.
+        let root = std::env::temp_dir().join(format!("alfredo-689-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("real.txt"), "x\n").unwrap();
+        std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).unwrap();
+        let error = open_confined(&root, &root.join("link.txt")).err();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("became a symbolic link after the workspace check")),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn budgeted_cut_keeps_the_body_of_a_header_plus_one_long_line() {
