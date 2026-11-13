@@ -411,6 +411,25 @@ class ChatTools(unittest.TestCase):
         self.assertNotIn('SLOW_REPLY_MARKER', self.terminal.screen())
         self.assertIn('cancelled', self.terminal.screen())
 
+    def test_slash_stop_keeps_queued_text_in_the_prompt_and_history_holds_only_stop(self):
+        # Issue #721: /stop matches Esc: queued text returns to the prompt, never lost.
+        self.terminal.write(b'slow one\r')
+        self.terminal.wait_for('waiting for model')
+        self.terminal.write(b'queued follow up\r')
+        self.terminal.wait_for('queued')
+        self.type_stop()
+        self.terminal.wait_for('queued text is back in the prompt')
+        self.terminal.wait_for('Chat turn cancelled')
+        self.assertIn('queued follow up', self.terminal.screen())
+        self.assertNotIn('queued follow up\n/stop', self.terminal.screen())
+        time.sleep(3)
+        self.assertNotIn('SLOW_REPLY_MARKER', self.terminal.screen())
+        self.terminal.write(b'\x15')  # Ctrl+U clears the restored text
+        time.sleep(0.5)
+        self.terminal.write(b'\x1b[A')  # Up: the last submission is just /stop
+        self.terminal.wait_for('│ /stop')
+        self.assertNotIn('queued follow up\n', self.terminal.screen().split('Prompt')[-1])
+
     def test_slash_stop_in_an_idle_chat_still_says_no_active_autopilot(self):
         self.type_stop()
         self.terminal.wait_for('No active autopilot')

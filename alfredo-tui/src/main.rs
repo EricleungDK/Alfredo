@@ -1779,7 +1779,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             // running run_command); idle chat is left untouched.
                             let chat_cancelled =
                                 text == "/stop" && work.app.sessions[index].status.active();
+                            let held = !work.app.sessions[index].queued_messages().is_empty();
                             if chat_cancelled {
+                                // Record only "/stop" and empty the prompt first, so the queued
+                                // text the cancel returns to the prompt is kept, as with Esc.
+                                work.app.sessions[index].remember_submission();
+                                work.app.sessions[index].clear_draft();
                                 at_lookup.cancel();
                                 command_staging::cancel_chat_turn(
                                     &mut work.app,
@@ -1796,12 +1801,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 max_repairs,
                             ) {
                                 Ok(notice) => {
-                                    work.app.sessions[index].remember_submission();
-                                    work.app.sessions[index].clear_draft();
+                                    if !chat_cancelled {
+                                        work.app.sessions[index].remember_submission();
+                                        work.app.sessions[index].clear_draft();
+                                    }
                                     work.app.notice = alfredo_tui::autopilot::stop_notice(
                                         &notice,
                                         chat_cancelled,
                                     );
+                                    if chat_cancelled && held {
+                                        work.app.notice.push_str(
+                                            " · queued text is back in the prompt; nothing was sent",
+                                        );
+                                    }
                                     if text.split_whitespace().next() == Some("/go") {
                                         work.app.append_history_warning(index);
                                         // Autopilot work is watched on the dashboard.
@@ -1822,7 +1834,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         work.app.notice = error;
                                     }
-                                    work.app.sessions[index].reject_draft();
+                                    if !chat_cancelled {
+                                        work.app.sessions[index].reject_draft();
+                                    }
                                 }
                             }
                         }
