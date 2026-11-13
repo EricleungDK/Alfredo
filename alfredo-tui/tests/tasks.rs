@@ -804,7 +804,7 @@ const EIGHTY_PERCENT_ROW: &str =
     "Task list 80% full (205/256); start a new mission before it fills";
 
 #[test]
-fn task_list_warns_at_eighty_percent_as_one_chat_row_not_a_notice() {
+fn task_list_warns_at_eighty_percent() {
     let fixture = Fixture::new();
     let store = fixture.store("filling");
     pad_tasks(&store, 203);

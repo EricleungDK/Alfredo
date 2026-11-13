@@ -3679,56 +3679,6 @@ mod host_git_tests {
         assert_eq!(super::config_refusal_view("Unknown task 9"), None);
     }
 
-    #[test]
-    fn capacity_refusal_view_keeps_the_whole_remedy_in_the_row_and_the_footer_short() {
-        for command in ["/go", "/plan", "/plan-revise", "/architect-revise"] {
-            let message = crate::tasks::capacity_refusal(256, 1);
-            let (notice, rows) = super::capacity_refusal_view(&message, command).expect(command);
-            assert_eq!(
-                notice,
-                format!("{command} refused: task limit reached (see the chat rows above)")
-            );
-            assert!(notice.chars().count() <= 78, "{notice}");
-            assert_eq!(rows, vec![format!("✗ Not started · {message}")]);
-            assert!(rows[0].contains("--new-mission NAME"), "{rows:?}");
-            assert!(rows[0].contains("Start New Mission"), "{rows:?}");
-        }
-    }
-
-    #[test]
-    fn capacity_refusal_view_for_a_draft_that_does_not_fit_names_slots_needed_and_free() {
-        let message = crate::tasks::capacity_refusal(250, 10);
-        let (_, rows) = super::capacity_refusal_view(&message, "/go").expect("capacity");
-        assert!(
-            rows[0].contains("this plan needs 10 task slots but only 6 free (250 of 256 used)"),
-            "{rows:?}"
-        );
-    }
-
-    #[test]
-    fn capacity_refusal_view_ignores_every_other_message() {
-        for other in [
-            "Unknown task 9",
-            "Task capacity reached",
-            "Usage: /go GOAL",
-            "Task list 80% full (205/256); start a new mission before it fills",
-            "",
-        ] {
-            assert_eq!(super::capacity_refusal_view(other, "/go"), None, "{other}");
-            assert_eq!(super::refusal_view(other, "/go"), None, "{other}");
-        }
-    }
-
-    #[test]
-    fn refusal_view_serves_the_capacity_refusal() {
-        let message = crate::tasks::capacity_refusal(256, 1);
-        assert_eq!(
-            super::refusal_view(&message, "/plan"),
-            super::capacity_refusal_view(&message, "/plan")
-        );
-        assert!(super::refusal_view(&message, "/plan").is_some());
-    }
-
     /// Issue #525: the refusal shows each key as git documents it (config lists them
     /// lowercased), the reason, and the exact fix; an odd key is quoted for the shell.
     #[test]

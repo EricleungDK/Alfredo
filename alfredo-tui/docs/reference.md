@@ -902,16 +902,17 @@ in the same namespace. Legacy
 approvals acquire no implicit permissions.
 
 A mission holds at most 256 tasks: plan tasks and repairs both count, and finished tasks
-are never reclaimed. At 205 tasks (80%) the first time a refresh sees 205 or more tasks it adds the chat row
-`Task list 80% full (205/256); start a new mission before it fills`, once per terminal
+are never reclaimed. At 205 tasks (80%) the first time a refresh sees 205 or more tasks it adds the
+chat row `Task list 80% full (205/256); start a new mission before it fills`, once per terminal
 (a chat row, not a footer notice, so a restored-session notice cannot hide it).
 At the limit `/go`, `/plan` and `--go GOAL --headless` refuse before any planner request
 with `Task capacity reached: this mission has 256 of 256 tasks …; start a new mission
 (alfredo-tui --new-mission NAME, or Start New Mission in the mission picker) to keep
 planning`. In the terminal the whole sentence is a chat row (`✗ Not started · …`) and the
 footer is a short pointer such as `/go refused: task limit reached (see the chat rows
-above)`; the same holds for `/plan`, `/plan-revise` and `/architect-revise`. Headless exits 2 with nothing on stdout and starts no run, so `--resume
---headless` has nothing to resume (`--headless` always opens the default mission, so
+above)`; the same holds for `/plan`, `/plan-revise` and `/architect-revise`. Headless
+exits 2 with nothing on stdout and starts no run, so `--resume --headless` has nothing
+to resume (`--headless` always opens the default mission, so
 start the new mission in the terminal). A plan that does not fit says how many slots it
 needs and how many are free. If the limit is reached while a `/go` run is under way
 (the plan does not fit, or a repair is needed), the run ends `failed` with the same

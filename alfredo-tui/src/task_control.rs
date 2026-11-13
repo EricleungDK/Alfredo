@@ -802,10 +802,10 @@ impl TaskControl {
                     if let Some(warning) =
                         self.snapshot.as_ref().and_then(Snapshot::task_list_warning)
                     {
-                        self.capacity_warned = true;
                         // A chat row, not the footer: the app notice is drawn first and
                         // a sticky one would hide this for the rest of the session (#699).
-                        self.queue_chat_row(warning);
+                        // Marked warned only once queued, so a full queue retries.
+                        self.capacity_warned = self.queue_chat_row(warning);
                     }
                 }
             }
@@ -1488,14 +1488,18 @@ impl TaskControl {
     fn queue_dispatch_off_row(&mut self, notice: &str) {
         // Bounded: if the main loop has not drained four rows, the newest is dropped
         // rather than growing the queue without limit.
-        self.queue_chat_row(format!("{notice}\nResume with /dispatch on"));
+        if !self.queue_chat_row(format!("{notice}\nResume with /dispatch on")) {
+            // Dropped on purpose: see the bound above.
+        }
     }
 
     /// Queue a display-only row for the chat transcript, taken by the main loop.
-    fn queue_chat_row(&mut self, row: String) {
+    fn queue_chat_row(&mut self, row: String) -> bool {
         if self.dispatch_off_rows.len() < 4 {
             self.dispatch_off_rows.push(row);
+            return true;
         }
+        false
     }
 
     pub fn take_control_events(&mut self) -> Vec<crate::control_command::Event> {

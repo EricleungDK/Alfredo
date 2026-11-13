@@ -5317,6 +5317,65 @@ fn only_task_capacity_refusals_get_the_capacity_view() {
     }
 }
 
+#[test]
+fn capacity_refusal_view_keeps_the_whole_remedy_in_the_row_and_the_footer_short() {
+    for command in ["/go", "/plan", "/plan-revise", "/architect-revise"] {
+        let message = alfredo_tui::tasks::capacity_refusal(256, 1);
+        let (notice, rows) =
+            alfredo_tui::worker::capacity_refusal_view(&message, command).expect(command);
+        assert_eq!(
+            notice,
+            format!("{command} refused: task limit reached (see the chat rows above)")
+        );
+        assert!(notice.chars().count() <= 78, "{notice}");
+        assert_eq!(rows, vec![format!("✗ Not started · {message}")]);
+        assert!(rows[0].contains("--new-mission NAME"), "{rows:?}");
+        assert!(rows[0].contains("Start New Mission"), "{rows:?}");
+    }
+}
+
+#[test]
+fn capacity_refusal_view_for_a_draft_that_does_not_fit_names_slots_needed_and_free() {
+    let message = alfredo_tui::tasks::capacity_refusal(250, 10);
+    let (_, rows) = alfredo_tui::worker::capacity_refusal_view(&message, "/go").expect("capacity");
+    assert!(
+        rows[0].contains("this plan needs 10 task slots but only 6 free (250 of 256 used)"),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn capacity_refusal_view_ignores_every_other_message() {
+    for other in [
+        "Unknown task 9",
+        "Task capacity reached",
+        "Usage: /go GOAL",
+        "Task list 80% full (205/256); start a new mission before it fills",
+        "",
+    ] {
+        assert_eq!(
+            alfredo_tui::worker::capacity_refusal_view(other, "/go"),
+            None,
+            "{other}"
+        );
+        assert_eq!(
+            alfredo_tui::worker::refusal_view(other, "/go"),
+            None,
+            "{other}"
+        );
+    }
+}
+
+#[test]
+fn refusal_view_serves_the_capacity_refusal() {
+    let message = alfredo_tui::tasks::capacity_refusal(256, 1);
+    assert_eq!(
+        alfredo_tui::worker::refusal_view(&message, "/plan"),
+        alfredo_tui::worker::capacity_refusal_view(&message, "/plan")
+    );
+    assert!(alfredo_tui::worker::refusal_view(&message, "/plan").is_some());
+}
+
 /// An autopilot that is planning its first goal, so every `/go` is refused as active.
 fn active_refusal_for(first_goal: &str, command: &str) -> String {
     let fixture = Fixture::new();
