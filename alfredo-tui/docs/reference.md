@@ -218,7 +218,10 @@ wrote is never confirmed for you: `/go` asks you to review it first.
 
 `alfredo-tui --go GOAL --headless` runs the same autopilot without a terminal (stdin
 and stdout may be pipes), for CI, cron or another tool. It opens the repository's
-default mission like the automatic TUI start. Each autopilot state change prints one
+default mission like the automatic TUI start; `--mission NAME` opens an existing mission
+instead and `--new-mission NAME` creates one, with `--go`, `--resume` and `--chat`
+(`--resume --mission NAME` continues the paused run of that mission; a `--mission`
+name that does not exist exits 2 with `use --new-mission NAME to create it`). Each autopilot state change prints one
 line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`; a repair
 names its trigger: `check failed`, `no files changed` or `worker failed`;
 `done 2/2 alfredo/go-ab12`). On exit stdout carries exactly one JSON object:
@@ -229,7 +232,7 @@ planner, worker and repair calls summed from the server's `prompt_eval_count`, `
 and `total_duration` (`model_seconds` is that duration in seconds, not client wall-clock time).
 A field the server never reported is `null`; the object is always present. Exit codes: 0 every task
 accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
-without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, no
+without `--go`, with `--select` or `--doctor`, no repository, no
 sandbox, Ollama unreachable, model not installed; these print `Error: …` on stderr and
 nothing on stdout, checked before planning with the `--doctor` model checks). A failed
 task that ends with its repair budget spent (or a failed worker) adds `last_failure`, the same bounded one-line
@@ -921,8 +924,8 @@ planning`. In the terminal the whole sentence is a chat row (`✗ Not started ·
 footer is a short pointer such as `/go refused: task limit reached (see the chat rows
 above)`; the same holds for `/plan`, `/plan-revise` and `/architect-revise`. Headless
 exits 2 with nothing on stdout and starts no run, so `--resume --headless` has nothing
-to resume (`--headless` always opens the default mission, so
-start the new mission in the terminal). A plan that does not fit says how many slots it
+to resume; for `--headless` the refusal names the form it accepts
+(`add --new-mission NAME to this --headless command`). A plan that does not fit says how many slots it
 needs and how many are free. If the limit is reached while a `/go` run is under way
 (the plan does not fit, or a repair is needed), the run ends `failed` with the same
 sentence instead of pausing, because `/resume` could not succeed. The full mission stays

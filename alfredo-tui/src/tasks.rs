@@ -27,9 +27,17 @@ fn after_write(wrote: bool, reason: String) -> Refusal {
 }
 
 /// The way out of a full task list: the limit is per mission, so a new mission starts empty.
-/// `--headless` always opens the default mission, so this needs the terminal.
 const NEW_MISSION: &str =
     "start a new mission (alfredo-tui --new-mission NAME, or Start New Mission in the mission picker)";
+
+/// The same way out for `--headless`, which has no mission picker but takes `--new-mission`.
+const HEADLESS_NEW_MISSION: &str =
+    "start a new mission (add --new-mission NAME to this --headless command)";
+
+/// A capacity refusal worded for `--headless`; any other text is returned unchanged.
+pub fn headless_capacity_wording(text: &str) -> String {
+    text.replace(NEW_MISSION, HEADLESS_NEW_MISSION)
+}
 
 /// The one refusal for a task list that cannot take `needed` more tasks (used for every
 /// capacity check, before and after any planner request).
