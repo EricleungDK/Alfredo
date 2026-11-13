@@ -201,3 +201,23 @@ fn help_agents_line_says_ctrl_o_expands_instruction_and_each_files_code() {
         "{agents}"
     );
 }
+
+#[test]
+fn help_headless_entry_says_it_opens_the_default_or_named_mission() {
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    let entry = help
+        .split("--headless (with --go GOAL)")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no --headless entry in help: {help}"));
+    let entry = entry.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        entry.contains(
+            "Opens the repository's default mission, or the one --mission NAME / --new-mission NAME names."
+        ),
+        "{entry}"
+    );
+}
