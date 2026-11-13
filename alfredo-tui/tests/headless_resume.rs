@@ -491,3 +491,26 @@ fn the_headless_capacity_refusal_names_new_mission_in_a_form_headless_accepts() 
     assert!(!err.contains("mission picker"), "{err}");
     let _ = fs::remove_dir_all(&root);
 }
+
+/// `--select` and `--doctor` are terminal-only: each is refused on its own beside a
+/// goal or `--resume`, so neither operand of the refusal can be dropped.
+#[test]
+fn headless_refuses_select_and_doctor_with_exit_2_whatever_else_is_given() {
+    let root = repository("select-doctor");
+    let fixture = server(&Arc::new(AtomicU8::new(ANSWER)));
+    let cases: [&[&str]; 4] = [
+        &["--headless", "--select"],
+        &["--headless", "--doctor"],
+        &["--headless", "--resume", "--select"],
+        &["--headless", "--resume", "--doctor"],
+    ];
+    for extra in cases {
+        let output = go(&root, &fixture, extra);
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{extra:?}: {err}");
+        assert!(err.contains("omit --select and --doctor"), "{extra:?}: {err}");
+        assert!(output.stdout.is_empty(), "{extra:?}: no run output");
+    }
+    assert_eq!(planner_requests(&fixture), 0, "refused before planning");
+    let _ = fs::remove_dir_all(&root);
+}
