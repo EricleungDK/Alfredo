@@ -298,7 +298,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "--version" | "-V" => {
-                println!("alfredo-tui {}", env!("CARGO_PKG_VERSION"));
+                out(format_args!("alfredo-tui {}", env!("CARGO_PKG_VERSION")));
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
@@ -351,7 +351,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             let report = alfredo_tui::qualification::read(&path)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
-            println!("{}", report.summary());
+            out(format_args!("{}", report.summary()));
             return Ok(());
         }
         if parallel_models_explicit && parallel_models != 1 {
@@ -369,12 +369,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             structured_thinking,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ))?;
-        println!(
+        out(format_args!(
             "{}\nReport: {}\nRetained artifacts: {}",
             report.summary(),
             path.display(),
             report.manifest.artifact_directory.display()
-        );
+        ));
         if !report.finished {
             std::process::exit(2);
         }
@@ -407,7 +407,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model_explicit,
             &provider,
         ));
-        println!("{}", report.text);
+        out(format_args!("{}", report.text));
         drop(runtime);
         if !report.passed {
             std::process::exit(2);
@@ -2615,7 +2615,23 @@ const HELP_LINES: &[&str] = &[
 ];
 
 fn print_help() {
-    println!("{}", HELP_LINES.join("\n"));
+    out(format_args!("{}", HELP_LINES.join("\n")));
+}
+
+/// Writes one line of top-level CLI output to stdout. A reader that went away
+/// (`alfredo-tui --help | head`) is the normal Unix way to stop early: exit 0 quietly
+/// instead of the panic `println!` raises on `EPIPE`. Any other write error is reported
+/// on stderr with status 1. Scoped to these print sites: SIGPIPE stays ignored process-wide.
+fn out(line: std::fmt::Arguments) {
+    use io::Write;
+    let mut stdout = io::stdout().lock();
+    if let Err(error) = writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        eprintln!("Error: cannot write to stdout: {error}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
