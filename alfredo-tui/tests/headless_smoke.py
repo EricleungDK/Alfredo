@@ -81,10 +81,12 @@ class HeadlessSmoke(unittest.TestCase):
         code, out, err = self.run_headless('--headless')
         self.assertEqual(code, 0, err)
         result = self.result(out)
-        self.assertEqual(set(result), {'model', 'state', 'goal', 'branch', 'accepted', 'total', 'repairs', 'failed', 'usage'})
+        self.assertEqual(set(result), {'model', 'state', 'goal', 'branch', 'accepted', 'total', 'repairs', 'failed', 'usage', 'changes'})
         self.assertEqual((result['state'], result['goal'], result['accepted'], result['total'],
                           result['repairs'], result['failed']), ('done', GOAL, 2, 2, 1, []))
         self.assertRegex(result['branch'], r'^alfredo/go-')
+        # Issue #708: calc.py changes one line and app.py is new (five lines).
+        self.assertEqual(result['changes'], {'files': 2, 'added': 6, 'deleted': 1})
         # The fake server reports no counts: every field is null, the object stays.
         self.assertEqual(result['usage'], {'prompt_tokens': None, 'completion_tokens': None, 'model_seconds': None})
         lines = err.splitlines()
@@ -108,7 +110,7 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual(last['type'], 'result')
         self.assertEqual([e['type'] for e in events].count('result'), 1)
         content = {k: v for k, v in last.items() if k not in ('v', 'type')}
-        self.assertEqual(set(content), {'model', 'state', 'goal', 'branch', 'accepted', 'total', 'repairs', 'failed', 'usage'})
+        self.assertEqual(set(content), {'model', 'state', 'goal', 'branch', 'accepted', 'total', 'repairs', 'failed', 'usage', 'changes'})
         self.assertEqual((content['state'], content['goal'], content['accepted'], content['total'],
                           content['repairs'], content['failed']), ('done', GOAL, 2, 2, 1, []))
         started = [e['id'] for e in events if e['type'] == 'task_started']
@@ -146,6 +148,7 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual((result['state'], result['accepted'], result['total'], result['failed']), ('done', 1, 1, []))
         self.assertNotIn('canonical managed run', process.stderr)
         self.assertEqual(self.git('show', f"{result['branch']}:calc.py"), 'def answer():\n    return 42')
+        self.assertEqual(result['changes'], {'files': 1, 'added': 1, 'deleted': 1})
 
     def outside_cwd(self):
         cwd = self.workspace.parent / 'elsewhere'
