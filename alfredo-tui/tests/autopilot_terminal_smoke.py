@@ -589,6 +589,33 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertEqual(self.git('status', '--porcelain'), '')
         self.quit(terminal)
 
+    def test_repair_after_a_context_too_small_stop_and_a_larger_num_ctx_builds_the_branch(self):
+        # Issue #706: the stop is re-entrant like the unreachable one above.
+        (self.workspace / 'calc.py').write_text('def answer():\n    return 0\n' + 'x = 1\n' * 6200)
+        self.git('add', '.')
+        self.git('-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', 'commit', '-qm', 'large calc')
+        self.fixture.release_app.set()
+        head = self.git('rev-parse', 'HEAD')
+        terminal = self.terminal(resume=False, env={'ALFREDO_NUM_CTX': '4096'})
+        terminal.send('/go make answer return 42\r')
+        self.screen_has(terminal, 'Autopilot ✗ failed', 90)
+        self.screen_has(terminal, 'Raise --num-ctx, then /repair 1 retry')
+        self.assertEqual(self.fixture.markers(), ['PLAN'], 'the worker prompt is never sent')
+        self.quit(terminal)
+
+        terminal = self.terminal(resume=True, env={'ALFREDO_NUM_CTX': '65536'})
+        terminal.send('/repair 1 retry\r')
+        self.screen_has(terminal, 'git switch alfredo/go-', 90)
+        self.assertEqual(self.fixture.markers(), ['PLAN', 'REPAIR', 'APP'])
+        self.assertEqual(self.statuses(), [(1, 'failed', None), (2, 'accepted', None), (3, 'accepted', 1)])
+        self.screen_has(terminal, 'Autopilot ✓ done   2/2')
+        branches = self.git('for-each-ref', '--format=%(refname:short)', 'refs/heads/alfredo/').split()
+        self.assertEqual(len(branches), 1, branches)
+        self.assertEqual(self.git('show', f'{branches[0]}:calc.py'), 'def answer():\n    return 42')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+        self.quit(terminal)
+
     def test_failed_summary_shows_the_cause_and_a_next_step_when_the_model_writes_prose(self):
         self.fixture.prose_worker = True
         terminal = self.terminal(resume=False)

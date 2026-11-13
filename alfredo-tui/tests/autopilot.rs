@@ -1755,6 +1755,150 @@ fn num_ctx_too_small_stops_cleanly_with_no_repair_budget() {
     num_ctx_too_small(0);
 }
 
+/// Issue #706: task control for `fixture` whose requests carry `--num-ctx num_ctx`.
+fn control_at_num_ctx(
+    fixture: &Fixture,
+    server: &Server,
+    runtime: &Runtime,
+    num_ctx: u32,
+) -> TaskControl {
+    let mut control = control(fixture, server, runtime);
+    control.set_provider(server.provider().with_num_ctx(Some(num_ctx)));
+    control
+}
+
+/// Issue #706: the two-task plan whose task 1 reads a calc.py larger than `--num-ctx
+/// 4096`, so it stops context-too-small with task 2 held behind it. Re-entrant, like an
+/// unreachable stop: the stopped task is #1.
+fn context_two_task_run(
+    fixture: &Fixture,
+    server: &Server,
+    runtime: &Runtime,
+) -> (Autopilot, TaskControl) {
+    commit_files(fixture, &[("calc.py", 12_000)]);
+    let mut control = control_at_num_ctx(fixture, server, runtime, 4096);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make answer return 42 and add app", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        runtime,
+        "context-too-small",
+        finished,
+    );
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    assert_eq!(server.count(), 1, "only the planner request was sent");
+    let (status, stopped) = autopilot
+        .reentrant_run(&control)
+        .expect("a context-too-small stop is re-entrant");
+    assert_eq!((status.state, stopped), (RunState::Failed, 1));
+    assert!(
+        autopilot
+            .report()
+            .unwrap()
+            .contains("Next      Raise --num-ctx, then /repair 1 retry"),
+        "{}",
+        autopilot.report().unwrap()
+    );
+    (autopilot, control)
+}
+
+fn two_task_server() -> Server {
+    Server::new(|request, _| {
+        if planner(request) {
+            return two_task_plan();
+        }
+        if worker_prompt(request).starts_with("Implement this task: Add app") {
+            app()
+        } else {
+            good_calc()
+        }
+    })
+}
+
+#[test]
+fn repair_after_a_context_too_small_stop_at_a_larger_num_ctx_runs_dependents_and_integrates() {
+    let fixture = Fixture::new();
+    let server = two_task_server();
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = context_two_task_run(&fixture, &server, &runtime);
+    let head = fixture.head();
+    // The owner raises the window, then retries the stopped task.
+    control.set_provider(server.provider().with_num_ctx(Some(65_536)));
+    assert_eq!(owner_repair(&mut control, &runtime, 1, "retry"), 3);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "repaired at a larger window",
+        |autopilot, control| {
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state == RunState::Done)
+        },
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!((status.done, status.total, status.failed), (2, 2, 0));
+    assert_eq!(status.repairs, 1, "only the owner's repair");
+    let snapshot = fixture.store.snapshot().unwrap();
+    let find = |id| snapshot.tasks.iter().find(|task| task.id == id).unwrap();
+    assert_eq!(find(3).status, TaskStatus::Accepted);
+    assert_eq!(find(2).status, TaskStatus::Accepted, "the dependent ran");
+    assert_eq!(snapshot.tasks.len(), 3, "no further task was created");
+    assert_eq!(server.count(), 3, "planner, the retry, then the dependent");
+    let branch = status.branch.clone().expect("integration branch");
+    assert!(branch.starts_with("alfredo/go-"), "{branch}");
+    assert_eq!(
+        git(&fixture.workspace, &["show", &format!("{branch}:calc.py")]),
+        "def answer():\n    return 42"
+    );
+    assert!(git(&fixture.workspace, &["show", &format!("{branch}:app.py")]).contains("main"));
+    assert_eq!(fixture.head(), head);
+}
+
+#[test]
+fn a_retry_at_the_same_too_small_num_ctx_stops_again_without_a_worker_request_or_repair() {
+    let fixture = Fixture::new();
+    let server = two_task_server();
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = context_two_task_run(&fixture, &server, &runtime);
+    assert_eq!(owner_repair(&mut control, &runtime, 1, "retry"), 3);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "the retry stops again",
+        |autopilot, control| {
+            autopilot
+                .reentrant_run(control)
+                .is_some_and(|(_, stopped)| stopped == 3)
+        },
+    );
+    // No loop: more ticks neither repair nor send anything.
+    for _ in 0..60 {
+        control.poll();
+        assert!(autopilot.tick(&runtime, &mut control).is_none());
+        thread::sleep(Duration::from_millis(2));
+    }
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks.len(), 3, "no automatic repair");
+    let retry = snapshot.tasks.iter().find(|task| task.id == 3).unwrap();
+    assert_eq!(retry.status, TaskStatus::Failed);
+    let evidence: alfredo_tui::worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(3).unwrap()).unwrap();
+    assert_eq!(evidence.failure_code.as_deref(), Some("context-too-small"));
+    assert_eq!(server.count(), 1, "no worker request is sent");
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    let report = autopilot.report().unwrap().to_string();
+    assert!(
+        report.contains("Next      Raise --num-ctx, then /repair 3 retry"),
+        "{report}"
+    );
+}
+
 /// Issue #707: a planner prompt larger than `--num-ctx` is refused before it is sent, so
 /// every attempt would fail alike; autopilot stops on the first with the provider's reason.
 fn oversized_goal() -> String {
