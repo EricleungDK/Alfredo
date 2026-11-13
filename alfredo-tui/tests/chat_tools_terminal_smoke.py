@@ -364,6 +364,60 @@ class ChatTools(unittest.TestCase):
         pid = int(Path(os.path.realpath(self.repo.name), 'pid').read_text())
         self.assertFalse(self.alive(pid))
 
+    def type_stop(self):
+        # A pause between the text and Enter keeps the draft and the submit apart.
+        self.terminal.write(b'/stop')
+        time.sleep(0.3)
+        self.terminal.write(b'\r')
+
+    def check_slash_stop_kills_the_command(self, prompt):
+        # Issue #721: /stop cancels a running run_command exactly like Esc.
+        root = self.start_slow_command(prompt)
+        self.terminal.wait_for('running run_command')
+        stopped = time.time()
+        self.type_stop()
+        self.terminal.wait_for('cancelled')
+        self.assertNotIn('No active autopilot', self.terminal.screen())
+        if 'on host' in prompt:
+            pid = int(root.joinpath('pid').read_text())
+            deadline = stopped + 2
+            while self.group_members(pid) and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(self.group_members(pid), [], 'the command group outlived /stop')
+        deadline = stopped + 2
+        while 'cancelled' not in self.approval_outcomes() and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(self.approval_outcomes(), ['cancelled'])
+        time.sleep(5)
+        self.assertFalse(root.joinpath('marker').exists(), 'the command ran on after /stop')
+        self.terminal.wait_for('⚙ run_command')
+        self.terminal.wait_for('cancelled after')
+        self.assertTrue(root.joinpath('started').exists())
+
+    def test_slash_stop_stops_a_running_sandboxed_command(self):
+        self.check_slash_stop_kills_the_command('slow command')
+
+    def test_slash_stop_stops_a_running_host_command(self):
+        self.check_slash_stop_kills_the_command('slow command on host')
+
+    def test_slash_stop_cancels_a_chat_turn_waiting_on_the_model(self):
+        # Issue #721: the slow reply never lands after /stop.
+        self.terminal.write(b'slow one\r')
+        self.terminal.wait_for('waiting for model')
+        self.type_stop()
+        self.terminal.wait_for('cancelled')
+        self.assertNotIn('No active autopilot', self.terminal.screen())
+        time.sleep(3)
+        self.assertNotIn('SLOW_REPLY_MARKER', self.terminal.screen())
+        self.assertIn('cancelled', self.terminal.screen())
+
+    def test_slash_stop_in_an_idle_chat_still_says_no_active_autopilot(self):
+        self.type_stop()
+        self.terminal.wait_for('No active autopilot')
+        time.sleep(0.5)
+        self.assertNotIn('cancelled', self.terminal.screen())
+        self.assertEqual(self.approval_outcomes(), [])
+
     def check_quit_kills_the_host_command(self, keys):
         root = self.start_slow_command('slow command on host')
         pid = int(root.joinpath('pid').read_text())
