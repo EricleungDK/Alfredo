@@ -1782,7 +1782,13 @@ fn planner_prompt_over_num_ctx_stops_on_first_attempt() {
     autopilot
         .start(&oversized_goal(), "fixture", 2, &control)
         .unwrap();
-    drive(&mut autopilot, &mut control, &runtime, "planner-num-ctx", finished);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "planner-num-ctx",
+        finished,
+    );
     assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
     let report = autopilot.report().unwrap().to_string();
     assert!(report.contains("tokens > --num-ctx 2048"), "{report}");
@@ -1791,7 +1797,11 @@ fn planner_prompt_over_num_ctx_stops_on_first_attempt() {
     assert!(!report.contains("failed 3 times"), "{report}");
     let notice = autopilot.notice();
     assert!(!notice.contains("failed 3 times"), "{notice}");
-    assert_eq!(server.count(), 0, "the planner prompt is refused before sending");
+    assert_eq!(
+        server.count(),
+        0,
+        "the planner prompt is refused before sending"
+    );
     assert!(fixture.store.snapshot().unwrap().tasks.is_empty());
 }
 
