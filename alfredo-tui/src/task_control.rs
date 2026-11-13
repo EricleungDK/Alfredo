@@ -1488,9 +1488,7 @@ impl TaskControl {
     fn queue_dispatch_off_row(&mut self, notice: &str) {
         // Bounded: if the main loop has not drained four rows, the newest is dropped
         // rather than growing the queue without limit.
-        if !self.queue_chat_row(format!("{notice}\nResume with /dispatch on")) {
-            // Dropped on purpose: see the bound above.
-        }
+        self.queue_chat_row(format!("{notice}\nResume with /dispatch on"));
     }
 
     /// Queue a display-only row for the chat transcript, taken by the main loop.
