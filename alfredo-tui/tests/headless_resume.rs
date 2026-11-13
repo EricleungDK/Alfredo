@@ -508,7 +508,10 @@ fn headless_refuses_select_and_doctor_with_exit_2_whatever_else_is_given() {
         let output = go(&root, &fixture, extra);
         let err = stderr(&output);
         assert_eq!(output.status.code(), Some(2), "{extra:?}: {err}");
-        assert!(err.contains("omit --select and --doctor"), "{extra:?}: {err}");
+        assert!(
+            err.contains("omit --select and --doctor"),
+            "{extra:?}: {err}"
+        );
         assert!(output.stdout.is_empty(), "{extra:?}: no run output");
     }
     assert_eq!(planner_requests(&fixture), 0, "refused before planning");
