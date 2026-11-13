@@ -309,7 +309,7 @@ within version 1; consumers should ignore unknown ones.
 
 A run left paused (SIGINT/SIGTERM, `/stop`, an autopilot self-pause, or a restart of
 Alfredo) belongs to its conversation. `alfredo-tui --resume --headless` continues the
-default mission's paused run exactly as `/resume` does (same approvals, task policies and
+paused run of the default mission, or of the one `--mission NAME` names, exactly as `/resume` does (same approvals, task policies and
 checks; a finished plan is not replanned, but a run paused mid-planning plans again, as `/resume` does) and prints `resuming “GOAL” (1/2 accepted)` on stderr,
 then the usual progress lines, the same JSON object (`goal` is the paused run's goal)
 and the same exit codes. With no paused run (none, or one that already finished) it
@@ -338,7 +338,7 @@ restored conversation's model applies, as in the terminal.
 ### Headless chat (`--chat PROMPT --headless`)
 
 `alfredo-tui --chat PROMPT --headless [--approve workspace-edits]` runs one Chat Agent
-turn (issue #240) without a terminal, on the repository's default mission, with the same
+turn (issue #240) without a terminal, on the repository's default mission or the one `--mission NAME` / `--new-mission NAME` names, with the same
 system context and tool loop as chat. Read tools run. Mutating calls go through the
 Approval gate, answered by a scripted policy instead of a card:
 
