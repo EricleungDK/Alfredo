@@ -1899,6 +1899,56 @@ fn a_retry_at_the_same_too_small_num_ctx_stops_again_without_a_worker_request_or
     );
 }
 
+/// Issue #707: a planner prompt larger than `--num-ctx` is refused before it is sent, so
+/// every attempt would fail alike; autopilot stops on the first with the provider's reason.
+fn oversized_goal() -> String {
+    format!(
+        "Make the answer 42. {}",
+        "Keep the change small and tested. ".repeat(110)
+    )
+}
+
+#[test]
+fn planner_prompt_over_num_ctx_stops_on_first_attempt() {
+    let fixture = Fixture::new();
+    let server = Server::new(|_, _| two_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(server.provider().with_num_ctx(Some(2048)));
+    control.refresh(&runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while control.pending || control.scope_status.revision.is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start(&oversized_goal(), "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "planner-num-ctx",
+        finished,
+    );
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    let report = autopilot.report().unwrap().to_string();
+    assert!(report.contains("tokens > --num-ctx 2048"), "{report}");
+    assert!(report.contains("raise --num-ctx (≈"), "{report}");
+    assert!(report.contains("tokens needed)"), "{report}");
+    assert!(!report.contains("failed 3 times"), "{report}");
+    let notice = autopilot.notice();
+    assert!(!notice.contains("failed 3 times"), "{notice}");
+    assert_eq!(
+        server.count(),
+        0,
+        "the planner prompt is refused before sending"
+    );
+    assert!(fixture.store.snapshot().unwrap().tasks.is_empty());
+}
+
 /// The two-task plan while the model server drops every worker request (`down`); once
 /// it is back, the repair (`Repair #3:`, task ids 1 and 2 are the plan) and the
 /// dependent get good content. With `bad_repair`, the repair still writes wrong code.

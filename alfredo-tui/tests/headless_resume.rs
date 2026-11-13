@@ -197,6 +197,36 @@ fn an_unreachable_stop_names_the_stopped_task_and_resume_headless_as_the_next_st
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Issue #707: a goal larger than `--num-ctx` stops `--go --headless` on the first planning
+/// attempt with the provider's reason, not "Planning failed 3 times".
+#[test]
+fn headless_goal_over_num_ctx_stops_without_retrying_the_planner() {
+    let root = repository("planctx");
+    let mode = Arc::new(AtomicU8::new(ANSWER));
+    let fixture = server(&mode);
+    let goal = format!(
+        "Make the answer 42. {}",
+        "Keep the change small and tested. ".repeat(110)
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--endpoint", &fixture.endpoint, "--connect-retries", "0"])
+        .args(["--model", "fixture", "--num-ctx", "2048", "--go", &goal])
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .arg("--headless")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("raise --num-ctx (≈"), "{err}");
+    assert!(!err.contains("failed 3 times"), "{err}");
+    assert_eq!(planner_requests(&fixture), 0);
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn resume_headless_retries_the_stopped_task_without_planning_again() {
     let root = repository("retry");

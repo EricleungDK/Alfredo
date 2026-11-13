@@ -132,6 +132,8 @@ repair. Headless `--go` names the stopped task in the `failed` entry (`"id": ID`
 prints `next: raise --num-ctx, then --resume --headless retries #ID without planning again`;
 `--resume --headless --num-ctx N` queues the same `/repair ID retry`. A manual `/repair ID` on
 that task still works.
+A goal whose planner prompt is larger than `--num-ctx` stops the same way on the first planning attempt,
+with that Reason, not after `Planning failed 3 times`.
 
 Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
 or untracked, non-ignored files, the start notice and the run's summary carry a
