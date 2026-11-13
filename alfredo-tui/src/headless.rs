@@ -105,6 +105,8 @@ pub struct Options<'a> {
     /// `--resume`: continue the mission's paused run instead of planning `goal`.
     pub resume: bool,
     pub max_repairs: u32,
+    /// `--mission NAME` (false) or `--new-mission NAME` (true); `None` opens `default`.
+    pub mission: Option<(String, bool)>,
 }
 
 /// One stderr line per autopilot state change, derived from successive projections.
@@ -345,12 +347,17 @@ pub fn run(options: Options) -> Result<i32, String> {
         mut goal,
         resume,
         max_repairs,
+        mission,
     } = options;
     if !resume && alfredo_tui::wayfinder::entry_mode(&goal).is_some() {
         return Err("Wayfinder goals need the interactive terminal; state a coding goal".into());
     }
     let choice = runtime
-        .block_on(alfredo_tui::selection::automatic(&start, &state_dir))?
+        .block_on(alfredo_tui::selection::headless_choice(
+            &start,
+            &state_dir,
+            mission.as_ref().map(|(name, new)| (name.as_str(), *new)),
+        ))?
         .ok_or_else(|| alfredo_tui::selection::not_a_repository_notice(&start))?;
     let request = alfredo_tui::selection_command::Request::new(
         alfredo_tui::selection_command::Origin::Startup,
@@ -418,7 +425,12 @@ pub fn run(options: Options) -> Result<i32, String> {
         let notice = work
             .autopilot
             .start(&goal, &model, max_repairs, &work.tasks)
-            .map_err(|error| format!("--go refused: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "--go refused: {}",
+                    alfredo_tui::tasks::headless_capacity_wording(&error)
+                )
+            })?;
         say(&notice);
     }
     work.tasks.set_visible(true);
@@ -519,6 +531,7 @@ pub fn run(options: Options) -> Result<i32, String> {
                     .and_then(|report| report.lines().find_map(|line| line.strip_prefix("Reason")))
                     .map_or(reason, |text| text.trim().to_owned());
             }
+            reason = alfredo_tui::tasks::headless_capacity_wording(&reason);
             if status.state == RunState::Failed {
                 say(finished_line(status.state, &status, &reason));
             }
@@ -988,10 +1001,12 @@ pub struct ChatOptions<'a> {
     pub model_explicit: bool,
     pub prompt: String,
     pub policy: Policy,
+    /// `--mission NAME` (false) or `--new-mission NAME` (true); `None` opens `default`.
+    pub mission: Option<(String, bool)>,
 }
 
 /// `--chat PROMPT --headless`: one Chat Agent turn (tools, Approval gate answered by
-/// `policy`, outcomes in the chat-approval log) on the repository's default mission.
+/// `policy`, outcomes in the chat-approval log) on the repository's default mission (or the one `--mission`/`--new-mission` names).
 /// One JSON object on stdout; exit 0 when the turn finished, 1 failed or interrupted.
 /// The turn is not saved to the conversation.
 pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
@@ -1005,6 +1020,7 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
         model_explicit,
         prompt,
         policy,
+        mission,
     } = options;
     let chat = provider.clone();
     let mut checked = false;
@@ -1017,7 +1033,11 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
         attempt += 1;
         let opened = (|| {
             let choice = runtime
-                .block_on(alfredo_tui::selection::automatic(&start, &state_dir))?
+                .block_on(alfredo_tui::selection::headless_choice(
+                    &start,
+                    &state_dir,
+                    mission.as_ref().map(|(name, new)| (name.as_str(), *new)),
+                ))?
                 .ok_or_else(|| alfredo_tui::selection::not_a_repository_notice(&start))?;
             if model_explicit && !checked {
                 preflight(runtime, &chat, &model)?;

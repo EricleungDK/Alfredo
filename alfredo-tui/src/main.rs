@@ -327,13 +327,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if approve.is_some() && chat_prompt.is_none() {
         return Err("--approve applies only to --chat PROMPT --headless".into());
     }
-    if headless
-        && ((go_goal.is_none() && chat_prompt.is_none() && !resume)
-            || select
-            || mission.is_some()
-            || doctor)
-    {
-        return Err("--headless needs --go GOAL or --chat PROMPT and opens the repository's default mission; omit --select, --mission, --new-mission and --doctor".into());
+    if headless && ((go_goal.is_none() && chat_prompt.is_none() && !resume) || select || doctor) {
+        return Err("--headless needs --go GOAL or --chat PROMPT and opens the repository's default mission, or the one --mission NAME or --new-mission NAME names; omit --select and --doctor".into());
     }
     if let Some(value) = &on_finish {
         alfredo_tui::on_finish::configure(alfredo_tui::on_finish::validate(value)?);
@@ -455,6 +450,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model_explicit,
             prompt,
             policy: approve.unwrap_or(headless::Policy::Deny),
+            mission: mission.map(|name| (name, start_new_mission)),
         })?;
         std::process::exit(code);
     }
@@ -470,6 +466,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             goal: go_goal.unwrap_or_default(),
             resume,
             max_repairs,
+            mission: mission.map(|name| (name, start_new_mission)),
         })?;
         std::process::exit(code);
     }
@@ -2577,6 +2574,7 @@ const HELP_LINES: &[&str] = &[
     "--icons nerd|unicode|ascii picks record icons (default unicode; env ALFREDO_ICONS). --no-motion (or ALFREDO_NO_MOTION=1) shows a static ▶ instead of the spinner. Colours: truecolor when COLORTERM is truecolor or 24bit, otherwise 16 colours; NO_COLOR disables colour.",
     "",
     "Inside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --mission resumes and --new-mission creates a distinct name, in the repository containing the current directory or the one given by --workspace; outside a repository they need --workspace DIR (with --select they only prefill the selector).",
+    "With --headless (--go, --resume or --chat) --mission NAME opens that existing mission and --new-mission NAME creates one instead of default, e.g. when default holds its 256 tasks; --select and --doctor stay refused.",
     "Direct Ollama conversations and isolated Rust coding workers.",
     "Terminals using the same endpoint share --parallel-models capacity; a terminal with a different capacity waits for the others to drain.",
     "Foreground conversations get bounded priority over queued workers.",

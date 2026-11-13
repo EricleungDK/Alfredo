@@ -339,14 +339,10 @@ fn go_at_the_task_limit_is_refused_before_planning_and_leaves_nothing_to_resume(
         output.stdout.is_empty(),
         "setup errors print nothing on stdout"
     );
-    for expected in [
-        "--go refused",
-        "256",
-        "--new-mission NAME",
-        "Start New Mission",
-    ] {
+    for expected in ["--go refused", "256", "--new-mission NAME", "--headless"] {
         assert!(err.contains(expected), "{expected}: {err}");
     }
+    assert!(!err.contains("Start New Mission"), "{err}");
     assert!(!err.contains("no effect after"), "{err}");
     assert_eq!(planner_requests(&fixture), 0, "a planner request was sent");
     assert_eq!(worker_requests(&fixture), 0);
@@ -358,5 +354,166 @@ fn go_at_the_task_limit_is_refused_before_planning_and_leaves_nothing_to_resume(
         stderr(&output)
     );
     assert_eq!(planner_requests(&fixture), 0);
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn fill_to_limit(root: &Path, mission: &str) {
+    let store = TaskStore::new(&root.join("state"), &root.join("workspace"), mission).unwrap();
+    let mut snapshot = store.snapshot().unwrap();
+    while snapshot.tasks.len() < 256 {
+        snapshot = store
+            .transact(Request {
+                correlation: format!("pad-{}", snapshot.revision),
+                expected_revision: snapshot.revision,
+                action: Action::Propose {
+                    title: "filler".into(),
+                    model: "fixture".into(),
+                    dependencies: vec![],
+                },
+            })
+            .unwrap()
+            .0;
+    }
+}
+
+fn task_count(root: &Path, mission: &str) -> usize {
+    TaskStore::new(&root.join("state"), &root.join("workspace"), mission)
+        .unwrap()
+        .snapshot()
+        .unwrap()
+        .tasks
+        .len()
+}
+
+/// Issue #700: a script whose default mission is full starts a new one and finishes there.
+#[test]
+fn a_full_default_mission_does_not_stop_go_headless_with_new_mission() {
+    let root = repository("newmission");
+    fill_to_limit(&root, "default");
+    let fixture = server(&Arc::new(AtomicU8::new(ANSWER)));
+    let output = go(
+        &root,
+        &fixture,
+        &["--headless", "--new-mission", "scripted"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value = result(&output);
+    assert_eq!(value["state"], "done", "{value}");
+    assert_eq!(task_count(&root, "default"), 256, "default is untouched");
+    assert!(task_count(&root, "scripted") >= 2);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// An existing mission is used as named, and a mission that does not exist is a usage
+/// error that names `--new-mission`; nothing is planned or created.
+#[test]
+fn go_headless_mission_uses_the_named_mission_and_refuses_a_missing_one() {
+    let root = repository("named");
+    let fixture = server(&Arc::new(AtomicU8::new(ANSWER)));
+    let output = go(&root, &fixture, &["--headless", "--mission", "nosuch"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(output.stdout.is_empty());
+    assert!(err.contains("--new-mission nosuch"), "{err}");
+    assert!(
+        !err.contains("omit --select"),
+        "must not be the headless usage error: {err}"
+    );
+    assert_eq!(planner_requests(&fixture), 0);
+    let store = TaskStore::new(&root.join("state"), &root.join("workspace"), "scripted").unwrap();
+    let snapshot = store.snapshot().unwrap();
+    store
+        .transact(Request {
+            correlation: "seed".into(),
+            expected_revision: snapshot.revision,
+            action: Action::Propose {
+                title: "seed".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+            },
+        })
+        .unwrap();
+    let output = go(&root, &fixture, &["--headless", "--mission", "scripted"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(result(&output)["state"], "done");
+    assert!(task_count(&root, "scripted") >= 3, "seed plus the plan");
+    assert_eq!(task_count(&root, "default"), 0, "default was not used");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `--resume --headless --mission NAME` continues the run stopped in that mission, and
+/// without the flag the default mission has nothing to resume.
+#[test]
+fn resume_headless_with_mission_continues_that_missions_run() {
+    let root = repository("resumenamed");
+    let mode = Arc::new(AtomicU8::new(DROP));
+    let fixture = server(&mode);
+    let output = go(
+        &root,
+        &fixture,
+        &[
+            "--headless",
+            "--max-repairs",
+            "3",
+            "--new-mission",
+            "scripted",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    mode.store(ANSWER, Ordering::SeqCst);
+    let output = go(&root, &fixture, &["--resume", "--headless"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("nothing to resume"));
+    let output = go(
+        &root,
+        &fixture,
+        &["--resume", "--headless", "--mission", "scripted"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value = result(&output);
+    assert_eq!(value["state"], "done", "{value}");
+    assert_eq!(value["goal"], GOAL);
+    assert_eq!(planner_requests(&fixture), 1, "the plan is not remade");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The refusal at the limit names the headless way out, never the picker.
+#[test]
+fn the_headless_capacity_refusal_names_new_mission_in_a_form_headless_accepts() {
+    let root = repository("wording");
+    fill_to_limit(&root, "default");
+    let fixture = server(&Arc::new(AtomicU8::new(ANSWER)));
+    let output = go(&root, &fixture, &["--headless"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(err.contains("--new-mission NAME"), "{err}");
+    assert!(err.contains("--headless"), "{err}");
+    assert!(!err.contains("mission picker"), "{err}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `--select` and `--doctor` are terminal-only: each is refused on its own beside a
+/// goal or `--resume`, so neither operand of the refusal can be dropped.
+#[test]
+fn headless_refuses_select_and_doctor_with_exit_2_whatever_else_is_given() {
+    let root = repository("select-doctor");
+    let fixture = server(&Arc::new(AtomicU8::new(ANSWER)));
+    let cases: [&[&str]; 4] = [
+        &["--headless", "--select"],
+        &["--headless", "--doctor"],
+        &["--headless", "--resume", "--select"],
+        &["--headless", "--resume", "--doctor"],
+    ];
+    for extra in cases {
+        let output = go(&root, &fixture, extra);
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{extra:?}: {err}");
+        assert!(
+            err.contains("omit --select and --doctor"),
+            "{extra:?}: {err}"
+        );
+        assert!(output.stdout.is_empty(), "{extra:?}: no run output");
+    }
+    assert_eq!(planner_requests(&fixture), 0, "refused before planning");
     let _ = fs::remove_dir_all(&root);
 }
