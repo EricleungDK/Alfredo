@@ -465,14 +465,31 @@ pub fn config_refusal_view(message: &str) -> Option<(String, Vec<String>)> {
     ))
 }
 
+/// How the interactive TUI shows a task-limit refusal (#696), which the one-line footer
+/// would cut before its remedy: the footer says why and points at the chat rows, and the
+/// rows carry the whole sentence (limit, slots needed and free, `--new-mission NAME`).
+/// `None` for any other message (#699).
+#[must_use]
+pub fn capacity_refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
+    if !crate::tasks::is_capacity_refusal(message) {
+        return None;
+    }
+    Some((
+        format!("{command} refused: task limit reached (see the chat rows above)"),
+        vec![format!("✗ Not started · {message}")],
+    ))
+}
+
 /// The chat rows and fix-first footer for a refusal the one-line footer would cut:
-/// a config refusal, a sandbox that cannot start, or a plan the unattended lint refuses,
-/// for the slash `command` typed (#608, #650).
+/// a config refusal, a sandbox that cannot start, a plan the unattended lint refuses, a
+/// `/go` while autopilot is active, or a full task list, for the slash `command` typed
+/// (#608, #650, #672, #699).
 pub fn refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
     config_refusal_view(message)
         .or_else(|| crate::doctor::sandbox_refusal_view(message, command))
         .or_else(|| crate::autopilot::lint_refusal_view(message, command))
         .or_else(|| crate::autopilot::active_refusal_view(message, command))
+        .or_else(|| capacity_refusal_view(message, command))
 }
 
 /// Why `workspace` cannot run coding work because of its Git config, read the bounded,

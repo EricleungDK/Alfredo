@@ -96,7 +96,8 @@ pub struct TaskControl {
     control_receiver: mpsc::UnboundedReceiver<ControlResult>,
     control_pending: Option<crate::control_command::Request>,
     control_events: Vec<crate::control_command::Event>,
-    /// Chat rows for dispatch turning itself off, taken by the main loop (issue #587).
+    /// Chat rows for dispatch turning itself off (issue #587) and the 80% task-list
+    /// warning (#699), taken by the main loop.
     dispatch_off_rows: Vec<String>,
     control_acknowledged: BTreeMap<String, crate::control_command::Event>,
     worker_identities: BTreeMap<u64, WorkerIdentity>,
@@ -801,12 +802,10 @@ impl TaskControl {
                     if let Some(warning) =
                         self.snapshot.as_ref().and_then(Snapshot::task_list_warning)
                     {
-                        self.capacity_warned = true;
-                        self.notice = if self.notice.is_empty() {
-                            warning
-                        } else {
-                            format!("{} · {warning}", self.notice)
-                        };
+                        // A chat row, not the footer: the app notice is drawn first and
+                        // a sticky one would hide this for the rest of the session (#699).
+                        // Marked warned only once queued, so a full queue retries.
+                        self.capacity_warned = self.queue_chat_row(warning);
                     }
                 }
             }
@@ -1478,7 +1477,8 @@ impl TaskControl {
         }
     }
 
-    /// Chat-transcript rows for dispatch turning itself off (issue #587).
+    /// Chat-transcript rows for dispatch turning itself off (issue #587) and for the
+    /// one-time 80% task-list warning (#699).
     pub fn take_dispatch_off_rows(&mut self) -> Vec<String> {
         std::mem::take(&mut self.dispatch_off_rows)
     }
@@ -1488,10 +1488,16 @@ impl TaskControl {
     fn queue_dispatch_off_row(&mut self, notice: &str) {
         // Bounded: if the main loop has not drained four rows, the newest is dropped
         // rather than growing the queue without limit.
+        self.queue_chat_row(format!("{notice}\nResume with /dispatch on"));
+    }
+
+    /// Queue a display-only row for the chat transcript, taken by the main loop.
+    fn queue_chat_row(&mut self, row: String) -> bool {
         if self.dispatch_off_rows.len() < 4 {
-            self.dispatch_off_rows
-                .push(format!("{notice}\nResume with /dispatch on"));
+            self.dispatch_off_rows.push(row);
+            return true;
         }
+        false
     }
 
     pub fn take_control_events(&mut self) -> Vec<crate::control_command::Event> {

@@ -800,25 +800,58 @@ fn repair_at_the_task_limit_names_the_limit_and_the_remedy() {
     assert_names_limit_and_remedy(&error);
 }
 
+const EIGHTY_PERCENT_ROW: &str =
+    "Task list 80% full (205/256); start a new mission before it fills";
+
 #[test]
 fn task_list_warns_at_eighty_percent() {
     let fixture = Fixture::new();
     let store = fixture.store("filling");
     pad_tasks(&store, 203);
-    let (control, messages) = run_then_render(
+    let (mut control, messages) = run_then_render(
         &store,
         &["/task Next one", "/task And another", "/task Yet another"],
     );
-    // 204 of 256 is below 80%; 205 is the first count at or over it.
-    assert!(!messages[0].contains("80% full"), "{}", messages[0]);
-    assert!(
-        messages[1].contains("Task list 80% full (205/256); start a new mission before it fills"),
-        "{}",
-        messages[1]
+    // The footer notice would be hidden by any earlier app notice (#699): never used.
+    for message in &messages {
+        assert!(!message.contains("80% full"), "{message}");
+    }
+    assert!(!control.notice.contains("80% full"), "{}", control.notice);
+    // 204 of 256 is below 80%; 205 is the first count at or over it. One row, once.
+    assert_eq!(
+        control.take_dispatch_off_rows(),
+        vec![EIGHTY_PERCENT_ROW.to_string()]
     );
-    // One time: the next command that adds a task does not repeat it.
-    assert!(!messages[2].contains("80% full"), "{}", messages[2]);
     assert_eq!(control.snapshot.as_ref().unwrap().tasks.len(), 206);
+}
+
+#[test]
+fn task_list_at_204_queues_no_eighty_percent_row() {
+    let fixture = Fixture::new();
+    let store = fixture.store("almost");
+    pad_tasks(&store, 203);
+    let (mut control, _) = run_then_render(&store, &["/task Next one"]);
+    assert_eq!(control.snapshot.as_ref().unwrap().tasks.len(), 204);
+    assert_eq!(control.take_dispatch_off_rows(), Vec::<String>::new());
+}
+
+#[test]
+fn a_store_already_at_205_queues_the_row_on_the_first_refresh_only() {
+    let fixture = Fixture::new();
+    let store = fixture.store("full-ish");
+    pad_tasks(&store, 205);
+    let (mut control, _) = run_then_render(&store, &[]);
+    assert_eq!(
+        control.take_dispatch_off_rows(),
+        vec![EIGHTY_PERCENT_ROW.to_string()]
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    control.refresh(&runtime);
+    while control.pending {
+        control.poll();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(control.take_dispatch_off_rows(), Vec::<String>::new());
 }
 
 #[test]
