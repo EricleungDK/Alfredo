@@ -1,6 +1,8 @@
 """Doc drift guards: entry-point docs link to real files and document every CLI flag."""
 from pathlib import Path
+import os
 import re
+import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -76,6 +78,31 @@ class FlagTests(unittest.TestCase):
             self.assertIn(text, section)
         readme = (ROOT / 'alfredo-tui/README.md').read_text(encoding='utf-8')
         self.assertIn('--chat -', readme)
+
+    def test_headless_docs_say_a_named_mission_can_be_opened(self):
+        # Issue #716: after #705, headless opens the default mission or the one
+        # `--mission NAME` / `--new-mission NAME` names; no text may say "default only".
+        binary = os.environ.get('ALFREDO_TUI_BINARY')
+        if binary and Path(binary).exists():
+            help_text = subprocess.run([binary, '--help'], capture_output=True, text=True,
+                                       check=True).stdout
+        else:
+            help_text = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
+        help_text = ' '.join(help_text.split())
+        start = help_text.index('--headless (with --go GOAL)')
+        entry = help_text[start:start + 1200]
+        self.assertIn("Opens the repository's default mission, or the one --mission NAME / "
+                      "--new-mission NAME names.", entry)
+        self.assertNotIn("Opens the repository's default mission.", entry)
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        for heading, needed in (('### Paused runs: `--resume --headless`', ('--mission NAME',)),
+                                ('### Headless chat', ('--mission NAME', '--new-mission NAME'))):
+            begin = reference.index(heading)
+            section = ' '.join(reference[begin:reference.index('\n#', begin + 4)].split())
+            for text in needed:
+                self.assertIn(text, section, heading)
+            self.assertNotIn("the default mission's paused run", section, heading)
+            self.assertNotIn('on the repository\'s default mission,', section, heading)
 
     def test_masked_secret_files_are_documented_as_permission_denied(self):
         # Issue #582: /dev/null is bound nodev, so a masked file fails to open.
