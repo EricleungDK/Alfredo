@@ -187,6 +187,13 @@ fn an_unreachable_stop_names_the_stopped_task_and_resume_headless_as_the_next_st
         .unwrap()
         .contains(&format!("Cannot reach Ollama at {}", fixture.endpoint)));
     assert!(next_step_line(&stderr(&output)), "{}", stderr(&output));
+    // Issue #706: only a context-too-small stop says to raise --num-ctx instead.
+    assert!(
+        stderr(&output).lines().any(|line| line
+            == "next: start the model server, then --resume --headless retries #1 without planning again"),
+        "{}",
+        stderr(&output)
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
