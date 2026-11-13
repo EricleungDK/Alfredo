@@ -251,6 +251,35 @@ fn text_output_format_is_the_default_single_json_object() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Issue #700: `--chat` takes the mission flags too; a missing `--mission` is a usage error.
+#[test]
+fn chat_headless_opens_the_named_mission_and_refuses_a_missing_one() {
+    let root = repository("mission");
+    let fixture = scripted_chat(vec![done("Plain answer.")]);
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "Hi", "--headless", "--mission", "nosuch"],
+    );
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(output.stdout.is_empty());
+    assert!(err.contains("--new-mission nosuch"), "{err}");
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "Hi", "--headless", "--new-mission", "scripted"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(result(&output)["reply"], "Plain answer.");
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn an_unknown_output_format_exits_two_naming_the_choices() {
     let root = repository("badfmt");

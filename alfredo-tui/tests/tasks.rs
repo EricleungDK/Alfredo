@@ -740,6 +740,28 @@ fn only_the_task_limit_refusals_read_as_capacity_refusals() {
     }
 }
 
+/// Issue #700: headless has no mission picker; its refusal names the flag it accepts, for
+/// both the one-task and the whole-plan wording, and the terminal text is unchanged.
+#[test]
+fn headless_capacity_wording_names_new_mission_flag_not_the_picker() {
+    use alfredo_tui::tasks::{capacity_refusal, headless_capacity_wording};
+    for (used, needed) in [(256, 1), (254, 3)] {
+        let terminal = capacity_refusal(used, needed);
+        assert!(terminal.contains("mission picker"), "{terminal}");
+        let headless = headless_capacity_wording(&terminal);
+        assert!(headless.contains("--new-mission NAME"), "{headless}");
+        assert!(headless.contains("--headless"), "{headless}");
+        assert!(!headless.contains("mission picker"), "{headless}");
+        assert!(
+            headless.starts_with("Task capacity reached: "),
+            "{headless}"
+        );
+        assert!(headless.ends_with("to keep planning"), "{headless}");
+    }
+    let other = "Task receipt capacity reached";
+    assert_eq!(headless_capacity_wording(other), other);
+}
+
 #[test]
 fn propose_at_the_task_limit_names_the_limit_and_the_remedy() {
     let fixture = Fixture::new();

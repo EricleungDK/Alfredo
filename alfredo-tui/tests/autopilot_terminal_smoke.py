@@ -34,6 +34,8 @@ class AutopilotServer:
         self.bad_plan = False
         # Issue #650: one task over three 42,000-byte files, which the unattended lint refuses.
         self.big_plan = False
+        # Issue #700: a plan of this many independent tasks (0: the usual plan), to fill a mission.
+        self.plan_size = 0
         # Closes the socket on every worker request, as a restarting Ollama does.
         self.drop_worker = False
         # Recovery-by-/repair option: every automatic repair writes wrong content until `fixed`.
@@ -90,8 +92,13 @@ class AutopilotServer:
                             tasks = [{'title': 'Touch files', 'acceptance': ['files touched'],
                                       'model': request['model'], 'dependencies': [],
                                       'policy': {'files': ['a.py', 'b.py', 'c.py'], 'check': ['/usr/bin/true']}}]
+                        if fixture.plan_size:
+                            tasks = [{'title': 'Filler %d' % number, 'acceptance': ['filled'],
+                                      'model': request['model'], 'dependencies': [],
+                                      'policy': {'files': ['filler%d.py' % number], 'check': ['/usr/bin/true']}}
+                                     for number in range(fixture.plan_size)]
                         content = ('no plan today' if fixture.bad_plan else
-                                   json.dumps({'tasks': tasks[:1] if fixture.single_task else tasks}))
+                                   json.dumps({'tasks': tasks[:1] if fixture.single_task and not fixture.plan_size else tasks}))
                     elif fixture.drop_worker:
                         with fixture.lock:
                             fixture.requests.append('DROP')

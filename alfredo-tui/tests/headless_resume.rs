@@ -339,14 +339,10 @@ fn go_at_the_task_limit_is_refused_before_planning_and_leaves_nothing_to_resume(
         output.stdout.is_empty(),
         "setup errors print nothing on stdout"
     );
-    for expected in [
-        "--go refused",
-        "256",
-        "--new-mission NAME",
-        "Start New Mission",
-    ] {
+    for expected in ["--go refused", "256", "--new-mission NAME", "--headless"] {
         assert!(err.contains(expected), "{expected}: {err}");
     }
+    assert!(!err.contains("Start New Mission"), "{err}");
     assert!(!err.contains("no effect after"), "{err}");
     assert_eq!(planner_requests(&fixture), 0, "a planner request was sent");
     assert_eq!(worker_requests(&fixture), 0);
@@ -424,11 +420,23 @@ fn go_headless_mission_uses_the_named_mission_and_refuses_a_missing_one() {
         "must not be the headless usage error: {err}"
     );
     assert_eq!(planner_requests(&fixture), 0);
-    TaskStore::new(&root.join("state"), &root.join("workspace"), "scripted").unwrap();
+    let store = TaskStore::new(&root.join("state"), &root.join("workspace"), "scripted").unwrap();
+    let snapshot = store.snapshot().unwrap();
+    store
+        .transact(Request {
+            correlation: "seed".into(),
+            expected_revision: snapshot.revision,
+            action: Action::Propose {
+                title: "seed".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+            },
+        })
+        .unwrap();
     let output = go(&root, &fixture, &["--headless", "--mission", "scripted"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(result(&output)["state"], "done");
-    assert!(task_count(&root, "scripted") >= 2);
+    assert!(task_count(&root, "scripted") >= 3, "seed plus the plan");
     assert_eq!(task_count(&root, "default"), 0, "default was not used");
     let _ = fs::remove_dir_all(&root);
 }
@@ -443,7 +451,13 @@ fn resume_headless_with_mission_continues_that_missions_run() {
     let output = go(
         &root,
         &fixture,
-        &["--headless", "--max-repairs", "3", "--new-mission", "scripted"],
+        &[
+            "--headless",
+            "--max-repairs",
+            "3",
+            "--new-mission",
+            "scripted",
+        ],
     );
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     mode.store(ANSWER, Ordering::SeqCst);
