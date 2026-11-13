@@ -465,14 +465,31 @@ pub fn config_refusal_view(message: &str) -> Option<(String, Vec<String>)> {
     ))
 }
 
+/// How the interactive TUI shows a task-limit refusal (#696), which the one-line footer
+/// would cut before its remedy: the footer says why and points at the chat rows, and the
+/// rows carry the whole sentence (limit, slots needed and free, `--new-mission NAME`).
+/// `None` for any other message (#699).
+#[must_use]
+pub fn capacity_refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
+    if !crate::tasks::is_capacity_refusal(message) {
+        return None;
+    }
+    Some((
+        format!("{command} refused: task limit reached (see the chat rows above)"),
+        vec![format!("✗ Not started · {message}")],
+    ))
+}
+
 /// The chat rows and fix-first footer for a refusal the one-line footer would cut:
-/// a config refusal, a sandbox that cannot start, or a plan the unattended lint refuses,
-/// for the slash `command` typed (#608, #650).
+/// a config refusal, a sandbox that cannot start, a plan the unattended lint refuses, a
+/// `/go` while autopilot is active, or a full task list, for the slash `command` typed
+/// (#608, #650, #672, #699).
 pub fn refusal_view(message: &str, command: &str) -> Option<(String, Vec<String>)> {
     config_refusal_view(message)
         .or_else(|| crate::doctor::sandbox_refusal_view(message, command))
         .or_else(|| crate::autopilot::lint_refusal_view(message, command))
         .or_else(|| crate::autopilot::active_refusal_view(message, command))
+        .or_else(|| capacity_refusal_view(message, command))
 }
 
 /// Why `workspace` cannot run coding work because of its Git config, read the bounded,
@@ -3660,6 +3677,56 @@ mod host_git_tests {
             Some("  git config --local --unset core.excludesFile")
         );
         assert_eq!(super::config_refusal_view("Unknown task 9"), None);
+    }
+
+    #[test]
+    fn capacity_refusal_view_keeps_the_whole_remedy_in_the_row_and_the_footer_short() {
+        for command in ["/go", "/plan", "/plan-revise", "/architect-revise"] {
+            let message = crate::tasks::capacity_refusal(256, 1);
+            let (notice, rows) = super::capacity_refusal_view(&message, command).expect(command);
+            assert_eq!(
+                notice,
+                format!("{command} refused: task limit reached (see the chat rows above)")
+            );
+            assert!(notice.chars().count() <= 78, "{notice}");
+            assert_eq!(rows, vec![format!("✗ Not started · {message}")]);
+            assert!(rows[0].contains("--new-mission NAME"), "{rows:?}");
+            assert!(rows[0].contains("Start New Mission"), "{rows:?}");
+        }
+    }
+
+    #[test]
+    fn capacity_refusal_view_for_a_draft_that_does_not_fit_names_slots_needed_and_free() {
+        let message = crate::tasks::capacity_refusal(250, 10);
+        let (_, rows) = super::capacity_refusal_view(&message, "/go").expect("capacity");
+        assert!(
+            rows[0].contains("this plan needs 10 task slots but only 6 free (250 of 256 used)"),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn capacity_refusal_view_ignores_every_other_message() {
+        for other in [
+            "Unknown task 9",
+            "Task capacity reached",
+            "Usage: /go GOAL",
+            "Task list 80% full (205/256); start a new mission before it fills",
+            "",
+        ] {
+            assert_eq!(super::capacity_refusal_view(other, "/go"), None, "{other}");
+            assert_eq!(super::refusal_view(other, "/go"), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn refusal_view_serves_the_capacity_refusal() {
+        let message = crate::tasks::capacity_refusal(256, 1);
+        assert_eq!(
+            super::refusal_view(&message, "/plan"),
+            super::capacity_refusal_view(&message, "/plan")
+        );
+        assert!(super::refusal_view(&message, "/plan").is_some());
     }
 
     /// Issue #525: the refusal shows each key as git documents it (config lists them

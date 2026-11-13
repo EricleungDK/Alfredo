@@ -5309,7 +5309,11 @@ fn only_task_capacity_refusals_get_the_capacity_view() {
         "Task capacity reached",
         "Usage: /go GOAL",
     ] {
-        assert_eq!(alfredo_tui::worker::refusal_view(other, "/go"), None, "{other}");
+        assert_eq!(
+            alfredo_tui::worker::refusal_view(other, "/go"),
+            None,
+            "{other}"
+        );
     }
 }
 
