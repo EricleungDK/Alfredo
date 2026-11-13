@@ -125,6 +125,8 @@ fail the same way, and a repair only adds context. That run gets the typed
 0), and the Reason quotes `prompt ≈N tokens > --num-ctx M; raise --num-ctx (≈K tokens
 needed)` with a `Next` row to raise `--num-ctx` or approve fewer or smaller files. A manual
 `/repair ID` on that task still works.
+A goal whose planner prompt is larger than `--num-ctx` stops the same way on the first planning attempt,
+with that Reason, not after `Planning failed 3 times`.
 
 Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
 or untracked, non-ignored files, the start notice and the run's summary carry a
