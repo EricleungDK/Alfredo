@@ -848,6 +848,74 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assert_lint_refusal_rows(terminal)
         self.quit(terminal)
 
+    def seed_tasks(self, count):
+        """Leave the mission with `count` proposed tasks (one made in the terminal, the rest
+        cloned with their receipts), then close the terminal."""
+        terminal = self.terminal(resume=False, height=24, width=80)
+        terminal.send('/task filler\r')
+        self.wait_until('one task saved', lambda: len(self.statuses()) == 1, 30)
+        self.quit(terminal)
+        path = next(self.state.glob('rust-tasks-v1/*/tasks.json'))
+        snapshot = json.loads(path.read_text())
+        task, receipt = snapshot['tasks'][0], snapshot['receipts'][0]
+        for number in range(2, count + 1):
+            snapshot['tasks'].append(dict(task, id=number))
+            request = dict(receipt['request'], correlation=f'pad-{number}', expected_revision=number - 1)
+            snapshot['receipts'].append(dict(receipt, request=request, revision=number, task=number))
+        snapshot['revision'] = count
+        path.write_text(json.dumps(snapshot, separators=(',', ':')))
+
+    def test_go_at_task_capacity_shows_the_whole_fix_in_chat_rows_at_80_columns(self):
+        # Issue #699: the footer cut the refusal before the remedy.
+        self.seed_tasks(256)
+        terminal = self.terminal(resume=True, height=24, width=80)
+        self.screen_has(terminal, 'Conversations restored')
+        for command in ('/go make answer return 42 again', '/plan make answer return 42 again'):
+            terminal.send(f'{command}\r')
+            # The chat row wraps, so wait on the words, not the screen text.
+            self.wait_until('capacity refusal row', lambda: 'Start New Mission' in self.flat(terminal), 30)
+            time.sleep(0.5)
+            terminal.pump()
+            flat = self.flat(terminal)
+            self.assertIn('✗ Not started · Task capacity reached: this mission has 256 of 256 tasks', flat)
+            self.assertIn('--new-mission NAME', flat)
+            self.assertIn('Start New Mission in the mission picker) to keep planning', flat)
+            footer = terminal.screen().rstrip().splitlines()[-1]
+            verb = command.split()[0]
+            self.assertIn(f'{verb} refused: task limit reached', footer)
+            self.assertIn('see the chat rows above', footer)
+            self.assertNotIn('--new-mission', footer)
+            # The next key clears the rows; replace the footer so the next message is its own.
+            terminal.send(b'/tasks #1\r')
+            self.wait_until('footer replaced', lambda: 'task limit reached' not in terminal.screen())
+        self.assertEqual(self.fixture.markers(), [])
+        self.quit(terminal)
+
+    def test_the_eighty_percent_task_list_notice_reaches_the_chat_rows_at_80_columns(self):
+        # Issue #699: the notice went to a footer that the restored-session notice hides.
+        self.seed_tasks(203)
+        terminal = self.terminal(resume=True, height=24, width=80)
+        self.screen_has(terminal, 'Conversations restored')
+        terminal.send('/task second\r')
+        self.wait_until('204 tasks', lambda: len(self.statuses()) == 204, 30)
+        time.sleep(0.5)
+        terminal.pump()
+        self.assertNotIn('80% full', self.flat(terminal))
+        terminal.send('/task third\r')
+        self.wait_until('205 tasks', lambda: len(self.statuses()) == 205, 30)
+        # The row is part of the chat transcript, so it waits there when the task view is open.
+        deadline = time.monotonic() + 60
+        while 'Chat 1' not in terminal.screen():
+            terminal.send(b'\x1bOQ')  # F2; a redraw can swallow it, so press again
+            try:
+                self.wait_until('chat view', lambda: 'Chat 1' in terminal.screen(), 3)
+            except AssertionError:
+                if time.monotonic() > deadline:
+                    raise
+        self.wait_until('80% row', lambda: 'Task list 80% full (205/256)' in self.flat(terminal), 30)
+        self.assertIn('start a new mission before it fills', self.flat(terminal))
+        self.quit(terminal)
+
 
 if __name__ == '__main__':
     unittest.main()

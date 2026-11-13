@@ -2126,6 +2126,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             let text = session.draft.trim().to_owned();
+                            let typed_verb = verb.to_owned();
                             let model = session.model.clone();
                             work.autopilot.observe_manual(&text, &mut work.tasks);
                             if text == "/dispatch off" {
@@ -2326,7 +2327,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 },
                                 Err(error) => {
-                                    work.app.notice = error;
+                                    // The footer cuts the task-limit remedy (#699).
+                                    if let Some((notice, rows)) =
+                                        alfredo_tui::worker::capacity_refusal_view(
+                                            &error,
+                                            &typed_verb,
+                                        )
+                                    {
+                                        work.app.notice = notice;
+                                        work.app.transient_rows = rows;
+                                        // Only the chat view draws the rows.
+                                        work.tasks.set_visible(false);
+                                    } else {
+                                        work.app.notice = error;
+                                    }
                                     work.app.sessions[index].reject_draft();
                                 }
                             }
