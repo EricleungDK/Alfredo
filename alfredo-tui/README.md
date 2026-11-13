@@ -288,6 +288,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/autopilot.rs` | `/go` loop, auto-review, bounded repair, integration branch |
 | `src/autopilot_failure.rs` | Autopilot failure and usage text (child of `autopilot`): run usage, sandbox/too-large/unreachable failures, interrupted and budget reasons, failure-line trimming |
 | `src/tasks.rs`, `src/task_control.rs`, `src/task_control/commands.rs`, `src/dispatch.rs` | Durable task store, commands (`prepare_command`, `dispatch_prepared`, `command`, `parse`), dispatch |
+| `src/tasks/refusal.rs` | Task refusal text and `Refusal` (child of `tasks`): capacity and status wording, review and run refusals, `Refusal` kinds |
 | `src/worker.rs`, `src/run_boundary.rs` | Isolated worktree workers and bubblewrap sandbox |
 | `src/worker/answer.rs` | Worker FILE/EDIT answer-block parser, resolver and live display |
 | `src/planner.rs`, `src/planning_context.rs` | Plan generation from committed repo context |
