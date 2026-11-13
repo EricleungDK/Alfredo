@@ -378,6 +378,51 @@ class HeadlessSmoke(unittest.TestCase):
             self.assertEqual((code, out), (2, ''), err)
             self.assertIn(message, err)
 
+    def fill_default_mission(self):
+        """Plan 16 x 16 filler tasks; the dropped worker stops each run at once (exit 1)."""
+        self.fixture.plan_size, self.fixture.drop_worker = 16, True
+        for _ in range(16):
+            code, out, err = self.run_headless('--headless', '--max-repairs', '0', '--connect-retries', '0')
+            self.assertEqual(code, 1, err)
+        self.fixture.plan_size, self.fixture.drop_worker = 0, False
+        del self.fixture.requests[:]
+
+    def task_total(self):
+        counts = {}
+        for path in self.state.glob('rust-tasks-v1/*/tasks.json'):
+            counts[path.parent.name] = len(json.loads(path.read_text())['tasks'])
+        return counts
+
+    def test_a_full_default_mission_has_a_headless_remedy_in_new_mission_and_mission(self):
+        # Issue #700: the refusal names a way out headless accepts, and that way out works.
+        self.fill_default_mission()
+        before = self.task_total()
+        self.assertEqual(list(before.values()), [256])
+        code, out, err = self.run_headless('--headless')
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('Task capacity reached', err)
+        self.assertIn('--new-mission NAME', err)
+        self.assertNotIn('mission picker', err)
+        self.assertEqual(self.fixture.markers(), [])
+        code, out, err = self.run_headless('--headless', '--new-mission', 'scripted')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.result(out)['state'], 'done')
+        after = self.task_total()
+        self.assertEqual(sorted(after.values())[-1], 256, after)
+        self.assertEqual(len(after), 2, after)
+        scripted = sorted(after.values())[0]
+        self.assertGreaterEqual(scripted, 2, after)
+        # An existing mission is used as named; a name that does not exist is a usage error.
+        self.fixture.single_task = True
+        code, out, err = self.run_headless('--headless', '--mission', 'scripted')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(self.task_total().values()), [scripted + 1, 256])
+        code, out, err = self.run_headless('--headless', '--mission', 'nosuch')
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('--new-mission nosuch', err)
+        self.assertNotIn('omit --select', err)
+        self.assertEqual(sorted(self.task_total().values()), [scripted + 1, 256])
+
     def test_fifo_file_keys_in_repository_config_are_refused_before_any_worker_or_repair(self):
         # #509: a FIFO named by core.excludesFile & co. would stall host git to its deadline.
         for key in ('core.excludesFile', 'core.attributesFile', 'mailmap.file', 'diff.orderFile'):

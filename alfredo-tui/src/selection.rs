@@ -215,6 +215,24 @@ pub async fn automatic(starting: &Path, state: &Path) -> Result<Option<Choice>> 
     open_or_create(state, workspace, DEFAULT_MISSION).map(Some)
 }
 
+/// The mission a headless run opens: `default` without a flag, otherwise the named one,
+/// resumed (`--mission`) or created (`--new-mission`) under the flag's own errors.
+/// `Ok(None)` means not inside a repository.
+pub async fn headless_choice(
+    starting: &Path,
+    state: &Path,
+    mission: Option<(&str, bool)>,
+) -> Result<Option<Choice>> {
+    let Some((name, start_new)) = mission else {
+        return automatic(starting, state).await;
+    };
+    let Some(root) = repository_root(starting).await? else {
+        return Ok(None);
+    };
+    let workspace = prepare_workspace(&root, state, false).await?;
+    flag_mission_choice(state, workspace, name, start_new).map(Some)
+}
+
 /// Canonical root of the repository containing `starting`; `Ok(None)` outside a repository.
 pub async fn repository_root(starting: &Path) -> Result<Option<PathBuf>> {
     let Ok(root) = git(starting, &["rev-parse", "--show-toplevel"]).await else {

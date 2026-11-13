@@ -246,7 +246,7 @@ to save; their diff is kept in the run's evidence. See
 | `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |
 | `--on-finish PROGRAM` | off (env `ALFREDO_ON_FINISH`) | Absolute path to your own executable, run when an autopilot run ends `done`, `partial` or `failed` (see [reference](alfredo-tui/docs/reference.md#completion-hook)) |
 | `--workspace DIR` | current repo | Open the repository containing `DIR` |
-| `--mission NAME` / `--new-mission NAME` | `default` | Resume / create a named mission in the repository of the current directory or of `--workspace`; outside a repository `--workspace DIR` is required |
+| `--mission NAME` / `--new-mission NAME` | `default` | Resume / create a named mission in the repository of the current directory or of `--workspace`; outside a repository `--workspace DIR` is required. Also with `--headless` (`--go`, `--resume`, `--chat`), e.g. when the default mission is full |
 | `--select` | off | Always show the repository/mission selector |
 | `--conversation NAME` | `default` | Named conversation set (one terminal owns a set) |
 | `--state-dir DIR` | `~/.local/state/alfredo` (env `ALFREDO_STATE_DIR`) | State location; must be outside the repo |
