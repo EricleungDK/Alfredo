@@ -732,6 +732,19 @@ async fn context_too_small_is_typed() {
     assert_eq!(evidence.detail, detail);
 }
 
+/// A prompt that fits the window is sent; here the request cannot connect, so the typed code
+/// is the unreachable one and the context code is never set.
+#[tokio::test]
+async fn a_prompt_that_fits_num_ctx_is_not_a_context_failure() {
+    let (evidence, detail) = run_with_window(12_000, 16_384).await;
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::MODEL_UNREACHABLE),
+        "{detail}"
+    );
+    assert!(!detail.contains("--num-ctx"), "{detail}");
+}
+
 async fn run_with_calc_of(bytes: usize) -> (worker::Evidence, String) {
     run_with_file_of("calc.py", bytes).await
 }

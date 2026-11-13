@@ -1730,6 +1730,19 @@ fn num_ctx_too_small(max_repairs: u32) {
         1,
         "only the planner request is sent: the worker prompt is refused before sending, with no repair attempts"
     );
+    // The owner's own `/repair ID` on the stopped task still works.
+    fixture
+        .store
+        .transact(Request {
+            correlation: "manual-repair".into(),
+            expected_revision: snapshot.revision,
+            action: Action::Repair {
+                task: 1,
+                reason: "Trim the file the worker reads".into(),
+            },
+        })
+        .unwrap();
+    assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 2);
 }
 
 #[test]
