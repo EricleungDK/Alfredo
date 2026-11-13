@@ -1677,6 +1677,71 @@ fn dropped_ollama_connection_stops_cleanly_with_no_repair_budget() {
     model_unreachable(0);
 }
 
+/// Issue #701: a worker prompt larger than `--num-ctx` fails every request before it is sent.
+/// No repair can shrink it, so autopilot stops with the window named instead of repairing.
+fn num_ctx_too_small(max_repairs: u32) {
+    let fixture = Fixture::new();
+    commit_files(&fixture, &[("calc.py", 12_000)]);
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return files_plan(&["calc.py"]);
+        }
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(server.provider().with_num_ctx(Some(4096)));
+    control.refresh(&runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while control.pending || control.scope_status.revision.is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", max_repairs, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "num-ctx-too-small",
+        finished,
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert_eq!(status.repairs, 0);
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks.len(), 1, "no repair task is created");
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    let evidence: alfredo_tui::worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(evidence.failure_code.as_deref(), Some("context-too-small"));
+    let report = autopilot.report().unwrap().to_string();
+    assert!(report.contains("tokens > --num-ctx 4096"), "{report}");
+    assert!(report.contains("raise --num-ctx (≈"), "{report}");
+    assert!(report.contains("tokens needed)"), "{report}");
+    assert!(report.contains("Repairs   0"), "{report}");
+    assert!(!report.contains("larger model"), "{report}");
+    assert!(!report.contains("repair budget exhausted"), "{report}");
+    assert_eq!(
+        server.count(),
+        1,
+        "only the planner request is sent: the worker prompt is refused before sending, with no repair attempts"
+    );
+}
+
+#[test]
+fn num_ctx_too_small_stops_without_repairs() {
+    num_ctx_too_small(3);
+}
+
+#[test]
+fn num_ctx_too_small_stops_cleanly_with_no_repair_budget() {
+    num_ctx_too_small(0);
+}
+
 /// The two-task plan while the model server drops every worker request (`down`); once
 /// it is back, the repair (`Repair #3:`, task ids 1 and 2 are the plan) and the
 /// dependent get good content. With `bad_repair`, the repair still writes wrong code.
