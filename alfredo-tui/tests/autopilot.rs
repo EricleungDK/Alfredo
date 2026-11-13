@@ -3773,6 +3773,9 @@ fn numstat_totals_count_files_and_keep_added_and_deleted_apart() {
     // A path holding a tab stays one file.
     let tabbed = Changes::from_numstat("2\t1\ta\tb.py\n");
     assert_eq!((tabbed.files, tabbed.added, tabbed.deleted), (1, 2, 1));
+    // A rename-form row counts as one file.
+    let renamed = Changes::from_numstat("1\t1\t{a => b}/x.py\n");
+    assert_eq!((renamed.files, renamed.added, renamed.deleted), (1, 1, 1));
 }
 
 #[test]

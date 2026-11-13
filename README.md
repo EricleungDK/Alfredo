@@ -143,7 +143,7 @@ alfredo-tui --model qwen2.5-coder:14b
    `/plan-save` and have not started.
 3. Press F5 to pause or resume at any time; `/stop` also cancels running workers;
    `/autopilot` shows status.
-4. When done, the summary names the branch `alfredo/go-<id>`. Your HEAD, index and
+4. When done, the summary names the branch `alfredo/go-<id>` and its size (`Changes   N files   +A −D`). Your HEAD, index and
    working files were never touched. Review and merge it yourself:
 
 ```bash

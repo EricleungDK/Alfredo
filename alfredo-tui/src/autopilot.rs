@@ -2734,7 +2734,15 @@ async fn branch_changes(workspace: &Path, baseline: &str, commit: &str) -> Optio
     let range = format!("{baseline}..{commit}");
     let numstat = crate::worker::git(
         workspace,
-        &["diff", "--numstat", "--no-ext-diff", &range, "--"],
+        &[
+            "diff",
+            "--numstat",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            &range,
+            "--",
+        ],
     )
     .await
     .ok()?;
