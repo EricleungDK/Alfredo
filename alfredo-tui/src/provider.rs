@@ -122,6 +122,7 @@ fn context_refusal(prompt: usize, window: u32) -> String {
 
 /// True when a request failure text is the provider's refusal to send a prompt larger
 /// than `--num-ctx`. Deterministic: resending or repairing the code cannot shrink it.
+#[must_use]
 pub fn is_context_failure(reason: &str) -> bool {
     reason.starts_with("prompt ≈") && reason.contains(" tokens > --num-ctx ")
 }
