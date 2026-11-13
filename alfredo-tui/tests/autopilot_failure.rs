@@ -3,9 +3,9 @@
 use alfredo_tui::{
     autopilot::{
         failure::{
-            check_cause, failure_detail, held_or_done, interrupted_reason, last_failure_line,
-            sandbox_failure, title_failure_line, too_large_failure, unreachable_failure,
-            BUDGET_EXHAUSTED, INTERRUPTED,
+            check_cause, context_failure, failure_detail, held_or_done, interrupted_reason,
+            last_failure_line, sandbox_failure, title_failure_line, too_large_failure,
+            unreachable_failure, BUDGET_EXHAUSTED, INTERRUPTED,
         },
         state_path, Autopilot, Family, Settled,
     },
@@ -13,7 +13,7 @@ use alfredo_tui::{
     metrics::{Metrics, Usage},
     task_control::TaskControl,
     tasks::{Action, Request, Task, TaskStatus, TaskStore, WorkPolicy},
-    worker::{Evidence, FILE_TOO_LARGE, MODEL_UNREACHABLE},
+    worker::{Evidence, CONTEXT_TOO_SMALL, FILE_TOO_LARGE, MODEL_UNREACHABLE},
 };
 use serde_json::json;
 use std::{
@@ -138,6 +138,7 @@ fn the_typed_environment_failures_each_quote_only_their_own_cause() {
         (SANDBOX_UNAVAILABLE, "sandbox"),
         (FILE_TOO_LARGE, "large"),
         (MODEL_UNREACHABLE, "unreachable"),
+        (CONTEXT_TOO_SMALL, "context"),
     ] {
         let fixture = Fixture::new();
         let runtime = Runtime::new().unwrap();
@@ -147,6 +148,7 @@ fn the_typed_environment_failures_each_quote_only_their_own_cause() {
             ("sandbox", sandbox_failure(&control, &head)),
             ("large", too_large_failure(&control, &head)),
             ("unreachable", unreachable_failure(&control, &head)),
+            ("context", context_failure(&control, &head)),
         ];
         for (name, cause) in causes {
             let want = (name == expected).then(|| "bwrap refused the namespace".to_string());
@@ -170,6 +172,7 @@ fn a_failed_head_without_a_typed_code_is_not_an_environment_failure() {
     assert_eq!(sandbox_failure(&control, &head), None);
     assert_eq!(too_large_failure(&control, &head), None);
     assert_eq!(unreachable_failure(&control, &head), None);
+    assert_eq!(context_failure(&control, &head), None);
 }
 
 #[test]
@@ -197,6 +200,7 @@ fn the_environment_failures_of_other_codes_read_their_own_evidence() {
     let runtime = Runtime::new().unwrap();
     let large = fixture.fail(1, Some(FILE_TOO_LARGE), "big.py is 9 MiB", None);
     let down = fixture.fail(2, Some(MODEL_UNREACHABLE), "Cannot reach Ollama", None);
+    let mut small = fixture.fail(3, Some(CONTEXT_TOO_SMALL), "prompt too big", None);
     let control = fixture.control(&runtime);
     assert_eq!(
         too_large_failure(&control, &large),
@@ -206,6 +210,14 @@ fn the_environment_failures_of_other_codes_read_their_own_evidence() {
         unreachable_failure(&control, &down),
         Some("Cannot reach Ollama".into())
     );
+    assert_eq!(
+        context_failure(&control, &small),
+        Some("prompt too big".into())
+    );
+    assert_eq!(context_failure(&control, &large), None);
+    assert_eq!(context_failure(&control, &down), None);
+    small.status = TaskStatus::Cancelled;
+    assert_eq!(context_failure(&control, &small), None);
     // A head whose run is absent from the store reads no evidence.
     let mut stranger = large.clone();
     stranger.id = 99;

@@ -114,6 +114,18 @@ pub fn is_connect_failure(reason: &str) -> bool {
     [CONNECT_FAILURE, CONNECTION_LOST, DISCONNECTED].contains(&reason)
 }
 
+/// Opening of every "prompt larger than `--num-ctx`" refusal, so [`is_context_failure`]
+/// and the messages cannot drift apart.
+fn context_refusal(prompt: usize, window: u32) -> String {
+    format!("prompt ≈{prompt} tokens > --num-ctx {window}")
+}
+
+/// True when a request failure text is the provider's refusal to send a prompt larger
+/// than `--num-ctx`. Deterministic: resending or repairing the code cannot shrink it.
+pub fn is_context_failure(reason: &str) -> bool {
+    reason.starts_with("prompt ≈") && reason.contains(" tokens > --num-ctx ")
+}
+
 /// Pre-content failures carry no response and no side effects, so they are
 /// safe to retry; anything after content keeps the manual-retry contract.
 enum Failure {
@@ -1048,12 +1060,14 @@ impl Ollama {
                 Ok(limit) => limit,
                 Err(needed) if self.structured => {
                     return Err(Failure::Final(format!(
-                        "prompt ≈{prompt} tokens > --num-ctx {window}; raise --num-ctx (≈{needed} tokens needed)"
+                        "{}; raise --num-ctx (≈{needed} tokens needed)",
+                        context_refusal(prompt, window)
                     )));
                 }
                 Err(_) => {
                     return Err(Failure::Final(format!(
-                        "prompt ≈{prompt} tokens > --num-ctx {window}; run /compact or /clear, press Ctrl+N for a new conversation, or raise --num-ctx"
+                        "{}; run /compact or /clear, press Ctrl+N for a new conversation, or raise --num-ctx",
+                        context_refusal(prompt, window)
                     )));
                 }
             };

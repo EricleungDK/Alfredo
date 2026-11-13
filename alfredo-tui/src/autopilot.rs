@@ -14,11 +14,11 @@ use crate::{
 #[path = "autopilot_failure.rs"]
 #[doc(hidden)]
 pub mod failure;
-pub(crate) use failure::{failure_detail, title_failure_line};
 use failure::{
-    held_or_done, interrupted_reason, last_failure_line, run_usage, sandbox_failure,
-    too_large_failure, unreachable_failure, BUDGET_EXHAUSTED, INTERRUPTED,
+    context_failure, held_or_done, interrupted_reason, last_failure_line, run_usage,
+    sandbox_failure, too_large_failure, unreachable_failure, BUDGET_EXHAUSTED, INTERRUPTED,
 };
+pub(crate) use failure::{failure_detail, title_failure_line};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -1978,6 +1978,20 @@ impl Autopilot {
                     tasks,
                     format!("{reason}."),
                     Some((next.to_string(), repairs)),
+                    false,
+                );
+                return Ok(None);
+            }
+            if let Some(cause) = find(family.head).and_then(|head| context_failure(tasks, head)) {
+                // The provider's reason already ends with the way forward (raise --num-ctx).
+                let repairs: u32 = families.iter().map(|family| family.repairs).sum();
+                self.fail_with_next(
+                    tasks,
+                    cause,
+                    Some((
+                        "Raise --num-ctx, or approve fewer or smaller files.".to_string(),
+                        repairs,
+                    )),
                     false,
                 );
                 return Ok(None);

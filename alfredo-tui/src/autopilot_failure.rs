@@ -85,6 +85,18 @@ pub fn unreachable_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
         .then(|| clean(&evidence.detail, 300))
 }
 
+/// Failure text when the head's worker prompt was larger than `--num-ctx`. The run's
+/// evidence carries the typed `failure_code`; repairing only enlarges the prompt.
+pub fn context_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+    if head.status != TaskStatus::Failed {
+        return None;
+    }
+    let evidence = tasks.store().evidence(head.id).ok()?;
+    let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
+    (evidence.failure_code.as_deref() == Some(crate::worker::CONTEXT_TOO_SMALL))
+        .then(|| clean(&evidence.detail, 300))
+}
+
 pub const INTERRUPTED: &str = "run interrupted";
 
 /// Why an interrupted run cannot be recovered automatically.

@@ -672,6 +672,79 @@ async fn unreachable_model_server_on_a_repair_attempt_gets_the_typed_code_for_th
     );
 }
 
+/// A worker run on a `calc.py` of `bytes` against a model server that refuses connections,
+/// with the given `--num-ctx` window. A prompt over the window fails before any request.
+async fn run_with_window(bytes: usize, window: u32) -> (worker::Evidence, String) {
+    let fixture = Fixture::new();
+    let mut text = "x = 1\n".repeat(bytes / 6);
+    text.push_str(&"#".repeat(bytes - text.len()));
+    fs::write(fixture.workspace.join("calc.py"), &text).unwrap();
+    for args in [
+        vec!["add", "."],
+        vec!["-c", "core.hooksPath=/dev/null", "commit", "-qm", "window"],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&fixture.workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    fixture.permit();
+    let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1))
+        .unwrap()
+        .with_num_ctx(Some(window));
+    let (snapshot, _) = worker::start(
+        fixture.store.clone(),
+        1,
+        "window".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    (
+        evidence,
+        snapshot.tasks[0].run.as_ref().unwrap().detail.clone(),
+    )
+}
+
+/// Issue #701: a worker prompt larger than `--num-ctx` is refused before it is sent; the
+/// failure is typed so autopilot stops instead of repairing.
+#[tokio::test]
+async fn context_too_small_is_typed() {
+    let (evidence, detail) = run_with_window(12_000, 2048).await;
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some("context-too-small"),
+        "{detail}"
+    );
+    assert!(
+        detail.starts_with("prompt ≈")
+            && detail.contains("tokens > --num-ctx 2048; raise --num-ctx (≈"),
+        "{detail}"
+    );
+    assert_eq!(evidence.detail, detail);
+}
+
+/// A prompt that fits the window is sent; here the request cannot connect, so the typed code
+/// is the unreachable one and the context code is never set.
+#[tokio::test]
+async fn a_prompt_that_fits_num_ctx_is_not_a_context_failure() {
+    let (evidence, detail) = run_with_window(12_000, 16_384).await;
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::MODEL_UNREACHABLE),
+        "{detail}"
+    );
+    assert!(!detail.contains("--num-ctx"), "{detail}");
+}
+
 async fn run_with_calc_of(bytes: usize) -> (worker::Evidence, String) {
     run_with_file_of("calc.py", bytes).await
 }

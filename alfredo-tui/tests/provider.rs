@@ -984,6 +984,27 @@ async fn num_ctx_is_sent_on_chat_and_preload_and_omitted_when_unset() {
     }
 }
 
+#[test]
+fn context_failure_is_recognised_by_the_providers_own_refusal_text_only() {
+    use alfredo_tui::provider::is_context_failure;
+    for reason in [
+        "prompt ≈3491 tokens > --num-ctx 2048; raise --num-ctx (≈3747 tokens needed)",
+        "prompt ≈30000 tokens > --num-ctx 2048; run /compact or /clear, press Ctrl+N for a new conversation, or raise --num-ctx",
+    ] {
+        assert!(is_context_failure(reason), "{reason}");
+    }
+    for reason in [
+        "",
+        "Cannot reach Ollama; check the server and endpoint, then retry",
+        "Ollama connection lost; partial reply retained",
+        "the prompt ≈3491 tokens > --num-ctx 2048; raise --num-ctx",
+        "prompt ≈3491 tokens fits",
+        "Worker stream ended before completion",
+    ] {
+        assert!(!is_context_failure(reason), "{reason}");
+    }
+}
+
 #[tokio::test]
 async fn oversized_prompt_is_refused_before_sending_when_num_ctx_is_set() {
     let fixture = serve(reserve(), |_, _| done("ok"));
