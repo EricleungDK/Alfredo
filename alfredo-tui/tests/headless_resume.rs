@@ -259,6 +259,61 @@ fn resume_headless_retries_the_stopped_task_without_planning_again() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// One task that rewrites `calc.py` (a single changed line), answered correctly or not.
+fn single_task_server(good: bool) -> Fixture {
+    let plan = json!({"tasks": [
+        {"title": "Make answer return 42", "acceptance": ["answer() returns 42"],
+         "model": "fixture", "dependencies": [],
+         "policy": {"files": ["calc.py"],
+                    "check": json!(["/usr/bin/python3", "-B", "-c",
+                                    "from calc import answer; assert answer() == 42"])}},
+    ]})
+    .to_string();
+    let content = if good {
+        "def answer():\n    return 42\n"
+    } else {
+        "def answer():\n    return 41\n"
+    };
+    let calc = json!({"files": [{"path": "calc.py", "content": content}]}).to_string();
+    ollama_fixture::serve(ollama_fixture::reserve(), move |request, _| {
+        if request.path != "POST /api/chat" {
+            return ollama_fixture::running(&["fixture"]);
+        }
+        let planner = request.body["messages"][0]["content"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("Act as Frontier Architect"));
+        done(if planner { &plan } else { &calc })
+    })
+}
+
+#[test]
+fn headless_result_reports_what_the_integration_branch_changed() {
+    let root = repository("changes");
+    let fixture = single_task_server(true);
+    let output = go(&root, &fixture, &["--headless"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value = result(&output);
+    assert_eq!(value["state"], "done", "{value}");
+    assert_eq!(
+        value["changes"],
+        json!({"files": 1, "added": 1, "deleted": 1}),
+        "{value}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn headless_result_of_a_run_that_accepted_nothing_has_no_changes_key() {
+    let root = repository("nochanges");
+    let fixture = single_task_server(false);
+    let output = go(&root, &fixture, &["--headless", "--max-repairs", "0"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let value = result(&output);
+    assert_eq!(value["state"], "failed", "{value}");
+    assert!(value.get("changes").is_none(), "{value}");
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn a_retry_that_meets_the_unreachable_model_again_stops_at_once_with_the_next_step() {
     let root = repository("again");

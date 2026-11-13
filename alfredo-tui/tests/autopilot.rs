@@ -3894,7 +3894,7 @@ fn finished_report_reads_as_labeled_sections_and_the_footer_uses_wide_gaps() {
     assert_eq!(
         autopilot.report().unwrap(),
         format!(
-            "✓ Autopilot done\n{goal}\n\nTasks     1/1 accepted\nRepairs   0\nBranch    {branch}\n\n✓ #1  Make answer return 42\n\nReview    git switch {branch}\nMerge     git merge {branch}"
+            "✓ Autopilot done\n{goal}\n\nTasks     1/1 accepted\nRepairs   0\nBranch    {branch}\nChanges   1 file   +1 −1\n\n✓ #1  Make answer return 42\n\nReview    git switch {branch}\nMerge     git merge {branch}"
         )
     );
     assert_eq!(
@@ -3928,12 +3928,13 @@ fn finished_report_reads_as_labeled_sections_and_the_footer_uses_wide_gaps() {
     );
     assert!(pane[at + 1].ends_with('…'), "{screen}");
     assert_eq!(
-        pane[at + 2..at + 11],
+        pane[at + 2..at + 12],
         [
             "".to_string(),
             "Tasks     1/1 accepted".into(),
             "Repairs   0".into(),
             format!("Branch    {branch}"),
+            "Changes   1 file   +1 −1".into(),
             "".into(),
             "✓ #1  Make answer return 42".into(),
             "".into(),
@@ -3942,6 +3943,117 @@ fn finished_report_reads_as_labeled_sections_and_the_footer_uses_wide_gaps() {
         ],
         "{screen}"
     );
+}
+
+#[test]
+fn numstat_totals_count_files_and_keep_added_and_deleted_apart() {
+    use autopilot::Changes;
+    let text = "1\t1\tcalc.py\n-\t-\tlogo.png\n3\t0\tapp.py\n";
+    let totals = Changes::from_numstat(text);
+    assert_eq!((totals.files, totals.added, totals.deleted), (3, 4, 1));
+    // A binary file counts as a file and adds no lines.
+    let binary = Changes::from_numstat("-\t-\tlogo.png\n");
+    assert_eq!((binary.files, binary.added, binary.deleted), (1, 0, 0));
+    // Added and deleted are not swapped.
+    let one_way = Changes::from_numstat("5\t2\tcalc.py\n");
+    assert_eq!((one_way.added, one_way.deleted), (5, 2));
+    // No diff and unreadable lines are no files.
+    assert_eq!(Changes::from_numstat(""), Changes::default());
+    assert_eq!(
+        Changes::from_numstat("\nnot a numstat line\n"),
+        Changes::default()
+    );
+    assert_eq!(Changes::from_numstat("2\t7\n"), Changes::default());
+    // A path holding a tab stays one file.
+    let tabbed = Changes::from_numstat("2\t1\ta\tb.py\n");
+    assert_eq!((tabbed.files, tabbed.added, tabbed.deleted), (1, 2, 1));
+    // A rename-form row counts as one file.
+    let renamed = Changes::from_numstat("1\t1\t{a => b}/x.py\n");
+    assert_eq!((renamed.files, renamed.added, renamed.deleted), (1, 1, 1));
+}
+
+#[test]
+fn changes_row_text_pluralises_files_and_json_carries_the_three_totals() {
+    use autopilot::Changes;
+    let one = Changes::from_numstat("1\t1\tcalc.py\n");
+    assert_eq!(one.row(), "1 file   +1 −1");
+    assert_eq!(one.json(), json!({"files": 1, "added": 1, "deleted": 1}));
+    let many = Changes::from_numstat("10\t4\ta.py\n2\t0\tb.py\n");
+    assert_eq!(many.row(), "2 files   +12 −4");
+    assert_eq!(many.json(), json!({"files": 2, "added": 12, "deleted": 4}));
+    assert_eq!(Changes::default().row(), "0 files   +0 −0");
+}
+
+#[test]
+fn finished_run_records_what_it_changed_and_a_restart_shows_it_without_git() {
+    let fixture = Fixture::new();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    let totals = autopilot.changes().expect("changes recorded at finish");
+    assert_eq!((totals.files, totals.added, totals.deleted), (1, 1, 1));
+    let directory = fixture.directory();
+    drop(autopilot);
+    // The repository is gone: whatever the reopened run shows came from saved state.
+    fs::remove_dir_all(&fixture.workspace).unwrap();
+    let restored = Autopilot::open(&directory, "default").unwrap();
+    assert_eq!(restored.changes(), Some(totals));
+    let report = restored.report().unwrap();
+    assert!(report.contains("\nChanges   1 file   +1 −1\n"), "{report}");
+}
+
+#[test]
+fn run_that_accepted_nothing_has_no_changes_row_and_no_changes_totals() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+            ]})
+            .to_string();
+        }
+        bad_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 0, &control).unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failed", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    let report = autopilot.report().unwrap();
+    assert!(report.contains("Branch    none"), "{report}");
+    assert!(!report.contains("Changes"), "{report}");
+    assert_eq!(autopilot.changes(), None);
+}
+
+#[test]
+fn saved_state_from_before_changes_were_recorded_loads_with_no_changes() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new();
+    let directory = fixture.directory();
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!(
+        "autopilot-{:x}.json",
+        Sha256::digest("default".as_bytes())
+    ));
+    fs::write(
+        &path,
+        json!({"version": 1, "id": "0123456789abcdef", "goal": "Old goal", "model": "fixture",
+            "max_repairs": 2, "phase": "done", "paused": false, "started": 100, "finished": 160,
+            "plan_attempts": 0, "plan_error": null, "plan_request": "p", "save_request": "s",
+            "first": null, "count": 1, "retry_cancelled": [],
+            "notice": "Autopilot done", "report": "Autopilot finished: Old goal\nBranch    alfredo/go-01234567",
+            "branch": "alfredo/go-01234567", "done": 1, "total": 1})
+        .to_string(),
+    )
+    .unwrap();
+    let autopilot = Autopilot::open(&directory, "default").unwrap();
+    assert_eq!(autopilot.changes(), None);
+    assert!(!autopilot.report().unwrap().contains("Changes"));
 }
 
 fn followup_server() -> Server {

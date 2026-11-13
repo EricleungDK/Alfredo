@@ -143,7 +143,7 @@ alfredo-tui --model qwen2.5-coder:14b
    `/plan-save` and have not started.
 3. Press F5 to pause or resume at any time; `/stop` also cancels running workers;
    `/autopilot` shows status.
-4. When done, the summary names the branch `alfredo/go-<id>`. Your HEAD, index and
+4. When done, the summary names the branch `alfredo/go-<id>` and its size (`Changes   N files   +A −D`). Your HEAD, index and
    working files were never touched. Review and merge it yourself:
 
 ```bash
@@ -155,7 +155,7 @@ git merge alfredo/go-<id>              # on your branch, when satisfied
 You can also start unattended: `alfredo-tui --model qwen2.5-coder:14b --go "GOAL"`.
 For scripts and CI, add `--headless`: it runs without a terminal, prints progress lines
 on stderr and ends with one JSON object on stdout
-(`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage}`);
+(`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage[, changes]}`);
 SIGINT/SIGTERM cancel workers like `/stop`; `--resume --headless` continues a paused run, or retries a run an unreachable model stopped. Exit 2 means setup failed (Ollama down, model
 not installed) with the reason on stderr; with `--on-finish`, headless waits for the hook
 (10 s limit) after printing the JSON and reports a failed hook on stderr.
