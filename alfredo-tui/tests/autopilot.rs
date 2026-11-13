@@ -2916,6 +2916,124 @@ fn new_project_scope_gate_is_satisfied_with_a_goal_scope_and_user_drafts_are_nev
     assert!(autopilot.status(&control).is_none());
 }
 
+/// Wayfinder's untouched entry placeholder is not a user-authored draft, so /go may
+/// proceed; once the user rewrites it, /go is refused and names the confirm command.
+#[test]
+fn go_starts_over_an_untouched_wayfinder_placeholder_but_not_over_a_revised_one() {
+    let fixture = Fixture::new();
+    let server = Server::new(|_, _| unreachable!("no model call is needed to start"));
+    let runtime = Runtime::new().unwrap();
+    fixture
+        .store
+        .understanding()
+        .enter(
+            "wayfinder-entry".into(),
+            understanding::Flow {
+                mode: understanding::Mode::Chart,
+                prompt: "Chart a new calculator".into(),
+            },
+        )
+        .unwrap();
+    let control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Build calculator", "fixture", 2, &control)
+        .expect("an untouched Wayfinder placeholder does not block /go");
+
+    // The user rewrites the draft (revision 2, still in the flow): never confirmed for them.
+    let other = Fixture::new();
+    let scope = other.store.understanding();
+    scope
+        .enter(
+            "wayfinder-entry".into(),
+            understanding::Flow {
+                mode: understanding::Mode::Chart,
+                prompt: "Chart a new calculator".into(),
+            },
+        )
+        .unwrap();
+    scope
+        .transact(understanding::Request {
+            correlation: "user-revision".into(),
+            expected_revision: scope.snapshot().unwrap().revision,
+            action: understanding::Action::Draft {
+                brief: understanding::Brief {
+                    destination: "User destination".into(),
+                    scope: "User scope".into(),
+                    constraints: "User constraints".into(),
+                    uncertainty: "User uncertainty".into(),
+                },
+            },
+        })
+        .unwrap();
+    let snapshot = scope.snapshot().unwrap();
+    assert!(
+        snapshot.flow.is_some() && snapshot.draft_revision > 1,
+        "{snapshot:?}"
+    );
+    let control = self::control(&other, &server, &runtime);
+    let mut autopilot = Autopilot::open(&other.directory(), "default").unwrap();
+    let error = autopilot
+        .start("Build calculator", "fixture", 2, &control)
+        .unwrap_err();
+    assert!(
+        error.contains(&format!("/scope-confirm {}", snapshot.draft_revision)),
+        "{error}"
+    );
+    assert!(autopilot.status(&control).is_none());
+}
+
+/// After /stop with the autopilot's own finished draft open, a plan draft the user
+/// generates in its place is not the stopped autopilot's: /go says to save or cancel
+/// it, not to /resume it.
+#[test]
+fn go_after_stop_with_a_users_own_finished_draft_open_does_not_call_it_the_autopilots() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |request, _| {
+        if planner(request) {
+            return one_task_plan();
+        }
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("First", "fixture", 2, &control).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(submission) = autopilot.tick(&runtime, &mut control) {
+            let _ = control.dispatch_prepared(&runtime, &submission.intent);
+        }
+        control.poll();
+        if control.planner.checkpoint().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(3));
+    }
+    autopilot.stop(&runtime, &mut control);
+    control
+        .command(&runtime, "/plan-cancel", "fixture")
+        .unwrap();
+    assert!(control.planner.checkpoint().is_none());
+    control
+        .command(&runtime, "/plan Make answer return 42", "fixture")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let error = autopilot
+        .start("Second", "fixture", 2, &control)
+        .unwrap_err();
+    assert!(
+        error.contains("/plan-save") && !error.contains("stopped autopilot"),
+        "{error}"
+    );
+}
+
 #[test]
 fn commands_and_header_line_expose_read_only_status() {
     for text in ["/go build it", "/pause", "/resume", "/stop", "/autopilot"] {
