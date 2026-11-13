@@ -7,7 +7,7 @@
 //! its Approval gate is answered by a scripted [`Policy`], never by a skip mode.
 use alfredo_tui::{
     autopilot::{
-        name_stopped_task, retry_wait, RetryWait, RunState, Status, TaskOutcome,
+        name_stopped_task, reentry_next_line, retry_wait, RetryWait, RunState, Status, TaskOutcome,
         RETRY_RESTART_LIMIT,
     },
     chat_tools::approval::{Card, CardKind, Decision, Gate, Log, Outcome, Record},
@@ -375,7 +375,8 @@ pub fn run(options: Options) -> Result<i32, String> {
     // A paused run is never silently forked (issue #280): `--go` refuses, `--resume` continues.
     let paused = work.autopilot.paused_run(&work.tasks);
     // With no paused run, `--resume` also continues a run an unreachable model server
-    // stopped (issue #584), the retry `/repair ID retry` queues. Other failures stay done.
+    // (issue #584) or a too-small `--num-ctx` (issue #706) stopped, the retry `/repair ID
+    // retry` queues. Other failures stay done.
     let stopped = match (&paused, resume) {
         (None, true) => work.autopilot.reentrant_run(&work.tasks),
         _ => None,
@@ -536,13 +537,12 @@ pub fn run(options: Options) -> Result<i32, String> {
                 say(finished_line(status.state, &status, &reason));
             }
             let mut result = result_json(&model, &status, &outcomes, &reason, fatal.is_some());
-            // A model-unreachable stop names its task and the way forward (issue #584).
-            // `reentrant_run` is only ever a `Failed` run, so no state check is needed.
+            // A model-unreachable (issue #584) or context-too-small (issue #706) stop names
+            // its task and the way forward. `reentrant_run` is only ever a `Failed` run, so
+            // no state check is needed.
             if let Some((_, id)) = work.autopilot.reentrant_run(&work.tasks) {
                 name_stopped_task(&mut result, id);
-                say(format!(
-                    "next: start the model server, then --resume --headless retries #{id} without planning again"
-                ));
+                say(reentry_next_line(&work.tasks, id));
             }
             result["usage"] = work.autopilot.usage(&work.tasks).json();
             print_result(result);

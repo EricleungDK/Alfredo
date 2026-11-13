@@ -187,6 +187,13 @@ fn an_unreachable_stop_names_the_stopped_task_and_resume_headless_as_the_next_st
         .unwrap()
         .contains(&format!("Cannot reach Ollama at {}", fixture.endpoint)));
     assert!(next_step_line(&stderr(&output)), "{}", stderr(&output));
+    // Issue #706: only a context-too-small stop says to raise --num-ctx instead.
+    assert!(
+        stderr(&output).lines().any(|line| line
+            == "next: start the model server, then --resume --headless retries #1 without planning again"),
+        "{}",
+        stderr(&output)
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -313,6 +320,83 @@ fn a_retry_that_fails_otherwise_ends_without_waiting_and_without_a_next_step() {
     assert!(!stderr(&output).contains("did not restart"));
     assert!(!next_step_line(&stderr(&output)), "{}", stderr(&output));
     assert_eq!(planner_requests(&fixture), 1);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Issue #706: a run whose task 1 reads a calc.py larger than `--num-ctx 4096`, so its
+/// worker prompt is refused before it is sent (context-too-small).
+fn context_stop(root: &Path, fixture: &Fixture) -> Output {
+    let workspace = root.join("workspace");
+    fs::write(workspace.join("calc.py"), "x = 1\n".repeat(2_000)).unwrap();
+    git(&workspace, &["add", "-A"]);
+    git(&workspace, &["commit", "-qm", "large calc"]);
+    let output = go(root, fixture, &["--headless", "--num-ctx", "4096"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    output
+}
+
+#[test]
+fn a_context_too_small_stop_names_the_stopped_task_and_raising_num_ctx_as_the_next_step() {
+    let root = repository("context");
+    let mode = Arc::new(AtomicU8::new(ANSWER));
+    let fixture = server(&mode);
+    let output = context_stop(&root, &fixture);
+    let value = result(&output);
+    assert_eq!(value["state"], "failed", "{value}");
+    assert_eq!(value["failed"][0]["id"], 1, "{value}");
+    assert!(
+        value["failed"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("--num-ctx 4096"),
+        "{value}"
+    );
+    let err = stderr(&output);
+    assert!(
+        err.lines().any(|line| line
+            == "next: raise --num-ctx, then --resume --headless retries #1 without planning again"),
+        "{err}"
+    );
+    assert_eq!(worker_requests(&fixture), 0, "the prompt was never sent");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn resume_headless_at_a_larger_num_ctx_retries_the_context_stopped_task_without_planning_again() {
+    let root = repository("context-retry");
+    let mode = Arc::new(AtomicU8::new(ANSWER));
+    let fixture = server(&mode);
+    context_stop(&root, &fixture);
+    let head = git(&root.join("workspace"), &["rev-parse", "HEAD"]);
+    let output = go(
+        &root,
+        &fixture,
+        &["--resume", "--headless", "--num-ctx", "65536"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value = result(&output);
+    assert_eq!(value["state"], "done", "{value}");
+    assert_eq!(
+        (&value["accepted"], &value["total"]),
+        (&json!(2), &json!(2))
+    );
+    assert_eq!(value["failed"], json!([]));
+    assert_eq!(planner_requests(&fixture), 1, "the plan is not remade");
+    assert_eq!(
+        worker_requests(&fixture),
+        2,
+        "the retry, then the dependent"
+    );
+    assert_eq!(git(&root.join("workspace"), &["rev-parse", "HEAD"]), head);
+    let branch = value["branch"].as_str().unwrap();
+    assert!(branch.starts_with("alfredo/go-"), "{value}");
+    assert_eq!(
+        git(
+            &root.join("workspace"),
+            &["show", &format!("{branch}:calc.py")]
+        ),
+        "def answer():\n    return 42"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
