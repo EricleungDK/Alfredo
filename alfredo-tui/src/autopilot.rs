@@ -387,6 +387,33 @@ pub fn is_command(text: &str) -> bool {
         || matches!(text, "/pause" | "/resume" | "/stop" | "/autopilot")
 }
 
+/// Issue #721: `/stop` typed while the chat turn runs cancels that turn like Esc.
+pub fn cancels_chat_turn(text: &str, chat_active: bool) -> bool {
+    text == "/stop" && chat_active
+}
+
+/// Whether messages queued behind the running turn are waiting (they return to the prompt).
+pub fn queue_held(queued: &[String]) -> bool {
+    !queued.is_empty()
+}
+
+/// After the command ran: an ordinary command is remembered and clears (or rejects) the
+/// draft; a `/stop` that cancelled the chat turn already did both before the cancel, so the
+/// queued text the cancel restored stays in the prompt.
+pub fn settles_draft_after_command(chat_cancelled: bool) -> bool {
+    !chat_cancelled
+}
+
+/// The footer after `/stop`: the autopilot report, the chat turn it cancelled, and the
+/// queued text that came back.
+pub fn finish_notice(notice: &str, chat_cancelled: bool, held: bool) -> String {
+    let mut notice = stop_notice(notice, chat_cancelled);
+    if chat_cancelled && held {
+        notice.push_str(" · queued text is back in the prompt; nothing was sent");
+    }
+    notice
+}
+
 /// Issue #721: `/stop` also ends the active chat turn (like Esc). The footer names what was
 /// stopped: "No active autopilot" is only true when the chat turn was idle too.
 pub fn stop_notice(notice: &str, chat_cancelled: bool) -> String {

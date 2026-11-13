@@ -5232,6 +5232,53 @@ fn stop_notice_names_the_cancelled_chat_turn_and_keeps_the_autopilot_report() {
     );
 }
 
+/// Issue #721 (mech R3): the /stop decisions the Enter arm in main.rs relies on.
+#[test]
+fn only_stop_with_an_active_chat_turn_cancels_it() {
+    use alfredo_tui::autopilot::cancels_chat_turn;
+    assert!(cancels_chat_turn("/stop", true));
+    assert!(!cancels_chat_turn("/stop", false));
+    assert!(!cancels_chat_turn("/pause", true));
+    assert!(!cancels_chat_turn("/go build", true));
+    assert!(!cancels_chat_turn("/pause", false));
+}
+
+#[test]
+fn queue_is_held_only_when_messages_wait() {
+    use alfredo_tui::autopilot::queue_held;
+    assert!(!queue_held(&[]));
+    assert!(queue_held(&["do X".to_string()]));
+}
+
+#[test]
+fn the_draft_is_settled_after_the_command_only_when_no_chat_turn_was_cancelled() {
+    use alfredo_tui::autopilot::settles_draft_after_command;
+    assert!(settles_draft_after_command(false));
+    assert!(!settles_draft_after_command(true));
+}
+
+#[test]
+fn finish_notice_adds_the_queue_text_only_for_a_cancelled_turn_with_queued_messages() {
+    use alfredo_tui::autopilot::finish_notice;
+    let back = " · queued text is back in the prompt; nothing was sent";
+    assert_eq!(
+        finish_notice("No active autopilot", true, true),
+        format!("Chat turn cancelled{back}")
+    );
+    assert_eq!(
+        finish_notice("No active autopilot", true, false),
+        "Chat turn cancelled"
+    );
+    assert_eq!(
+        finish_notice("No active autopilot", false, true),
+        "No active autopilot"
+    );
+    assert_eq!(
+        finish_notice("No active autopilot", false, false),
+        "No active autopilot"
+    );
+}
+
 #[test]
 fn stop_is_an_autopilot_command_so_enter_routes_it_through_the_stop_path() {
     assert!(alfredo_tui::autopilot::is_command("/stop"));

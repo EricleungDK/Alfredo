@@ -1777,9 +1777,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             let model = work.app.sessions[index].model.clone();
                             // Issue #721: /stop ends the running chat turn like Esc (and kills a
                             // running run_command); idle chat is left untouched.
-                            let chat_cancelled =
-                                text == "/stop" && work.app.sessions[index].status.active();
-                            let held = !work.app.sessions[index].queued_messages().is_empty();
+                            let chat_cancelled = alfredo_tui::autopilot::cancels_chat_turn(
+                                &text,
+                                work.app.sessions[index].status.active(),
+                            );
+                            let held = alfredo_tui::autopilot::queue_held(
+                                work.app.sessions[index].queued_messages(),
+                            );
                             if chat_cancelled {
                                 // Record only "/stop" and empty the prompt first, so the queued
                                 // text the cancel returns to the prompt is kept, as with Esc.
@@ -1801,19 +1805,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 max_repairs,
                             ) {
                                 Ok(notice) => {
-                                    if !chat_cancelled {
+                                    if alfredo_tui::autopilot::settles_draft_after_command(
+                                        chat_cancelled,
+                                    ) {
                                         work.app.sessions[index].remember_submission();
                                         work.app.sessions[index].clear_draft();
                                     }
-                                    work.app.notice = alfredo_tui::autopilot::stop_notice(
+                                    work.app.notice = alfredo_tui::autopilot::finish_notice(
                                         &notice,
                                         chat_cancelled,
+                                        held,
                                     );
-                                    if chat_cancelled && held {
-                                        work.app.notice.push_str(
-                                            " · queued text is back in the prompt; nothing was sent",
-                                        );
-                                    }
                                     if text.split_whitespace().next() == Some("/go") {
                                         work.app.append_history_warning(index);
                                         // Autopilot work is watched on the dashboard.
@@ -1834,7 +1836,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         work.app.notice = error;
                                     }
-                                    if !chat_cancelled {
+                                    if alfredo_tui::autopilot::settles_draft_after_command(
+                                        chat_cancelled,
+                                    ) {
                                         work.app.sessions[index].reject_draft();
                                     }
                                 }
