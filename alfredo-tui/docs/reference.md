@@ -119,6 +119,13 @@ repair is one more than `--max-repairs` allows the stopped task's family, and sa
 `--go` prints the Reason on stderr and exits 1. It also prints `next: start the model server, then --resume --headless retries #ID without planning again`, and the `failed` entry for the run names the stopped task (`"id": ID`, not null); `--resume --headless` queues the same `/repair ID retry` (see Paused runs below). Bad `FILE` blocks and failing checks stay
 repairable. Auto-pause and resume on reconnect are not part of this.
 
+A worker prompt larger than `--num-ctx` is refused before it is sent, so every request would
+fail the same way, and a repair only adds context. That run gets the typed
+`context-too-small` `failure_code`; autopilot stops without spending a repair (Repairs stays
+0), and the Reason quotes `prompt ≈N tokens > --num-ctx M; raise --num-ctx (≈K tokens
+needed)` with a `Next` row to raise `--num-ctx` or approve fewer or smaller files. A manual
+`/repair ID` on that task still works.
+
 Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
 or untracked, non-ignored files, the start notice and the run's summary carry a
 warning line such as `3 uncommitted changes are not visible to workers (based on HEAD
@@ -560,7 +567,7 @@ is loading or busy. Model discovery bypasses this queue.
   estimated prompt (bytes/3, including the serialized chat tool definitions), never below a 256-token floor, and a request is refused
   before sending only when the estimated prompt plus 256 exceeds the window: chat says
   `prompt ≈N tokens > --num-ctx M; run /compact or /clear, press Ctrl+N for a new conversation, or raise --num-ctx`, planner, worker and repair say
-  `raise --num-ctx (≈N tokens needed)` because they cannot shorten anything. A reply cut
+  `raise --num-ctx (≈N tokens needed)` because they cannot shorten anything (autopilot stops on a worker that hits this, with no repair). A reply cut
   off by the clamped limit reports the real token limit and suggests raising `--num-ctx`.
   Short prompts therefore work at any accepted window, including 2048 and 4096.
   After each reply that reports `prompt_eval_count` the chat shows
