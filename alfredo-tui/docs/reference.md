@@ -199,6 +199,10 @@ and creates one local branch `alfredo/go-<id>`. HEAD, the index and working file
 untouched; nothing is pushed. The summary lists each task's outcome and the `git switch`
 / `git merge` commands, and says when the branch holds only an accepted subset. The branch tip is an extra commit
 on the composed tree whose subject is the goal (first 72 characters).
+The summary's `Changes` row, `Changes   2 files   +6 −1`, sums `git diff --numstat` from the
+baseline to the branch tip (a binary file counts as a file and adds no lines). It is measured once
+when the run finishes, saved with the run and shown unchanged after a restart; it is left out when
+no branch was made or Git cannot report the diff.
 The finish notice and summary add one totals line, `tokens 12.3k in / 1.1k out · model 38 s`,
 summed over the planner, the workers and the repairs of this run's own tasks (counts
 and total model time as the server reported them; no cost estimate). The line is
@@ -223,12 +227,14 @@ name that does not exist exits 2 with `use --new-mission NAME to create it`). Ea
 line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`; a repair
 names its trigger: `check failed`, `no files changed` or `worker failed`;
 `done 2/2 alfredo/go-ab12`). On exit stdout carries exactly one JSON object:
-`{model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage}` with
+`{model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage[, changes]}` with
 `state` one of `done`, `partial`, `failed` or `paused`. `usage` is
 `{prompt_tokens, completion_tokens, model_seconds}`, the same totals as the `/go` summary line:
 planner, worker and repair calls summed from the server's `prompt_eval_count`, `eval_count`
 and `total_duration` (`model_seconds` is that duration in seconds, not client wall-clock time).
-A field the server never reported is `null`; the object is always present. Exit codes: 0 every task
+A field the server never reported is `null`; the object is always present. `changes` is
+`{files, added, deleted}`, the same totals as the summary's `Changes` row, and is present only when
+the run made an integration branch. Exit codes: 0 every task
 accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
 without `--go`, with `--select` or `--doctor`, no repository, no
 sandbox, Ollama unreachable, model not installed; these print `Error: …` on stderr and
