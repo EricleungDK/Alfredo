@@ -10,7 +10,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("/pause", "pause autopilot; running workers finish (F5)"),
     ("/resume", "resume a paused or restored autopilot (F5)"),
-    ("/stop", "pause autopilot and cancel running workers"),
+    ("/stop", "pause autopilot, cancel running workers and the chat turn"),
     ("/autopilot", "show autopilot status and completion summary"),
     ("/scope", "[JSON] — inspect or draft project understanding"),
     (
