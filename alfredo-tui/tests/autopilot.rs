@@ -5266,6 +5266,53 @@ fn lint_refusal_view_needs_both_the_prefix_and_the_fix_to_match() {
     );
 }
 
+#[test]
+fn capacity_refusals_show_the_whole_sentence_as_a_chat_row_and_a_short_footer() {
+    use alfredo_tui::tasks::capacity_refusal;
+    for (command, used, needed) in [
+        ("/go", 256, 1),
+        ("/plan", 256, 1),
+        ("/go", 250, 10),
+        ("/plan-revise", 255, 3),
+        ("/architect-revise", 256, 1),
+    ] {
+        let error = capacity_refusal(used, needed);
+        let (notice, rows) = alfredo_tui::worker::refusal_view(&error, command).expect(command);
+        assert_eq!(rows, vec![format!("✗ Not started · {error}")], "{command}");
+        assert!(rows[0].contains("--new-mission NAME"), "{rows:?}");
+        assert!(rows[0].contains("Start New Mission"), "{rows:?}");
+        assert!(
+            notice.starts_with(&format!("{command} refused:")),
+            "{notice}"
+        );
+        assert!(notice.contains("chat rows above"), "{notice}");
+        assert!(notice.chars().count() <= 78, "{notice}");
+        assert!(!notice.contains("--new-mission"), "{notice}");
+    }
+}
+
+#[test]
+fn a_plan_that_does_not_fit_keeps_its_slot_wording_in_the_chat_row() {
+    let error = alfredo_tui::tasks::capacity_refusal(250, 10);
+    let (_, rows) = alfredo_tui::worker::refusal_view(&error, "/go").expect("capacity refusal");
+    assert!(
+        rows[0].contains("this plan needs 10 task slots but only 6 free"),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn only_task_capacity_refusals_get_the_capacity_view() {
+    for other in [
+        "Unknown task 9",
+        "Task list 80% full (205/256); start a new mission before it fills",
+        "Task capacity reached",
+        "Usage: /go GOAL",
+    ] {
+        assert_eq!(alfredo_tui::worker::refusal_view(other, "/go"), None, "{other}");
+    }
+}
+
 /// An autopilot that is planning its first goal, so every `/go` is refused as active.
 fn active_refusal_for(first_goal: &str, command: &str) -> String {
     let fixture = Fixture::new();
