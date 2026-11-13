@@ -188,7 +188,7 @@ pub struct Evidence {
     pub status: TaskStatus,
     pub detail: String,
     /// Typed failure class when the run failed for an environment reason
-    /// (`execution::SANDBOX_UNAVAILABLE`, `FILE_TOO_LARGE`, `MODEL_UNREACHABLE`); repairing the code cannot fix it.
+    /// (`execution::SANDBOX_UNAVAILABLE`, `FILE_TOO_LARGE`, `MODEL_UNREACHABLE`, `CONTEXT_TOO_SMALL`); repairing the code cannot fix it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
     pub patch: String,
@@ -964,6 +964,10 @@ pub const FILE_TOO_LARGE: &str = "file-too-large";
 /// Evidence `failure_code` for a model request that could not reach the server.
 /// Not a code problem: a repair would hit the same dead endpoint.
 pub const MODEL_UNREACHABLE: &str = "model-unreachable";
+
+/// Evidence `failure_code` for a worker prompt larger than `--num-ctx`. Deterministic: the
+/// request is refused before it is sent, and a repair only makes the prompt larger.
+pub const CONTEXT_TOO_SMALL: &str = "context-too-small";
 
 fn kib(bytes: u64) -> u64 {
     bytes.div_ceil(1024)
@@ -2230,6 +2234,12 @@ async fn perform(
         {
             evidence.failure_code = Some(MODEL_UNREACHABLE.into());
             return Err(model_unreachable(&endpoint, task.id));
+        }
+        if error
+            .as_deref()
+            .is_some_and(crate::provider::is_context_failure)
+        {
+            evidence.failure_code = Some(CONTEXT_TOO_SMALL.into());
         }
         return Err(error.unwrap_or_else(|| "Worker stream ended before completion".into()));
     }
