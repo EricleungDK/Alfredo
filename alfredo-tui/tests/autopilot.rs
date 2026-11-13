@@ -5202,6 +5202,43 @@ fn stop_pause_and_resume_agree_across_autopilot_states() {
     }
 }
 
+/// Issue #721: /stop that also ended a chat turn must not say "No active autopilot".
+#[test]
+fn stop_notice_names_the_cancelled_chat_turn_and_keeps_the_autopilot_report() {
+    use alfredo_tui::autopilot::stop_notice;
+    // Idle chat: the autopilot notice is untouched.
+    assert_eq!(
+        stop_notice("No active autopilot", false),
+        "No active autopilot"
+    );
+    let running = "Autopilot stopped · cancellation requested for 0 worker(s) · /resume continues";
+    assert_eq!(stop_notice(running, false), running);
+    // Chat turn cancelled, no autopilot: the chat's notice replaces the misleading head.
+    assert_eq!(
+        stop_notice("No active autopilot", true),
+        "Chat turn cancelled"
+    );
+    assert_eq!(
+        stop_notice(
+            "No active autopilot · planning cancelled, no draft will appear",
+            true
+        ),
+        "Chat turn cancelled · planning cancelled, no draft will appear"
+    );
+    // Both: the autopilot report stays and the chat turn is added.
+    assert_eq!(
+        stop_notice(running, true),
+        format!("{running} · chat turn cancelled")
+    );
+}
+
+#[test]
+fn stop_is_an_autopilot_command_so_enter_routes_it_through_the_stop_path() {
+    assert!(alfredo_tui::autopilot::is_command("/stop"));
+    assert!(alfredo_tui::autopilot::is_command("  /stop  "));
+    assert!(!alfredo_tui::autopilot::is_command("/stop now"));
+}
+
 /// Without an active autopilot, /stop still cancels running workers (here a
 /// worker started by an autopilot that this instance knows nothing about, so it
 /// is indistinguishable from a manual one) and must not claim autopilot stopped.

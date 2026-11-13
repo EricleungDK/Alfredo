@@ -1775,6 +1775,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             let text = work.app.sessions[index].draft.trim().to_owned();
                             let model = work.app.sessions[index].model.clone();
+                            // Issue #721: /stop ends the running chat turn like Esc (and kills a
+                            // running run_command); idle chat is left untouched.
+                            let chat_cancelled =
+                                text == "/stop" && work.app.sessions[index].status.active();
+                            if chat_cancelled {
+                                at_lookup.cancel();
+                                command_staging::cancel_chat_turn(
+                                    &mut work.app,
+                                    index,
+                                    &mut jobs,
+                                    &mut approval_replies,
+                                );
+                            }
                             match work.autopilot.command(
                                 &runtime,
                                 &mut work.tasks,
@@ -1785,7 +1798,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(notice) => {
                                     work.app.sessions[index].remember_submission();
                                     work.app.sessions[index].clear_draft();
-                                    work.app.notice = notice;
+                                    work.app.notice = alfredo_tui::autopilot::stop_notice(
+                                        &notice,
+                                        chat_cancelled,
+                                    );
                                     if text.split_whitespace().next() == Some("/go") {
                                         work.app.append_history_warning(index);
                                         // Autopilot work is watched on the dashboard.

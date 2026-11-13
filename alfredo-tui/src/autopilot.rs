@@ -387,6 +387,18 @@ pub fn is_command(text: &str) -> bool {
         || matches!(text, "/pause" | "/resume" | "/stop" | "/autopilot")
 }
 
+/// Issue #721: `/stop` also ends the active chat turn (like Esc). The footer names what was
+/// stopped: "No active autopilot" is only true when the chat turn was idle too.
+pub fn stop_notice(notice: &str, chat_cancelled: bool) -> String {
+    if !chat_cancelled {
+        return notice.to_owned();
+    }
+    match notice.strip_prefix("No active autopilot") {
+        Some(rest) => format!("Chat turn cancelled{rest}"),
+        None => format!("{notice} · chat turn cancelled"),
+    }
+}
+
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Settled {
