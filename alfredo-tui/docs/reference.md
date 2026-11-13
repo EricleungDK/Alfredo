@@ -123,8 +123,15 @@ A worker prompt larger than `--num-ctx` is refused before it is sent, so every r
 fail the same way, and a repair only adds context. That run gets the typed
 `context-too-small` `failure_code`; autopilot stops without spending a repair (Repairs stays
 0), and the Reason quotes `prompt ≈N tokens > --num-ctx M; raise --num-ctx (≈K tokens
-needed)` with a `Next` row to raise `--num-ctx` or approve fewer or smaller files. A manual
-`/repair ID` on that task still works.
+needed)` with a `Next` row to raise `--num-ctx`, then `/repair ID retry`, or approve fewer or
+smaller files. The stop is re-entrant like the model-unreachable one above: after a restart
+with a larger `--num-ctx`, `/repair ID retry` resumes the stopped run (the repair is approved
+and run, held dependents follow, and the run ends on one `alfredo/go-*` branch); a retry at a
+window that is still too small stops again the same way, with no worker request and no further
+repair. Headless `--go` names the stopped task in the `failed` entry (`"id": ID`, not null) and
+prints `next: raise --num-ctx, then --resume --headless retries #ID without planning again`;
+`--resume --headless --num-ctx N` queues the same `/repair ID retry`. A manual `/repair ID` on
+that task still works.
 
 Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
 or untracked, non-ignored files, the start notice and the run's summary carry a

@@ -1260,7 +1260,8 @@ impl Autopilot {
         saved.finished_through = Some(latest);
         // A run stopped by `fail()` (sandbox refusal, file too large) may still have
         // other families open; resuming would drive all of them. It stays finished,
-        // except after an unreachable model server, which `/repair` is advertised for.
+        // except after an unreachable model server or a too-small `--num-ctx`, which
+        // `/repair` is advertised for.
         let reentrant = saved.phase == Phase::Failed && saved.reentrant;
         if repaired.is_empty() || (saved.phase != Phase::Done && !reentrant) {
             if moved {
@@ -1331,9 +1332,9 @@ impl Autopilot {
         self.status(tasks)
     }
 
-    /// The run an unreachable model server stopped (`Failed` with `reentrant`), and the
-    /// id of the stopped task: what `/repair ID retry` re-enters and `--resume
-    /// --headless` continues. Every other `Failed` run is none.
+    /// The run an unreachable model server or a too-small `--num-ctx` stopped (`Failed`
+    /// with `reentrant`), and the id of the stopped task: what `/repair ID retry`
+    /// re-enters and `--resume --headless` continues. Every other `Failed` run is none.
     pub fn reentrant_run(&self, tasks: &TaskControl) -> Option<(Status, u64)> {
         let saved = self
             .saved
@@ -1345,7 +1346,9 @@ impl Autopilot {
             .filter(|family| !held_or_done(family, tasks))
             .find_map(|family| {
                 let head = snapshot.tasks.iter().find(|task| task.id == family.head)?;
-                unreachable_failure(tasks, head).map(|_| head.id)
+                unreachable_failure(tasks, head)
+                    .or_else(|| context_failure(tasks, head))
+                    .map(|_| head.id)
             })?;
         Some((self.status(tasks)?, stopped))
     }
@@ -1984,15 +1987,20 @@ impl Autopilot {
             }
             if let Some(cause) = find(family.head).and_then(|head| context_failure(tasks, head)) {
                 // The provider's reason already ends with the way forward (raise --num-ctx).
+                // Re-entrant like an unreachable stop (issue #706): after a restart with a
+                // larger window, `/repair ID retry` resumes the run.
                 let repairs: u32 = families.iter().map(|family| family.repairs).sum();
                 self.fail_with_next(
                     tasks,
                     cause,
                     Some((
-                        "Raise --num-ctx, or approve fewer or smaller files.".to_string(),
+                        format!(
+                            "Raise --num-ctx, then /repair {} retry, or approve fewer or smaller files.",
+                            family.head
+                        ),
                         repairs,
                     )),
-                    false,
+                    true,
                 );
                 return Ok(None);
             }
@@ -2669,6 +2677,22 @@ pub fn name_stopped_task(result: &mut serde_json::Value, id: u64) {
     {
         entry["id"] = id.into();
     }
+}
+
+/// The headless `next:` line for a re-entrant stop of task `id` (issues #584, #706): what
+/// to fix first, then `--resume --headless` retries the task.
+pub fn reentry_next_line(tasks: &TaskControl, id: u64) -> String {
+    let context = tasks
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.tasks.iter().find(|task| task.id == id))
+        .is_some_and(|head| context_failure(tasks, head).is_some());
+    let fix = if context {
+        "raise --num-ctx"
+    } else {
+        "start the model server"
+    };
+    format!("next: {fix}, then --resume --headless retries #{id} without planning again")
 }
 
 /// How long the old `Failed` stop may wait for the queued retry to restart the run.
