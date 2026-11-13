@@ -1821,10 +1821,10 @@ fn two_task_server() -> Server {
 #[test]
 fn repair_after_a_context_too_small_stop_at_a_larger_num_ctx_runs_dependents_and_integrates() {
     let fixture = Fixture::new();
-    let head = fixture.head();
     let server = two_task_server();
     let runtime = Runtime::new().unwrap();
     let (mut autopilot, mut control) = context_two_task_run(&fixture, &server, &runtime);
+    let head = fixture.head();
     // The owner raises the window, then retries the stopped task.
     control.set_provider(server.provider().with_num_ctx(Some(65_536)));
     assert_eq!(owner_repair(&mut control, &runtime, 1, "retry"), 3);
