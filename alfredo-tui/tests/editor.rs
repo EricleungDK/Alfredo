@@ -356,7 +356,7 @@ fn insert_reports_truncation_only_when_the_limit_cut_text() {
 }
 
 #[test]
-fn a_multibyte_character_straddling_the_limit_is_dropped_whole_and_lone_cr_is_stripped() {
+fn a_multibyte_character_straddling_the_limit_is_dropped_whole_and_lone_cr_becomes_a_newline() {
     let mut editor = Session::new("fixture".into());
     editor.insert(&"a".repeat(MAX_DRAFT - 3));
     let result = editor.insert("🦀");
@@ -365,7 +365,7 @@ fn a_multibyte_character_straddling_the_limit_is_dropped_whole_and_lone_cr_is_st
     assert!(editor.draft.chars().all(|c| c == 'a'));
     editor.clear_draft();
     let result = editor.insert("a\rb\r\nc");
-    assert_eq!(editor.draft, "ab\nc");
+    assert_eq!(editor.draft, "a\nb\nc");
     assert!(!result.truncated);
 }
 
@@ -380,6 +380,17 @@ fn a_lone_cr_in_pasted_text_becomes_a_newline() {
     editor.clear_draft();
     editor.insert("a\x1b\rb\0\rc");
     assert_eq!(editor.draft, "a\nb\nc");
+}
+
+#[test]
+fn crlf_paste_stays_a_single_newline() {
+    let mut editor = Session::new("fixture".into());
+    editor.insert("one\r\ntwo\r\n\r\nthree");
+    assert_eq!(editor.draft, "one\ntwo\n\nthree");
+    assert_eq!(editor.draft.matches('\n').count(), 3);
+    editor.clear_draft();
+    editor.insert("a\r\nb");
+    assert_eq!(editor.draft.matches('\n').count(), 1);
 }
 
 #[test]

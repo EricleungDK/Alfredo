@@ -821,10 +821,12 @@ impl Session {
         self.cursor = start;
     }
 
-    /// Inserts sanitized text at the cursor. Tabs become four spaces, `\r\n` becomes
-    /// `\n`, other control characters are dropped, and the 16 KiB limit never splits
-    /// a grapheme cluster. The result reports what was kept so callers need not re-derive it.
+    /// Inserts sanitized text at the cursor. Tabs become four spaces, `\r\n` and a lone
+    /// `\r` become `\n`, other control characters are dropped, and the 16 KiB limit
+    /// (counted on the normalised text) never splits a grapheme cluster. The result reports
+    /// what was kept so callers need not re-derive it.
     pub fn insert(&mut self, text: &str) -> Inserted {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let cursor = self.cursor();
         let mut clean = String::new();
         let mut truncated = false;
