@@ -355,8 +355,9 @@ fn insert_reports_truncation_only_when_the_limit_cut_text() {
     assert_eq!(editor.draft.len(), MAX_DRAFT - 3);
 }
 
+// The name is historical: since #727 a lone CR becomes a newline instead of being stripped.
 #[test]
-fn a_multibyte_character_straddling_the_limit_is_dropped_whole_and_lone_cr_becomes_a_newline() {
+fn a_multibyte_character_straddling_the_limit_is_dropped_whole_and_lone_cr_is_stripped() {
     let mut editor = Session::new("fixture".into());
     editor.insert(&"a".repeat(MAX_DRAFT - 3));
     let result = editor.insert("🦀");
