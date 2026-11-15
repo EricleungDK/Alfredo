@@ -94,6 +94,9 @@ fn the_prompt_title_offers_tab_only_with_two_or_more_chats() {
     app.add_session();
     for width in [80, 120] {
         let row = title_row(&app, width);
-        assert!(row.contains("Enter send") && row.contains("Tab chats"), "{row}");
+        assert!(
+            row.contains("Enter send") && row.contains("Tab chats"),
+            "{row}"
+        );
     }
 }
