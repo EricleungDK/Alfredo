@@ -4,7 +4,7 @@ use crate::{
         ExecutionAuthority, ExecutionCallbacks, ExecutionLimits, ExecutionReceipt,
         ExecutionRequest, ExecutionSandbox, RustExecutionProvider,
     },
-    tasks::{regular_file, Task, TaskStatus},
+    tasks::{regular_file, Task, TaskStatus, WorkPolicy},
     worker::Evidence,
 };
 use serde::{Deserialize, Serialize};
@@ -232,17 +232,47 @@ fn managed_worktree(path: &Path, task: &Task) -> Result<String> {
 
 // This is the immutable version-1 native check contract, intentionally independent
 // of worker defaults and of which system roots exist on a later recovery host.
+/// The request for a new check launch: the policy is checked as new input, file refusals
+/// included.
 fn contract_request(
     root: String,
     task: &Task,
     mission: &str,
     system_roots: &[String],
 ) -> Result<ExecutionRequest> {
+    contract_request_with(root, task, mission, system_roots, WorkPolicy::validate)
+}
+
+/// The request an existing check record was made under. Verification and recovery replay
+/// a record that already exists, so the policy gets only the stored-shape check: a task
+/// saved before the path refusals must still recover. A new launch uses [`contract_request`].
+fn recorded_contract_request(
+    root: String,
+    task: &Task,
+    mission: &str,
+    system_roots: &[String],
+) -> Result<ExecutionRequest> {
+    contract_request_with(
+        root,
+        task,
+        mission,
+        system_roots,
+        WorkPolicy::validate_stored,
+    )
+}
+
+fn contract_request_with(
+    root: String,
+    task: &Task,
+    mission: &str,
+    system_roots: &[String],
+    check_policy: fn(&WorkPolicy) -> Result<()>,
+) -> Result<ExecutionRequest> {
     if mission.trim().is_empty() || mission.len() > 120 || mission.chars().any(char::is_control) {
         return Err("Invalid check Mission identity".into());
     }
     let policy = task.policy.as_ref().ok_or("Missing work policy")?;
-    policy.validate()?;
+    check_policy(policy)?;
     let run = task.run.as_ref().ok_or("Missing run claim")?;
     let expected_roots: Vec<_> = SYSTEM_ROOTS
         .iter()
@@ -333,7 +363,7 @@ fn verify_intent(path: &Path, task: &Task, mission: &str, intent: &CheckIntent) 
     {
         return Err("Check intent does not match the versioned task/run/Mission/baseline".into());
     }
-    let expected = contract_request(
+    let expected = recorded_contract_request(
         managed_worktree(path, task)?,
         task,
         mission,
@@ -650,7 +680,7 @@ pub(crate) fn record_interrupted_after_check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::{TaskRun, WorkPolicy};
+    use crate::tasks::TaskRun;
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
@@ -858,6 +888,36 @@ mod tests {
                     .is_err()
             );
             assert_eq!(fs::read(fixture.path.join("evidence.json")).unwrap(), saved);
+        }
+    }
+
+    /// Verification is not new input: a task saved before the path refusals, whose check
+    /// was already launched under a clean policy, still recovers its recorded check. Only
+    /// the new launch (`execute_check_classified`) refuses the path. In-crate because the
+    /// recorded intent and result need this module's fixture.
+    #[test]
+    fn saved_task_naming_a_secret_or_hidden_path_still_recovers_its_recorded_check() {
+        for legacy in [".env", "src/app\u{200B}.py"] {
+            let mut fixture = Fixture::new();
+            // The launch record carries the task's own files as `allowed_paths`, so record
+            // the intent as a pre-upgrade launch did: the legacy path in the authority.
+            fixture.task.policy = Some(WorkPolicy {
+                files: vec![legacy.into()],
+                check: vec!["/usr/bin/true".into()],
+            });
+            let ExecutionAuthority::LocalAgent { allowed_paths, .. } =
+                &mut fixture.intent.request.authority
+            else {
+                panic!("check authority is local agent")
+            };
+            *allowed_paths = vec![legacy.into()];
+            fixture.intent.request_digest = fixture.intent.request.request_digest().unwrap();
+            let check = receipt(&fixture.intent, "completed");
+            verify_receipt(&fixture.intent, &check).unwrap();
+            fixture.publish(check);
+            let evidence =
+                interrupted_after_check(&fixture.path, &fixture.task, "mission").unwrap();
+            assert_eq!(evidence.status, TaskStatus::Failed, "{legacy:?}");
         }
     }
 

@@ -90,7 +90,22 @@ pub fn iter_entries<'a>(snapshot: &'a Snapshot, query: &str) -> impl Iterator<It
                 ),
                 Action::Permit { policy, .. } => (
                     "Policy set · approval required".into(),
-                    format!("Files {:?} · check {:?}", policy.files, policy.check),
+                    // `{:?}` escapes only what Rust calls non-printable, so a printable but
+                    // invisible character (U+3164, U+FFA0) would stay raw. Show the
+                    // characters `safe_visible` marks as `<U+XXXX>` first.
+                    format!(
+                        "Files {:?} · check {:?}",
+                        policy
+                            .files
+                            .iter()
+                            .map(|file| crate::dashboard::safe_visible(file))
+                            .collect::<Vec<_>>(),
+                        policy
+                            .check
+                            .iter()
+                            .map(|arg| crate::dashboard::safe_visible(arg))
+                            .collect::<Vec<_>>(),
+                    ),
                 ),
                 Action::Approve { .. } => (
                     "Task approved".into(),

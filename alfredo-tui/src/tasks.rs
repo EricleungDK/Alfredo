@@ -236,8 +236,63 @@ pub struct WorkPolicy {
     pub check: Vec<String>,
 }
 
+/// Why a policy path may not name a task file. The worker refuses the same paths when it
+/// reads or writes them, so a task saved before this check fails before any model request.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FileRefusal {
+    /// A character [`crate::dashboard::card_hidden`] flags, such as U+200B, U+202E or U+FE0F.
+    Hidden(char),
+    /// A secret or generated path, as [`crate::planning_context::read_excluded`] flags it.
+    Excluded,
+}
+
+/// The first reason `path` may not be a task file. Hidden characters (the card set, which
+/// includes default-ignorable marks such as U+FE0F) are checked first, so a refusal never
+/// echoes an invisible character. Writes use the read predicate on purpose: the env
+/// templates (`.env.example`) stay editable, as the ticket requires.
+pub(crate) fn file_refusal(path: &str) -> Option<FileRefusal> {
+    if let Some(c) = path.chars().find(|c| crate::dashboard::card_hidden(*c)) {
+        return Some(FileRefusal::Hidden(c));
+    }
+    // `read_excluded` takes a lowercased path (it does not lowercase itself).
+    crate::planning_context::read_excluded(&path.to_lowercase()).then_some(FileRefusal::Excluded)
+}
+
 impl WorkPolicy {
+    /// New input (a Permit, a planner plan, a `/permit` command): the stored shape plus the
+    /// file refusals of [`file_refusal`]. Replaying saved receipts uses [`Self::validate_stored`].
     pub fn validate(&self) -> Result<()> {
+        self.validate_stored()?;
+        self.validate_files(|number| format!("Policy file {number}"))
+    }
+
+    /// The [`file_refusal`] of every path, in order. `field` labels the 1-based file number
+    /// in a hidden-character refusal. Plan validation calls this per step, so the message
+    /// template lives only here.
+    pub(crate) fn validate_files(&self, field: impl Fn(usize) -> String) -> Result<()> {
+        for (index, path) in self.files.iter().enumerate() {
+            match file_refusal(path) {
+                Some(FileRefusal::Hidden(c)) => {
+                    return Err(format!(
+                        "{} contains hidden character U+{:04X}; remove invisible or bidirectional characters",
+                        field(index + 1),
+                        c as u32
+                    ));
+                }
+                Some(FileRefusal::Excluded) => {
+                    return Err(format!(
+                        "Policy file {path} is a secret or generated path; remove it from the task's files"
+                    ));
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The shape every saved policy already passed. Replay uses this alone, so a task saved
+    /// before a path check keeps loading; the worker enforces the path check at run time.
+    pub(crate) fn validate_stored(&self) -> Result<()> {
         use std::path::Component;
         if self.files.is_empty()
             || self.files.len() > 32
@@ -1567,6 +1622,7 @@ impl TaskStore {
                 .into());
             }
         }
+        Self::admit(&request.action)?;
         let task = Self::apply(&mut snapshot, &request.action)?;
         snapshot.revision += 1;
         let receipt = Receipt {
@@ -1638,6 +1694,16 @@ impl TaskStore {
             return Err("Task storage capacity is reserved for running worker results".into());
         }
         Ok(())
+    }
+
+    /// New input is checked in full before it is applied. Saved receipts replay through
+    /// [`Self::apply`] with the stored-shape checks only, so an older journal keeps loading.
+    fn admit(action: &Action) -> Result<()> {
+        match action {
+            Action::Plan { plan } => plan.validate(),
+            Action::Permit { policy, .. } => policy.validate(),
+            _ => Ok(()),
+        }
     }
 
     fn apply(snapshot: &mut Snapshot, action: &Action) -> Result<u64> {
@@ -1818,7 +1884,7 @@ impl TaskStore {
             }
 
             Action::Plan { plan } => {
-                plan.validate()?;
+                plan.validate_stored()?;
                 if snapshot.tasks.len() + plan.tasks.len() > MAX_TASKS {
                     return Err(capacity_refusal(snapshot.tasks.len(), plan.tasks.len()));
                 }
@@ -2013,7 +2079,7 @@ impl TaskStore {
                 Ok(*task)
             }
             Action::Permit { task, policy } => {
-                policy.validate()?;
+                policy.validate_stored()?;
                 let item = snapshot
                     .tasks
                     .iter_mut()

@@ -1,7 +1,7 @@
 use alfredo_tui::{
     conversations::{Autosave, ConversationStore, Snapshot},
     model::{App, Status, Update},
-    tasks::TaskStore,
+    tasks::{Action, Request, TaskStore},
 };
 use std::{
     fs,
@@ -832,6 +832,36 @@ fn v5_draft_migration_preserves_v4_bytes_and_rejects_invalid_or_old_version_data
     let mut invalid = current;
     invalid.plan_draft.as_mut().unwrap().revision = u64::MAX;
     assert!(store.save(&invalid).is_err());
+}
+
+/// A draft saved before the policy refused secret and hidden paths still restores (review
+/// data, replay only). Approving it sends `Action::Plan`, which the task store refuses.
+#[test]
+fn saved_draft_naming_a_secret_or_hidden_path_still_loads_and_approval_refuses_it() {
+    for (legacy, reason) in [(".env", ".env"), ("src/app\u{200B}.py", "U+200B")] {
+        let fixture = Fixture::new();
+        let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+        let mut snapshot = Snapshot::capture(&App::new("fixture".into()), "default");
+        snapshot.plan_draft = Some(saved_plan());
+        store.save(&snapshot).unwrap();
+        let file = fixture.file();
+        let saved = fs::read_to_string(&file).unwrap();
+        fs::write(
+            &file,
+            saved.replace("\"calc.py\"", &serde_json::to_string(legacy).unwrap()),
+        )
+        .unwrap();
+        let loaded = store.load().unwrap().unwrap();
+        let draft = loaded.plan_draft.expect("draft still restores");
+        assert_eq!(draft.plan.tasks[0].policy.files, [legacy]);
+        let refused = fixture.tasks.transact(Request {
+            correlation: "approve-draft".into(),
+            expected_revision: fixture.tasks.snapshot().unwrap().revision,
+            action: Action::Plan { plan: draft.plan },
+        });
+        let error = refused.unwrap_err();
+        assert!(error.contains(reason), "{legacy:?}: {error}");
+    }
 }
 
 #[test]

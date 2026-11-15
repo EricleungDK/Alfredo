@@ -890,6 +890,17 @@ pub(crate) async fn git_records(
 }
 
 fn safe_file(root: &Path, relative: &str) -> Result<PathBuf> {
+    // Every approved-file read and write passes here, so a task saved before the policy
+    // refused a secret or generated path fails now, before the model sees any file. Writes
+    // use the read predicate on purpose: env templates (`.env.example`) stay editable. The
+    // path is shown visibly (`<U+XXXX>` for hidden characters), never raw, in run detail.
+    // Hidden characters are refused at new input only (`WorkPolicy::validate`).
+    if crate::planning_context::read_excluded(&relative.to_lowercase()) {
+        return Err(format!(
+            "{} is a secret or generated path; the task cannot read or write it. Remove it from the task's files",
+            answer::shown_path(relative)
+        ));
+    }
     let mut path = root.to_path_buf();
     for part in relative.split('/') {
         path.push(part);
@@ -926,7 +937,7 @@ pub fn validate_plan(plan: &FilePlan, policy: &WorkPolicy) -> Result<()> {
         return Err(format!(
             "Returned unapproved file{} {named}; only {} may be written",
             if unapproved.len() == 1 { "" } else { "s" },
-            policy.files.join(", ")
+            crate::dashboard::safe_visible(&policy.files.join(", "))
         ));
     }
     let mut seen = BTreeSet::new();
@@ -1820,7 +1831,7 @@ pub async fn start_checked(
                     evidence.status = TaskStatus::Failed;
                     evidence.detail = format!(
                         "{NO_FILES_CHANGED} the check passed but the answer left every allowed file identical to the baseline (allowed: {})",
-                        task.policy.as_ref().map_or(String::new(), |p| p.files.join(", "))
+                        task.policy.as_ref().map_or(String::new(), |p| crate::dashboard::safe_visible(&p.files.join(", ")))
                     )
                     .chars()
                     .filter(|c| !c.is_control())
