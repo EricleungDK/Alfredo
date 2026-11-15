@@ -370,6 +370,19 @@ fn a_multibyte_character_straddling_the_limit_is_dropped_whole_and_lone_cr_is_st
 }
 
 #[test]
+fn a_lone_cr_in_pasted_text_becomes_a_newline() {
+    let mut editor = Session::new("fixture".into());
+    let result = editor.insert("one\rtwo\rthree");
+    assert_eq!(editor.draft, "one\ntwo\nthree");
+    assert_eq!(result.accepted, "one\ntwo\nthree".len());
+    assert!(!result.truncated);
+    // ESC and NUL are still dropped around the converted breaks.
+    editor.clear_draft();
+    editor.insert("a\x1b\rb\0\rc");
+    assert_eq!(editor.draft, "a\nb\nc");
+}
+
+#[test]
 fn rejected_command_is_replaced_by_the_next_typed_character_and_recalled_with_up() {
     let mut session = Session::new("fixture".into());
     session.insert("/go");
