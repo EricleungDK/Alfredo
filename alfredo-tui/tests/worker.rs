@@ -596,6 +596,67 @@ async fn approved_file_over_the_bound_fails_with_a_typed_code_and_no_model_call(
     assert_eq!(evidence.detail, expected);
 }
 
+/// A task saved before policy paths were checked: its approval names `legacy` instead of
+/// `calc.py`. The rewrite touches only the stored permit, so the journal still replays.
+fn rewrite_saved_policy_file(fixture: &Fixture, legacy: &str) {
+    let directory = fs::read_dir(fixture.root.join("state/rust-tasks-v1"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let file = directory.join("tasks.json");
+    let saved = fs::read_to_string(&file).unwrap();
+    let legacy = serde_json::to_string(legacy).unwrap();
+    fs::write(file, saved.replace("\"calc.py\"", &legacy)).unwrap();
+}
+
+#[tokio::test]
+async fn legacy_approved_secret_or_hidden_path_fails_before_any_model_request() {
+    for (legacy, reason) in [(".env", ".env"), ("a\u{202e}txt.py", "U+202E")] {
+        let fixture = Fixture::new();
+        fs::write(fixture.workspace.join(".env"), "TOKEN=hunter2-COMMITTED\n").unwrap();
+        for args in [
+            vec!["add", "-f", ".env"],
+            vec!["-c", "core.hooksPath=/dev/null", "commit", "-qm", "secret"],
+        ] {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&fixture.workspace)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        fixture.permit();
+        rewrite_saved_policy_file(&fixture, legacy);
+        let (tx, received) = std::sync::mpsc::channel();
+        let (provider, _server, _) = server_with_capture(
+            good_plan(),
+            Duration::ZERO,
+            "return 42",
+            Some(tx),
+        );
+        let (snapshot, _) = worker::start(
+            fixture.store.clone(),
+            1,
+            "legacy-secret".into(),
+            3,
+            provider,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed, "{legacy:?}");
+        let detail = &snapshot.tasks[0].run.as_ref().unwrap().detail;
+        assert!(detail.contains(reason), "{legacy:?}: {detail}");
+        assert!(
+            received.try_recv().is_err(),
+            "{legacy:?} reached the model"
+        );
+    }
+}
+
 #[tokio::test]
 async fn unreachable_model_server_fails_with_a_typed_code_and_names_the_endpoint_and_next_step() {
     let fixture = Fixture::new();

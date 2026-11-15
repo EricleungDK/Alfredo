@@ -2556,3 +2556,41 @@ fn task_receipt_notice_names_permit_before_approve() {
         control.notice
     );
 }
+
+#[test]
+fn new_permits_refuse_secret_and_hidden_paths_but_saved_state_naming_them_still_loads() {
+    for legacy in [".env", "a\u{202e}txt.py"] {
+        let fixture = Fixture::new();
+        fixture
+            .store("mission")
+            .transact(proposal("create", 0, vec![]))
+            .unwrap();
+        let refused = fixture.store("mission").transact(Request {
+            correlation: "secret-permit".into(),
+            expected_revision: 1,
+            action: Action::Permit {
+                task: 1,
+                policy: alfredo_tui::tasks::WorkPolicy {
+                    files: vec![legacy.into()],
+                    check: vec!["/usr/bin/true".into()],
+                },
+            },
+        });
+        assert!(refused.is_err(), "new permit accepted {legacy:?}");
+        // Saved state from before the check still loads: rewrite the stored permit to the
+        // legacy path, then replay the whole journal.
+        fixture
+            .store("mission")
+            .transact(permit_request("permit", 1, 1))
+            .unwrap();
+        let file = fixture.file();
+        let saved = fs::read_to_string(&file).unwrap();
+        let legacy_json = serde_json::to_string(legacy).unwrap();
+        fs::write(&file, saved.replace("\"calc.py\"", &legacy_json)).unwrap();
+        let snapshot = fixture.store("mission").snapshot().unwrap();
+        assert_eq!(
+            snapshot.tasks[0].policy.as_ref().unwrap().files[0],
+            legacy
+        );
+    }
+}

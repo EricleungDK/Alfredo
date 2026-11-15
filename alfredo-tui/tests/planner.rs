@@ -1822,6 +1822,27 @@ fn plan_rejects_hidden_characters_naming_field_and_code_point() {
 }
 
 #[test]
+fn plan_rejects_hidden_characters_in_policy_files_naming_task_file_and_code_point() {
+    for (path, code) in [("src/app\u{200B}.py", "U+200B"), ("a\u{202E}txt.py", "U+202E")] {
+        let mut plan = plan();
+        plan.tasks[1].policy.files[0] = path.into();
+        let error = plan.validate().unwrap_err();
+        assert_eq!(
+            error,
+            format!("Plan task 2 file 1 contains hidden character {code}; remove invisible or bidirectional characters")
+        );
+    }
+}
+
+#[test]
+fn plan_refuses_a_secret_policy_file_and_names_the_path() {
+    let mut plan = plan();
+    plan.tasks[0].policy.files = vec!["calc.py".into(), ".env".into()];
+    let error = plan.validate().unwrap_err();
+    assert!(error.contains(".env"), "{error}");
+}
+
+#[test]
 fn check_argument_line_break_is_named_with_a_fix_and_still_refused() {
     for value in ["a\nb", "a\rb", "a\r\nb"] {
         let mut plan = plan();

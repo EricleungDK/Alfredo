@@ -510,3 +510,17 @@ fn focused_evidence_at_96_columns_keeps_check_result_in_the_initial_view() {
     }
     assert_eq!(fixture.control.scroll, 0);
 }
+
+#[test]
+fn inspector_files_row_shows_a_hidden_character_in_a_saved_policy_path_visibly() {
+    let mut legacy = task(1, "Make answer return 42", TaskStatus::Proposed, vec![], None);
+    legacy.policy = Some(WorkPolicy {
+        files: vec!["src/app\u{200B}.py".into()],
+        check: vec!["true".into()],
+    });
+    let mut fixture = Fixture::new(vec![legacy]);
+    fixture.select(1);
+    let text = inspector_text(&fixture, 100);
+    assert!(text.contains("src/app<U+200B>.py"), "{text}");
+    assert!(!text.contains('\u{200B}'), "raw hidden character reached the screen");
+}
