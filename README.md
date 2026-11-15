@@ -195,7 +195,7 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | PageUp / PageDown | Scroll transcript, agent view, details or evidence |
 | Home / End (empty prompt), Ctrl+Home / Ctrl+End | Jump to the oldest / latest transcript row; End resumes following new output. With text in the prompt, Home / End move the cursor |
 | Tab / Shift+Tab | Next / previous conversation |
-| Ctrl+N | New conversation (max 8); `/clear` restarts the current one, `/compact` summarises its older turns |
+| Ctrl+N | New conversation (max 8; not on an empty chat, which says so; at 8, `/clear` it or use `--conversation NAME`); `/clear` restarts the current one, `/compact` summarises its older turns |
 | Esc | Cancel the current model request (keeps partial reply); close pickers. You can then send a new prompt or switch `/model`. Esc (or Ctrl+Q, which also quits) stops a running chat `run_command`; `/stop` does too |
 | Ctrl+R | Retry a failed or cancelled turn, until you send a new prompt |
 | y / n / a (approval card) | Approve / deny / always allow (`a`, see `/allow`; not offered for pushes, HOST (escalated) runs, over-long commands, or writes that create directories) a chat tool call: file edit, shell command, git write or push; Esc denies and ends the turn |

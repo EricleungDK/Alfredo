@@ -268,7 +268,7 @@ fn history_is_bounded_and_does_not_cross_sessions() {
         app.sessions[0].remember_submission();
         app.sessions[0].clear_draft();
     }
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("second draft");
     app.sessions[1].history_previous();
     assert_eq!(app.sessions[1].draft, "second draft");

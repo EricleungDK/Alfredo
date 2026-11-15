@@ -818,8 +818,8 @@ fn layouts_fit_supported_sizes_and_degrade_at_40_by_12() {
 fn session_list_uses_short_status_words() {
     use alfredo_tui::model::Update;
     let mut app = App::new("qwen2.5-coder:14b".into());
-    app.add_session();
-    app.add_session();
+    app.open_chat();
+    app.open_chat();
     app.sessions[1].insert("hello");
     app.sessions[1].begin().unwrap();
     app.sessions[1].apply(1, Update::Admitted);

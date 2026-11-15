@@ -247,7 +247,7 @@ fn worker_cancel_waits_for_saved_intent_and_exact_owner_then_finishes_at_its_ori
     let id = app.sessions[0]
         .submit_command("/cancel-task 1".into(), cancel.clone())
         .unwrap();
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("newer draft remains");
     fs::remove_file(&path).unwrap();
     fs::create_dir(&path).unwrap();
@@ -567,7 +567,7 @@ fn automatic_worker_launch_waits_for_exact_saved_origin_and_restores_without_rep
     let mut app = App::new("fixture".into());
     let mut autosave = Autosave::new(ConversationStore::open(&fixture.store, "default").unwrap());
     let source = enable_saved_dispatch(&mut control, &runtime, &mut app, &mut autosave);
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("Reading and drafting in another session");
     let before = serde_json::to_value(fixture.store.snapshot().unwrap()).unwrap();
     let launch = control.prepare_dispatch().unwrap().unwrap();
