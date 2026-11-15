@@ -35,7 +35,19 @@ pub struct Plan {
     pub usage: Option<crate::metrics::Usage>,
 }
 impl Plan {
+    /// New input (planner output, a `/plan` intent): the stored shape plus the policy file
+    /// refusals. Replay of saved receipts uses [`Self::validate_stored`] alone.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_stored()?;
+        for (index, step) in self.tasks.iter().enumerate() {
+            step.policy
+                .validate_files(|file| format!("Plan task {} file {file}", index + 1))?;
+        }
+        Ok(())
+    }
+
+    /// The stored shape every saved plan already passed; see [`Self::validate`].
+    pub(crate) fn validate_stored(&self) -> Result<(), String> {
         if self.usage.is_some_and(|usage| !usage.in_bounds()) {
             return Err("Plan usage exceeds supported bounds".into());
         }
@@ -94,7 +106,7 @@ impl Plan {
                     index + 1
                 ));
             }
-            step.policy.validate()?;
+            step.policy.validate_stored()?;
         }
         if serde_json::to_vec(self).map_err(|e| e.to_string())?.len() > 128 * 1024 {
             return Err("Plan exceeds 128 KiB".into());
@@ -160,7 +172,9 @@ pub struct SavedDraft {
 }
 impl SavedDraft {
     pub fn validate(&self) -> Result<(), String> {
-        self.plan.validate()?;
+        // Restoring a saved draft is replay, not new input: the stored shape only. Approving
+        // it sends `Action::Plan`, which `TaskStore` admits with the full `Plan::validate`.
+        self.plan.validate_stored()?;
         if let Some(origin) = &self.origin {
             use crate::planner_command::Operation;
             origin.validate()?;

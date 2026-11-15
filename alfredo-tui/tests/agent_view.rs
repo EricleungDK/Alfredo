@@ -132,6 +132,21 @@ fn expanded_instruction_shows_the_request_text() {
 }
 
 #[test]
+fn instruction_policy_line_shows_a_hidden_file_name_visibly() {
+    // A saved task whose approved path carries a bidi override or a default-ignorable mark
+    // (U+FE0F looks like nothing) must not draw the raw character.
+    let mut first = attempt(1, TaskStatus::Accepted);
+    first.files = vec!["src/a\u{202E}sr.py".into(), "src/app\u{FE0F}.py".into()];
+    let turns = agent_view::project(&[first], &[], false);
+    let policy = &turns[0].lines[1].0;
+    assert_eq!(
+        policy,
+        "files src/a<U+202E>sr.py, src/app<U+FE0F>.py · check python3 -m unittest test_greet.py"
+    );
+    assert!(!policy.contains('\u{202E}') && !policy.contains('\u{FE0F}'));
+}
+
+#[test]
 fn repair_attempts_and_owner_notes_follow_in_order() {
     let mut first = attempt(1, TaskStatus::Failed);
     first.recorded = Some(Ok(recorded(false)));
