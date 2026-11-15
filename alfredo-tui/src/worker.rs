@@ -890,6 +890,14 @@ pub(crate) async fn git_records(
 }
 
 fn safe_file(root: &Path, relative: &str) -> Result<PathBuf> {
+    // Every approved-file read and write passes here. A task saved before the policy refused
+    // a secret or generated path fails now, before the model sees any file. Hidden characters
+    // are refused at new input only (`WorkPolicy::validate`).
+    if crate::planning_context::read_excluded(&relative.to_lowercase()) {
+        return Err(format!(
+            "{relative} is a secret or generated path; the task cannot read or write it. Remove it from the task's files"
+        ));
+    }
     let mut path = root.to_path_buf();
     for part in relative.split('/') {
         path.push(part);

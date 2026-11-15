@@ -2588,9 +2588,6 @@ fn new_permits_refuse_secret_and_hidden_paths_but_saved_state_naming_them_still_
         let legacy_json = serde_json::to_string(legacy).unwrap();
         fs::write(&file, saved.replace("\"calc.py\"", &legacy_json)).unwrap();
         let snapshot = fixture.store("mission").snapshot().unwrap();
-        assert_eq!(
-            snapshot.tasks[0].policy.as_ref().unwrap().files[0],
-            legacy
-        );
+        assert_eq!(snapshot.tasks[0].policy.as_ref().unwrap().files[0], legacy);
     }
 }

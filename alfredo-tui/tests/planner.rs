@@ -1823,7 +1823,10 @@ fn plan_rejects_hidden_characters_naming_field_and_code_point() {
 
 #[test]
 fn plan_rejects_hidden_characters_in_policy_files_naming_task_file_and_code_point() {
-    for (path, code) in [("src/app\u{200B}.py", "U+200B"), ("a\u{202E}txt.py", "U+202E")] {
+    for (path, code) in [
+        ("src/app\u{200B}.py", "U+200B"),
+        ("a\u{202E}txt.py", "U+202E"),
+    ] {
         let mut plan = plan();
         plan.tasks[1].policy.files[0] = path.into();
         let error = plan.validate().unwrap_err();

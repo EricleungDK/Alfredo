@@ -9,7 +9,12 @@ fn policy(files: &[&str]) -> WorkPolicy {
 
 #[test]
 fn policy_files_refuse_secret_paths() {
-    for p in [".env", "config/id_rsa", ".aws/credentials", "deploy/server.key"] {
+    for p in [
+        ".env",
+        "config/id_rsa",
+        ".aws/credentials",
+        "deploy/server.key",
+    ] {
         let policy = WorkPolicy {
             files: vec![p.into()],
             check: vec!["true".into()],
@@ -58,6 +63,19 @@ fn policy_files_accept_ordinary_paths_including_env_templates() {
             policy(&[p]).validate().is_ok(),
             "ordinary path {p} was refused"
         );
+    }
+}
+
+#[test]
+fn policy_files_refuse_generated_and_vendor_trees_as_read_excluded() {
+    for p in [
+        "target/debug/app",
+        "node_modules/pkg/index.js",
+        "dist/app.js",
+        "vendor/lib.go",
+    ] {
+        let error = policy(&[p]).validate().unwrap_err();
+        assert!(error.contains(p), "refusal must name the path: {error}");
     }
 }
 

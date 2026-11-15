@@ -35,7 +35,31 @@ pub struct Plan {
     pub usage: Option<crate::metrics::Usage>,
 }
 impl Plan {
+    /// New input (planner output, a `/plan` intent): the stored shape plus the policy file
+    /// refusals. Replay of saved receipts uses [`Self::validate_stored`] alone.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_stored()?;
+        for (index, step) in self.tasks.iter().enumerate() {
+            for (file, path) in step.policy.files.iter().enumerate() {
+                if let Some(crate::tasks::FileRefusal::Hidden(c)) = crate::tasks::file_refusal(path)
+                {
+                    return Err(format!(
+                        "Plan task {} file {} contains hidden character U+{:04X}; remove invisible or bidirectional characters",
+                        index + 1,
+                        file + 1,
+                        c as u32
+                    ));
+                }
+            }
+        }
+        for step in &self.tasks {
+            step.policy.validate()?;
+        }
+        Ok(())
+    }
+
+    /// The stored shape every saved plan already passed; see [`Self::validate`].
+    pub(crate) fn validate_stored(&self) -> Result<(), String> {
         if self.usage.is_some_and(|usage| !usage.in_bounds()) {
             return Err("Plan usage exceeds supported bounds".into());
         }
@@ -94,7 +118,7 @@ impl Plan {
                     index + 1
                 ));
             }
-            step.policy.validate()?;
+            step.policy.validate_stored()?;
         }
         if serde_json::to_vec(self).map_err(|e| e.to_string())?.len() > 128 * 1024 {
             return Err("Plan exceeds 128 KiB".into());

@@ -105,7 +105,7 @@ summary adds a `Next` row. The planning lint rejects a draft that approves a com
 over 64 KiB with the same message, so the failure comes at plan time.
 The same lint also rejects a task whose committed approved files, with the worker's
 per-file `FILE <path>` framing, total over 96 KiB, with the worker's `Approved files
-total` message (read-only reference files do not count).
+total` message (read-only reference files do not count). A task's files may not name a secret or generated path (`.env`, keys, `target/`, `node_modules/`) or a path with an invisible or bidirectional character: `/permit` and plans refuse them, and a task saved with one fails before any model call.
 
 A worker, repair or review request that cannot reach Ollama (connection refused, or the
 connection dropped before the reply) is also an environment failure, not a code failure: the

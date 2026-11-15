@@ -377,7 +377,12 @@ fn work_detail(
     }
     let pinned = if live.is_some() { lines.len() } else { 0 };
     if let Some(policy) = &task.policy {
-        lines.extend(labeled("Files", &policy.files.join(", "), width, normal));
+        lines.extend(labeled(
+            "Files",
+            &safe_visible(&policy.files.join(", ")),
+            width,
+            normal,
+        ));
         lines.extend(labeled(
             "Check",
             &safe_visible(&crate::argv_display::check_line(&policy.check)),
