@@ -925,22 +925,34 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.screen_has(terminal, 'Conversations restored')
         terminal.send('/task second\r')
         self.wait_until('204 tasks', lambda: len(self.statuses()) == 204, 30)
-        time.sleep(0.5)
+        # tasks.json is written before the terminal applies the outcome, so wait for the
+        # footer: only then is the 80% check below made against the 204-task state.
+        self.screen_has(terminal, 'Task #204 saved')
         terminal.pump()
         self.assertNotIn('80% full', self.flat(terminal))
         terminal.send('/task third\r')
         self.wait_until('205 tasks', lambda: len(self.statuses()) == 205, 30)
+        # Issue #732: the file holds 205 tasks before the terminal applies that save, which
+        # is what opens the task view and queues the notice. Wait for the save to reach the
+        # screen first; the chat view still showing 'Chat 1' before it is not proof the row
+        # can be read there.
+        self.screen_has(terminal, 'Task #205 saved', 60)
+        self.wait_until('task view open', lambda: 'F2 chat' in terminal.screen(), 30)
         # The row is part of the chat transcript, so it waits there when the task view is open.
+        # F2 toggles, so press it again only while the task view is still showing after a
+        # long wait; a second press sent while the first is in flight would toggle back.
+        notice = 'Task list 80% full (205/256); start a new mission before it fills'
         deadline = time.monotonic() + 60
-        while 'Chat 1' not in terminal.screen():
-            terminal.send(b'\x1bOQ')  # F2; a redraw can swallow it, so press again
+        while True:
+            if 'F2 chat' in terminal.screen():
+                terminal.send(b'\x1bOQ')  # F2: chat view
             try:
-                self.wait_until('chat view', lambda: 'Chat 1' in terminal.screen(), 3)
+                self.wait_until('80% row', lambda: notice in self.flat(terminal), 10)
+                break
             except AssertionError:
                 if time.monotonic() > deadline:
                     raise
-        self.wait_until('80% row', lambda: 'Task list 80% full (205/256)' in self.flat(terminal), 30)
-        self.assertIn('start a new mission before it fills', self.flat(terminal))
+        self.assertIn(notice, self.flat(terminal))
         self.quit(terminal)
 
 
