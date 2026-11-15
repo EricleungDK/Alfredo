@@ -403,6 +403,45 @@ fn repair_history(fixture: &Fixture, resolved: bool) -> Snapshot {
     fixture.validate_history(&snapshot)
 }
 
+/// A Permit saved before the policy refused hidden characters. `{:?}` leaves printable
+/// but invisible characters (U+3164, U+FFA0) raw, so the file names are shown visibly.
+#[test]
+fn legacy_permit_shows_a_printable_invisible_file_name_visibly() {
+    let fixture = Fixture::new();
+    let mut snapshot = fixture.store.snapshot().unwrap();
+    record(
+        &mut snapshot,
+        "legacy-permit",
+        1,
+        Action::Permit {
+            task: 1,
+            policy: WorkPolicy {
+                files: vec!["src/\u{3164}app.py".into(), "src/\u{FFA0}b.py".into()],
+                check: vec!["true".into()],
+            },
+        },
+    );
+    let mut view = activity::View::default();
+    let window = view.window(&snapshot, "", 120, 40, 0);
+    let text = window
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("src/<U+3164>app.py"), "{text}");
+    assert!(text.contains("src/<U+FFA0>b.py"), "{text}");
+    assert!(
+        !text.contains('\u{3164}') && !text.contains('\u{FFA0}'),
+        "{text:?}"
+    );
+}
+
 #[test]
 fn compound_reviews_and_resolution_ancestors_keep_canonical_receipt_identity() {
     let fixture = Fixture::new();

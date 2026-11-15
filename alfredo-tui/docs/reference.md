@@ -109,7 +109,9 @@ total` message (read-only reference files do not count).
 
 A task's files may not name a secret or generated path (`.env`, keys, `target/`,
 `node_modules/`) or a path with an invisible or bidirectional character: `/permit` and
-plans refuse them, and a task saved with one fails before any model call.
+plans refuse them. A task saved with a secret or generated path fails before any model
+call. A task saved with a hidden-character path shows the character as `<U+XXXX>` and
+fails when the model's answer is validated against its files, before any file is written.
 
 A worker, repair or review request that cannot reach Ollama (connection refused, or the
 connection dropped before the reply) is also an environment failure, not a code failure: the
