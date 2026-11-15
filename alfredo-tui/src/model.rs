@@ -2079,6 +2079,11 @@ impl App {
         Ok(())
     }
 
+    /// Notice shown after `/clear` empties the selected chat.
+    pub fn cleared_notice(&self) -> String {
+        "Conversation cleared. Tasks and their evidence are unchanged; Ctrl+N opens another conversation".into()
+    }
+
     pub fn add_session(&mut self) {
         if self.sessions.len() == MAX_SESSIONS {
             self.notice = "Eight-session limit reached".into();

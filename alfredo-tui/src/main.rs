@@ -1927,7 +1927,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(job) = jobs[index].take() {
                                             job.abort();
                                         }
-                                        work.app.notice = "Conversation cleared. Tasks and their evidence are unchanged; Ctrl+N opens another conversation".into();
+                                        work.app.notice = work.app.cleared_notice();
                                     }
                                     Err(error) => {
                                         work.app.notice = error.into();
