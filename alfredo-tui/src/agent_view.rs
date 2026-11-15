@@ -208,7 +208,7 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
             instruction.push((
                 format!(
                     "files {} · check {}",
-                    attempt.files.join(", "),
+                    crate::dashboard::safe_visible(&attempt.files.join(", ")),
                     crate::argv_display::check_line(&attempt.check)
                 ),
                 Tone::Summary,

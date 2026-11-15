@@ -57,6 +57,21 @@ fn policy_files_name_the_file_position_and_code_point_of_a_hidden_character() {
 }
 
 #[test]
+fn policy_files_refuse_default_ignorable_marks_that_draw_as_nothing() {
+    // U+FE0F (variation selector), U+3164 (Hangul filler), U+034F (combining grapheme
+    // joiner): each looks like the plain name, so each is refused like a bidi override.
+    for p in [
+        "src/app\u{FE0F}.py",
+        "src/\u{3164}app.py",
+        "src/app\u{034F}.py",
+    ] {
+        let error = policy(&[p]).validate().unwrap_err();
+        assert!(error.contains("hidden character U+"), "{p:?}: {error}");
+    }
+    assert!(policy(&["src/app.py"]).validate().is_ok());
+}
+
+#[test]
 fn policy_files_accept_ordinary_paths_including_env_templates() {
     for p in ["src/main.rs", "docs/é.md", ".env.example"] {
         assert!(

@@ -240,18 +240,21 @@ pub struct WorkPolicy {
 /// reads or writes them, so a task saved before this check fails before any model request.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FileRefusal {
-    /// A character [`crate::dashboard::hidden`] flags, such as U+200B or U+202E.
+    /// A character [`crate::dashboard::card_hidden`] flags, such as U+200B, U+202E or U+FE0F.
     Hidden(char),
     /// A secret or generated path, as [`crate::planning_context::read_excluded`] flags it.
     Excluded,
 }
 
-/// The first reason `path` may not be a task file. Hidden characters are checked first, so
-/// a refusal never echoes an invisible character.
+/// The first reason `path` may not be a task file. Hidden characters (the card set, which
+/// includes default-ignorable marks such as U+FE0F) are checked first, so a refusal never
+/// echoes an invisible character. Writes use the read predicate on purpose: the env
+/// templates (`.env.example`) stay editable, as the ticket requires.
 pub(crate) fn file_refusal(path: &str) -> Option<FileRefusal> {
-    if let Some(c) = path.chars().find(|c| crate::dashboard::hidden(*c)) {
+    if let Some(c) = path.chars().find(|c| crate::dashboard::card_hidden(*c)) {
         return Some(FileRefusal::Hidden(c));
     }
+    // `read_excluded` takes a lowercased path (it does not lowercase itself).
     crate::planning_context::read_excluded(&path.to_lowercase()).then_some(FileRefusal::Excluded)
 }
 
@@ -260,12 +263,19 @@ impl WorkPolicy {
     /// file refusals of [`file_refusal`]. Replaying saved receipts uses [`Self::validate_stored`].
     pub fn validate(&self) -> Result<()> {
         self.validate_stored()?;
+        self.validate_files(|number| format!("Policy file {number}"))
+    }
+
+    /// The [`file_refusal`] of every path, in order. `field` labels the 1-based file number
+    /// in a hidden-character refusal. Plan validation calls this per step, so the message
+    /// template lives only here.
+    pub(crate) fn validate_files(&self, field: impl Fn(usize) -> String) -> Result<()> {
         for (index, path) in self.files.iter().enumerate() {
             match file_refusal(path) {
                 Some(FileRefusal::Hidden(c)) => {
                     return Err(format!(
-                        "Policy file {} contains hidden character U+{:04X}; remove invisible or bidirectional characters",
-                        index + 1,
+                        "{} contains hidden character U+{:04X}; remove invisible or bidirectional characters",
+                        field(index + 1),
                         c as u32
                     ));
                 }

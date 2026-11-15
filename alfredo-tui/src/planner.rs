@@ -40,20 +40,8 @@ impl Plan {
     pub fn validate(&self) -> Result<(), String> {
         self.validate_stored()?;
         for (index, step) in self.tasks.iter().enumerate() {
-            for (file, path) in step.policy.files.iter().enumerate() {
-                if let Some(crate::tasks::FileRefusal::Hidden(c)) = crate::tasks::file_refusal(path)
-                {
-                    return Err(format!(
-                        "Plan task {} file {} contains hidden character U+{:04X}; remove invisible or bidirectional characters",
-                        index + 1,
-                        file + 1,
-                        c as u32
-                    ));
-                }
-            }
-        }
-        for step in &self.tasks {
-            step.policy.validate()?;
+            step.policy
+                .validate_files(|file| format!("Plan task {} file {file}", index + 1))?;
         }
         Ok(())
     }
@@ -184,7 +172,9 @@ pub struct SavedDraft {
 }
 impl SavedDraft {
     pub fn validate(&self) -> Result<(), String> {
-        self.plan.validate()?;
+        // Restoring a saved draft is replay, not new input: the stored shape only. Approving
+        // it sends `Action::Plan`, which `TaskStore` admits with the full `Plan::validate`.
+        self.plan.validate_stored()?;
         if let Some(origin) = &self.origin {
             use crate::planner_command::Operation;
             origin.validate()?;

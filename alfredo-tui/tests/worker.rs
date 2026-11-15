@@ -613,7 +613,12 @@ fn rewrite_saved_policy_file(fixture: &Fixture, legacy: &str) {
 
 #[tokio::test]
 async fn legacy_approved_secret_path_fails_before_any_model_request() {
-    for (legacy, reason) in [(".env", ".env"), ("config/id_rsa", "config/id_rsa")] {
+    for (legacy, reason) in [
+        (".env", ".env"),
+        ("config/id_rsa", "config/id_rsa"),
+        // A hidden mark on a secret name: the run detail shows it as <U+202E>, never raw.
+        (".env\u{202E}", ".env<U+202E>"),
+    ] {
         let fixture = Fixture::new();
         fs::write(fixture.workspace.join(".env"), "TOKEN=hunter2-COMMITTED\n").unwrap();
         for args in [
@@ -646,6 +651,10 @@ async fn legacy_approved_secret_path_fails_before_any_model_request() {
         assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed, "{legacy:?}");
         let detail = &snapshot.tasks[0].run.as_ref().unwrap().detail;
         assert!(detail.contains(reason), "{legacy:?}: {detail}");
+        assert!(
+            !detail.contains('\u{202E}'),
+            "raw U+202E in run detail: {detail:?}"
+        );
         assert!(received.try_recv().is_err(), "{legacy:?} reached the model");
     }
 }
