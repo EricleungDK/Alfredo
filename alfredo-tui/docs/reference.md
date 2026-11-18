@@ -1000,7 +1000,7 @@ additions and deletions, and separate saved stdout/stderr. Hidden characters in 
 check output, failing-check tail and outcome summary show as `<U+XXXX>` (a lone CR, other
 controls such as ESC, bidi overrides and isolates, zero-width and other default-ignorable
 characters) instead of being drawn or deleted. The failing-check tail shows the raw stream's
-last lines, with only worktree paths shortened. Each tab in a diff or check line is drawn as
+last lines, with only worktree paths shortened (a path with a hidden character in front of it stays whole). Each tab in a diff or check line is drawn as
 `→` and spaces to the next 4-column stop, as on the approval card. A CRLF line ending is not
 a hidden character: lines split on it first, so an ordinary CRLF patch line shows no marker,
 while a CR inside a line is a marker, not a line break. Diff colours still follow the raw

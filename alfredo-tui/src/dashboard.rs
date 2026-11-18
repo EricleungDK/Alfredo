@@ -478,9 +478,11 @@ pub fn footer(context: Footer, turn: Turn, width: usize) -> String {
 }
 
 /// One line of outcome text with every hidden character shown as `<U+XXXX>`, controls
-/// included: a lone CR is not a line break here, so it must not vanish (issue #736).
+/// included: a lone CR, U+0085, U+2028 and U+2029 are not breaks here, so they must not
+/// vanish or turn into plain spaces (issue #736). Only `\n` and `\r\n` become a space.
 fn marked_line(text: &str) -> String {
-    safe_visible(&line_breaks_as_spaces(text))
+    let flat = text.replace("\r\n", "\n").replace('\n', " ");
+    show_tabs(&safe_visible(&flat))
 }
 
 /// Compact projection of verified run evidence: outcome first, then diff and output.
@@ -561,7 +563,7 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
     if let Some((label, tail)) = &tail {
         lines.push(Line::default());
         lines.push(heading(&format!("{label} · last lines")));
-        lines.extend(tail.lines().map(|line| {
+        lines.extend(tail.iter().map(|line| {
             Line::styled(
                 show_tabs(&safe_visible(line)),
                 Style::default().fg(Color::Red),
@@ -603,7 +605,7 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         ] {
             // A stream already shown whole as the tail above is not repeated.
             let shown = tail.as_ref().is_some_and(|(stream, text)| {
-                label.ends_with(stream) && text.lines().count() >= output.trim_end().lines().count()
+                label.ends_with(stream) && text.len() >= output.trim_end().lines().count()
             });
             if !output.trim().is_empty() && !shown {
                 lines.push(Line::default());
