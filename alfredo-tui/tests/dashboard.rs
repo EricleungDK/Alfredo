@@ -1026,20 +1026,37 @@ fn dashboard_evidence_diff_and_check_output_show_hidden_characters_visibly() {
     }))
     .unwrap();
     evidence.patch = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1,3 @@\n+# note\rprint(1)\n+ok = 1 \u{202E}x\u{200B}y\n+crlf = 1\r\n+é 中文 🙂\n".into();
-    evidence.check = Some(failed_check("out\rline \u{202E}rev\n", "err\rtail \u{2066}x\u{2069}\n"));
+    evidence.check = Some(failed_check(
+        "out\rline \u{202E}rev\n",
+        "err\rtail \u{2066}x\u{2069}\n",
+    ));
     let raw = serde_json::to_string(&evidence).unwrap();
     let text: Vec<String> = alfredo_tui::dashboard::outcome_lines(&raw)
         .unwrap()
         .iter()
         .map(|line| line.to_string())
         .collect();
-    assert!(text.iter().any(|l| l == "+# note<U+000D>print(1)"), "{text:?}");
-    assert!(text.iter().any(|l| l == "+ok = 1 <U+202E>x<U+200B>y"), "{text:?}");
+    assert!(
+        text.iter().any(|l| l == "+# note<U+000D>print(1)"),
+        "{text:?}"
+    );
+    assert!(
+        text.iter().any(|l| l == "+ok = 1 <U+202E>x<U+200B>y"),
+        "{text:?}"
+    );
     assert!(text.iter().any(|l| l == "+crlf = 1"), "{text:?}");
     assert!(text.iter().any(|l| l == "+é 中文 🙂"), "{text:?}");
-    assert!(text.iter().any(|l| l == "out<U+000D>line <U+202E>rev"), "{text:?}");
+    assert!(
+        text.iter().any(|l| l == "out<U+000D>line <U+202E>rev"),
+        "{text:?}"
+    );
     // The failing-check tail is sanitized by the worker (its CR becomes a line break there), so
     // this asserts only the format character that the tail keeps.
-    assert!(text.iter().any(|l| l == "tail <U+2066>x<U+2069>"), "{text:?}");
-    assert!(!text.iter().any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{2066}')));
+    assert!(
+        text.iter().any(|l| l == "tail <U+2066>x<U+2069>"),
+        "{text:?}"
+    );
+    assert!(!text
+        .iter()
+        .any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{2066}')));
 }

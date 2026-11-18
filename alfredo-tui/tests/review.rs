@@ -541,14 +541,25 @@ fn review_diff_shows_hidden_characters_visibly() {
     ev.patch = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1,2 @@\n+# note\rprint(1)\n+ok = 1 \u{202E}x\u{200B}y\n".into();
     let view = View::from_verified(42, &serde_json::to_string(&ev).unwrap()).unwrap();
     let text: Vec<String> = view.lines().iter().map(|l| l.to_string()).collect();
-    assert!(text.iter().any(|l| l.contains("<U+000D>")), "lone CR vanished from the review diff");
-    assert!(text.iter().any(|l| l.contains("<U+202E>")), "bidi override drawn raw in the review diff");
-    assert!(text.iter().any(|l| l.contains("<U+200B>")), "zero-width space drawn raw in the review diff");
+    assert!(
+        text.iter().any(|l| l.contains("<U+000D>")),
+        "lone CR vanished from the review diff"
+    );
+    assert!(
+        text.iter().any(|l| l.contains("<U+202E>")),
+        "bidi override drawn raw in the review diff"
+    );
+    assert!(
+        text.iter().any(|l| l.contains("<U+200B>")),
+        "zero-width space drawn raw in the review diff"
+    );
     assert!(
         text.iter().any(|l| l == "+# note<U+000D>print(1)"),
         "a lone CR must not split or erase its line: {text:?}"
     );
-    assert!(!text.iter().any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{200B}')));
+    assert!(!text
+        .iter()
+        .any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{200B}')));
 }
 
 fn receipt_with_output(stdout: &str, stderr: &str) -> alfredo_tui::execution::ExecutionReceipt {
@@ -566,12 +577,24 @@ fn receipt_with_output(stdout: &str, stderr: &str) -> alfredo_tui::execution::Ex
 #[test]
 fn review_check_output_shows_hidden_characters_visibly() {
     let mut ev: Evidence = serde_json::from_str(&fixture()).unwrap();
-    ev.check = Some(receipt_with_output("out\rline \u{202E}rev\n", "err\rtail \u{2066}x\u{2069}\n"));
+    ev.check = Some(receipt_with_output(
+        "out\rline \u{202E}rev\n",
+        "err\rtail \u{2066}x\u{2069}\n",
+    ));
     let view = View::from_verified(42, &serde_json::to_string(&ev).unwrap()).unwrap();
     let text: Vec<String> = view.lines().iter().map(|l| l.to_string()).collect();
-    assert!(text.iter().any(|l| l == "out<U+000D>line <U+202E>rev"), "{text:?}");
-    assert!(text.iter().any(|l| l == "err<U+000D>tail <U+2066>x<U+2069>"), "{text:?}");
-    assert!(!text.iter().any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{2066}')));
+    assert!(
+        text.iter().any(|l| l == "out<U+000D>line <U+202E>rev"),
+        "{text:?}"
+    );
+    assert!(
+        text.iter()
+            .any(|l| l == "err<U+000D>tail <U+2066>x<U+2069>"),
+        "{text:?}"
+    );
+    assert!(!text
+        .iter()
+        .any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{2066}')));
 }
 
 #[test]

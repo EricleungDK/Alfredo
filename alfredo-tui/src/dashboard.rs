@@ -495,7 +495,7 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         .as_ref()
         .filter(|check| !crate::worker::check_passed(check));
     let tail = failed_check.and_then(crate::worker::output_tail);
-    let mut detail = single_line(&evidence.detail);
+    let mut detail = single_line_visible(&evidence.detail);
     if failed_check.is_some() {
         // The compact tail in the detail is shown below as formatted lines instead.
         for marker in [": stderr: ", ": stdout: ", " · stderr: ", " · stdout: "] {
@@ -533,7 +533,7 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         Some(_) if passed => {}
         // The outcome line already states the check result; do not repeat it.
         Some(check) if detail.starts_with("Check ") => {
-            let message = single_line(&check.error_message);
+            let message = single_line_visible(&check.error_message);
             if !message.is_empty() && !detail.contains(&message) {
                 lines.push(Line::styled(message, Style::default().fg(Color::Red)));
             }
@@ -541,11 +541,11 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         Some(check) => {
             lines.push(Line::from(format!(
                 "Check · {}{exit}",
-                single_line(&check.status)
+                single_line_visible(&check.status)
             )));
             if !check.error_message.is_empty() {
                 lines.push(Line::styled(
-                    single_line(&check.error_message),
+                    single_line_visible(&check.error_message),
                     Style::default().fg(Color::Red),
                 ));
             }
@@ -557,7 +557,7 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         lines.push(heading(&format!("{label} · last lines")));
         lines.extend(
             tail.lines()
-                .map(|line| Line::styled(line.to_owned(), Style::default().fg(Color::Red))),
+                .map(|line| Line::styled(safe_visible(line), Style::default().fg(Color::Red))),
         );
     }
     lines.push(Line::default());
@@ -565,7 +565,9 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
     if evidence.patch.is_empty() {
         lines.push(Line::from("No changes captured."));
     } else {
-        for line in safe(&evidence.patch).lines() {
+        // Split before marking (CRLF ends lose their CR, a lone CR shows as `<U+000D>`); colour
+        // follows the raw prefix, which marking never changes.
+        for line in evidence.patch.lines() {
             let color = if line.starts_with("diff --git ")
                 || line.starts_with("+++ ")
                 || line.starts_with("--- ")
@@ -580,7 +582,7 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
             } else {
                 Color::Reset
             };
-            lines.push(Line::styled(line.to_owned(), Style::default().fg(color)));
+            lines.push(Line::styled(safe_visible(line), Style::default().fg(color)));
         }
     }
     if let Some(check) = &evidence.check {
@@ -595,7 +597,7 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
             if !output.trim().is_empty() && !shown {
                 lines.push(Line::default());
                 lines.push(heading(label));
-                lines.extend(safe(output).lines().map(|line| Line::from(line.to_owned())));
+                lines.extend(output.lines().map(|line| Line::from(safe_visible(line))));
             }
         }
     }
