@@ -1014,3 +1014,187 @@ fn arabic_number_marks_above_are_hidden_and_shown_as_code_points() {
     assert_eq!(safe_visible("a\u{890}b"), "a<U+0890>b");
     assert_eq!(single_line_visible("a\u{891}b"), "a<U+0891>b");
 }
+
+/// Issue #736: the dashboard evidence view shows a lone CR, bidi and zero-width characters
+/// in the diff and in the check output as code points, and keeps CRLF lines marker-free.
+#[test]
+fn dashboard_evidence_diff_and_check_output_show_hidden_characters_visibly() {
+    let mut evidence: alfredo_tui::worker::Evidence = serde_json::from_value(serde_json::json!({
+        "agent": null, "candidate_commit": null, "model_metrics": null, "failure_code": null,
+        "generation": null, "project_notes": null, "run": "run-1", "baseline": "a".repeat(40),
+        "status": "failed", "detail": "Check failed (exit 1)", "patch": "", "check": null
+    }))
+    .unwrap();
+    evidence.patch = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1,3 @@\n+# note\rprint(1)\n+ok = 1 \u{202E}x\u{200B}y\n+crlf = 1\r\n+é 中文 🙂\n".into();
+    evidence.check = Some(failed_check(
+        "out\rline \u{202E}rev\n",
+        "err\rtail \u{2066}x\u{2069}\n",
+    ));
+    let raw = serde_json::to_string(&evidence).unwrap();
+    let text: Vec<String> = alfredo_tui::dashboard::outcome_lines(&raw)
+        .unwrap()
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    assert!(
+        text.iter().any(|l| l == "+# note<U+000D>print(1)"),
+        "{text:?}"
+    );
+    assert!(
+        text.iter().any(|l| l == "+ok = 1 <U+202E>x<U+200B>y"),
+        "{text:?}"
+    );
+    assert!(text.iter().any(|l| l == "+crlf = 1"), "{text:?}");
+    assert!(text.iter().any(|l| l == "+é 中文 🙂"), "{text:?}");
+    assert!(
+        text.iter().any(|l| l == "out<U+000D>line <U+202E>rev"),
+        "{text:?}"
+    );
+    // The failing-check tail shows the raw stream: the lone CR is a marker, not a line break.
+    assert!(
+        text.iter()
+            .any(|l| l == "err<U+000D>tail <U+2066>x<U+2069>"),
+        "{text:?}"
+    );
+    assert!(!text
+        .iter()
+        .any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{2066}')));
+}
+
+fn outcome_text(stdout: &str, stderr: &str) -> Vec<String> {
+    let mut evidence: alfredo_tui::worker::Evidence = serde_json::from_value(serde_json::json!({
+        "agent": null, "candidate_commit": null, "model_metrics": null, "failure_code": null,
+        "generation": null, "project_notes": null, "run": "run-1", "baseline": "a".repeat(40),
+        "status": "failed", "detail": "Check failed (exit 1)", "patch": "", "check": null
+    }))
+    .unwrap();
+    evidence.check = Some(failed_check(stdout, stderr));
+    let raw = serde_json::to_string(&evidence).unwrap();
+    alfredo_tui::dashboard::outcome_lines(&raw)
+        .unwrap()
+        .iter()
+        .map(|line| line.to_string())
+        .collect()
+}
+
+/// Issue #736 review round 1: the dashboard diff and failing-check tail show tabs as visible
+/// whitespace, and the tail shows raw lines: no CR, ESC, OSC or U+0085 is hidden or split.
+#[test]
+fn dashboard_tail_and_diff_show_tabs_and_raw_control_characters_visibly() {
+    let mut evidence: alfredo_tui::worker::Evidence = serde_json::from_value(serde_json::json!({
+        "agent": null, "candidate_commit": null, "model_metrics": null, "failure_code": null,
+        "generation": null, "project_notes": null, "run": "run-1", "baseline": "a".repeat(40),
+        "status": "failed", "detail": "Check failed (exit 1)", "patch": "", "check": null
+    }))
+    .unwrap();
+    evidence.patch = "+x = a\tor b\n".into();
+    let raw = serde_json::to_string(&evidence).unwrap();
+    let diff: Vec<String> = alfredo_tui::dashboard::outcome_lines(&raw)
+        .unwrap()
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    assert!(diff.iter().any(|l| l == "+x = a→ or b"), "{diff:?}");
+
+    let osc = outcome_text("", "ok\n\x1b]0;x\nHIDDEN\nthird\n");
+    for expected in ["ok", "<U+001B>]0;x", "HIDDEN", "third"] {
+        assert!(osc.iter().any(|l| l == expected), "{expected}: {osc:?}");
+    }
+    let cr = outcome_text("", "ok\rFAKE\n");
+    assert!(cr.iter().any(|l| l == "ok<U+000D>FAKE"), "{cr:?}");
+    let link = outcome_text("", "\x1b]8;;http://x.example/t\x07link\x1b]8;;\x07\n");
+    assert!(
+        link.iter()
+            .any(|l| l.contains("<U+001B>]8;;http://x.example/t<U+0007>link")),
+        "{link:?}"
+    );
+    let nel = outcome_text("", "a\u{85}b\n");
+    assert!(nel.iter().any(|l| l == "a<U+0085>b"), "{nel:?}");
+    let tab = outcome_text("k\tv\n", "");
+    assert!(tab.iter().any(|l| l == "k→  v"), "{tab:?}");
+}
+
+/// Issue #736 review round 1: a lone CR in the outcome's detail shows as `<U+000D>` on the
+/// one-line result, as the review view does, instead of being deleted.
+#[test]
+fn dashboard_outcome_detail_shows_a_lone_cr_visibly() {
+    let evidence = serde_json::to_string(&serde_json::json!({
+        "agent": null, "candidate_commit": null, "model_metrics": null, "failure_code": null,
+        "generation": null, "project_notes": null, "run": "run-1", "baseline": "a".repeat(40),
+        "status": "failed", "detail": "Check failed\rXYZ (exit 1)", "patch": "", "check": null
+    }))
+    .unwrap();
+    let lines = alfredo_tui::dashboard::outcome_lines(&evidence).unwrap();
+    let first = lines[0].to_string();
+    assert!(first.contains("Check failed<U+000D>XYZ"), "{first}");
+}
+
+/// Issue #736 review round 1: the live check output panel (inspector) shows a lone CR,
+/// bidi override and tab visibly.
+#[test]
+fn running_check_output_in_the_inspector_shows_hidden_characters_visibly() {
+    let mut fixture = calc_plan();
+    fixture.select(2);
+    let (_sender, receiver) = tokio::sync::watch::channel(Progress {
+        stage: "Running approved check",
+        check_stdout: "lone\rCR \u{202E}rtl\tTAB\n".as_bytes().to_vec(),
+        ..Default::default()
+    });
+    fixture
+        .control
+        .attach_progress(2, receiver, Arc::new(AtomicBool::new(false)));
+    let screen = text(&fixture.render(100, 30));
+    assert!(screen.contains("lone<U+000D>CR"), "{screen}");
+    assert!(screen.contains("<U+202E>rtl"), "{screen}");
+    assert!(screen.contains("TAB"), "{screen}");
+    assert!(!screen.contains("lone CR"), "{screen}");
+}
+
+/// Issue #736 review round 2: a CR before a CRLF stays visible in the failing-check tail.
+#[test]
+fn dashboard_tail_keeps_a_cr_before_a_crlf_and_a_trailing_cr_visible() {
+    let split = outcome_text("", "a\r\r\nb\n");
+    assert!(split.iter().any(|l| l == "a<U+000D>"), "{split:?}");
+    assert!(split.iter().any(|l| l == "b"), "{split:?}");
+    let trailing = outcome_text("", "ok\r");
+    assert!(trailing.iter().any(|l| l == "ok<U+000D>"), "{trailing:?}");
+    // An ordinary CRLF line ending still shows no marker.
+    let crlf = outcome_text("", "x\r\ny\r\n");
+    assert!(
+        crlf.iter().any(|l| l == "x") && crlf.iter().any(|l| l == "y"),
+        "{crlf:?}"
+    );
+    assert!(!crlf.iter().any(|l| l.contains("<U+")), "{crlf:?}");
+}
+
+/// Issue #736 review round 2: a hidden character before `/worktree/` is not dropped with the
+/// absolute path in front of it.
+#[test]
+fn dashboard_tail_keeps_a_hidden_character_in_a_shortened_worktree_path() {
+    let bidi = outcome_text("", " /x\u{202E}/worktree/y\n");
+    assert!(bidi.iter().any(|l| l.contains("<U+202E>")), "{bidi:?}");
+    let isolate = outcome_text("", " /x\u{2066}/worktree/y\n");
+    assert!(
+        isolate.iter().any(|l| l.contains("<U+2066>")),
+        "{isolate:?}"
+    );
+    let plain = outcome_text("", " /home/u/worktree/y\n");
+    assert!(plain.iter().any(|l| l == " y"), "{plain:?}");
+}
+
+/// Issue #736 review round 2: U+2028, U+0085 and tab in the one-line outcome detail show as
+/// markers, not plain spaces.
+#[test]
+fn dashboard_outcome_detail_marks_line_separators_and_tabs() {
+    let evidence = serde_json::to_string(&serde_json::json!({
+        "agent": null, "candidate_commit": null, "model_metrics": null, "failure_code": null,
+        "generation": null, "project_notes": null, "run": "run-1", "baseline": "a".repeat(40),
+        "status": "failed", "detail": "Check\u{2028}x\ty\u{85}z", "patch": "", "check": null
+    }))
+    .unwrap();
+    let lines = alfredo_tui::dashboard::outcome_lines(&evidence).unwrap();
+    let first = lines[0].to_string();
+    assert!(first.contains("Check<U+2028>x"), "{first}");
+    assert!(first.contains("<U+0085>z"), "{first}");
+    assert!(!first.contains("Check x y"), "{first}");
+}
