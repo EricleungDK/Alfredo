@@ -69,7 +69,7 @@ fn approvals_log_records_what_ran_visibly() {
         &Outcome::Applied,
     );
     log.append(
-        &card("run printf a\rb\u{1b}[2J \u{E0041}"),
+        &card("run printf a\rb\u{1b}[2J \u{E0041} \u{FE0F}"),
         &Outcome::Applied,
     );
     let records = log.records();
@@ -90,12 +90,18 @@ fn approvals_log_records_what_ran_visibly() {
     assert!(long.ends_with('…'), "silent truncation: {long}");
     assert_eq!(long.chars().count(), 200);
 
-    // 3. Bidi, zero-width and tag characters are drawn as `<U+XXXX>`, not raw.
+    // 3. Bidi, zero-width, tag and default-ignorable characters are drawn as `<U+XXXX>`, not raw.
     assert!(
-        shown.contains("<U+202E>") && shown.contains("<U+200B>") && shown.contains("<U+E0041>")
+        shown.contains("<U+202E>")
+            && shown.contains("<U+200B>")
+            && shown.contains("<U+E0041>")
+            && shown.contains("<U+FE0F>")
     );
     assert!(
-        !shown.contains('\u{202E}') && !shown.contains('\u{200B}') && !shown.contains('\u{E0041}'),
+        !shown.contains('\u{202E}')
+            && !shown.contains('\u{200B}')
+            && !shown.contains('\u{E0041}')
+            && !shown.contains('\u{FE0F}'),
         "hidden chars drawn raw"
     );
 }
