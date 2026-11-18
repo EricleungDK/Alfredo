@@ -996,7 +996,16 @@ When the repair budget runs out, `--headless` exits 1 and the report ends with t
 `Next: … /repair ID <hint>` line.
 
 `/evidence ID` opens a readable check summary, unified diff with signed/colored
-additions and deletions, and separate saved stdout/stderr. It selects the inspected
+additions and deletions, and separate saved stdout/stderr. Hidden characters in the diff,
+check output, failing-check tail and outcome summary show as `<U+XXXX>` (a lone CR, other
+controls such as ESC, bidi overrides and isolates, zero-width and other default-ignorable
+characters) instead of being drawn or deleted. The failing-check tail shows the raw stream's
+last lines, with only worktree paths shortened (a path with a hidden character in front of it stays whole). Each tab in a diff or check line is drawn as
+`→` and spaces to the next 4-column stop, as on the approval card. A CRLF line ending is not
+a hidden character: lines split on it first, so an ordinary CRLF patch line shows no marker,
+while a CR inside a line is a marker, not a line break. Diff colours still follow the raw
+`+`, `-`, `@@`, `diff --git`, `+++` and `---` prefix.
+It selects the inspected
 task, so `/accept` or `/reject` without an ID acts on that evidence. PageUp/PageDown
 scroll; the viewport clamps after resize or excessive scrolling. Parsing/rendering
 never changes review authority; the store verifies evidence before display and
@@ -2077,6 +2086,10 @@ Approval (ADR 0004); there is no skip-approval mode.
   file lock, so several Alfredo processes on one mission do not lose records. It is kept
   to the newest 500–1000 records and is separate from the task store, so it never uses
   task receipt capacity. F4 activity lists these first as `chat · Chat edit_file …`.
+  The target is what ran, shown as the card and `/allow` show it: a newline is `↵`, a
+  control or hidden character (bidi, zero-width, tag) is `<U+XXXX>`, and a target over
+  200 characters is cut and ends with `…` (issue #737). Records already on disk show the
+  same way in F4.
 - **Restarts.** A pending action is never saved; a restored session shows the turn as
   interrupted and never re-asks or runs it.
 - **`/undo`** (issue #325) is an owner-typed slash command, never a model tool. It
