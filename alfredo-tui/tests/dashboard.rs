@@ -1149,3 +1149,46 @@ fn running_check_output_in_the_inspector_shows_hidden_characters_visibly() {
     assert!(screen.contains("TAB"), "{screen}");
     assert!(!screen.contains("lone CR"), "{screen}");
 }
+
+/// Issue #736 review round 2: a CR before a CRLF stays visible in the failing-check tail.
+#[test]
+fn dashboard_tail_keeps_a_cr_before_a_crlf_and_a_trailing_cr_visible() {
+    let split = outcome_text("", "a\r\r\nb\n");
+    assert!(split.iter().any(|l| l == "a<U+000D>"), "{split:?}");
+    assert!(split.iter().any(|l| l == "b"), "{split:?}");
+    let trailing = outcome_text("", "ok\r");
+    assert!(trailing.iter().any(|l| l == "ok<U+000D>"), "{trailing:?}");
+    // An ordinary CRLF line ending still shows no marker.
+    let crlf = outcome_text("", "x\r\ny\r\n");
+    assert!(crlf.iter().any(|l| l == "x") && crlf.iter().any(|l| l == "y"), "{crlf:?}");
+    assert!(!crlf.iter().any(|l| l.contains("<U+")), "{crlf:?}");
+}
+
+/// Issue #736 review round 2: a hidden character before `/worktree/` is not dropped with the
+/// absolute path in front of it.
+#[test]
+fn dashboard_tail_keeps_a_hidden_character_in_a_shortened_worktree_path() {
+    let bidi = outcome_text("", " /x\u{202E}/worktree/y\n");
+    assert!(bidi.iter().any(|l| l.contains("<U+202E>")), "{bidi:?}");
+    let isolate = outcome_text("", " /x\u{2066}/worktree/y\n");
+    assert!(isolate.iter().any(|l| l.contains("<U+2066>")), "{isolate:?}");
+    let plain = outcome_text("", " /home/u/worktree/y\n");
+    assert!(plain.iter().any(|l| l == " y"), "{plain:?}");
+}
+
+/// Issue #736 review round 2: U+2028, U+0085 and tab in the one-line outcome detail show as
+/// markers, not plain spaces.
+#[test]
+fn dashboard_outcome_detail_marks_line_separators_and_tabs() {
+    let evidence = serde_json::to_string(&serde_json::json!({
+        "agent": null, "candidate_commit": null, "model_metrics": null, "failure_code": null,
+        "generation": null, "project_notes": null, "run": "run-1", "baseline": "a".repeat(40),
+        "status": "failed", "detail": "Check\u{2028}x\ty\u{85}z", "patch": "", "check": null
+    }))
+    .unwrap();
+    let lines = alfredo_tui::dashboard::outcome_lines(&evidence).unwrap();
+    let first = lines[0].to_string();
+    assert!(first.contains("Check<U+2028>x"), "{first}");
+    assert!(first.contains("<U+0085>z"), "{first}");
+    assert!(!first.contains("Check x y"), "{first}");
+}
