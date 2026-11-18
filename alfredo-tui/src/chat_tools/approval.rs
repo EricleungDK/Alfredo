@@ -156,20 +156,9 @@ impl Log {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64),
             tool: card.tool.chars().take(64).collect(),
-            target: card
-                .summary
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(200)
-                .collect(),
+            target: bounded(&shown(&card.summary), TARGET_MAX),
             outcome: match outcome {
-                Outcome::Failed(reason) => Outcome::Failed(
-                    reason
-                        .chars()
-                        .filter(|c| !c.is_control())
-                        .take(300)
-                        .collect(),
-                ),
+                Outcome::Failed(reason) => Outcome::Failed(bounded(&shown(reason), REASON_MAX)),
                 other => other.clone(),
             },
             escalated: card.escalated(),
@@ -231,6 +220,54 @@ impl Log {
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect()
     }
+}
+
+/// Most characters of a logged target as shown; a longer one ends with `…` (issue #737).
+/// A record line must stay under the 4096-byte limit [`Log::records`] reads.
+const TARGET_MAX: usize = 200;
+/// Most characters of a logged failure reason as shown (issue #737).
+const REASON_MAX: usize = 300;
+
+/// A logged text as the approval card and `/allow` show it: a newline as `↵`, every
+/// other hidden character as `<U+XXXX>`, nothing deleted (issue #737).
+fn shown(text: &str) -> String {
+    crate::chat_tools::allow::show_command(text)
+}
+
+/// `text` cut to `max` characters, ending with `…` when it was longer. A `<U+XXXX>`
+/// escape is kept or dropped whole, so a cut never leaves half an escape (issue #737).
+fn bounded(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let budget = max - 1;
+    let mut out = String::new();
+    let mut used = 0;
+    let mut rest = text;
+    while let Some(length) = next_unit(rest) {
+        let unit = &rest[..length];
+        let width = unit.chars().count();
+        if used + width > budget {
+            break;
+        }
+        out.push_str(unit);
+        used += width;
+        rest = &rest[length..];
+    }
+    out.push('…');
+    out
+}
+
+/// Byte length of the first unit of `text`: a whole `<U+XXXX>` escape, else one character.
+fn next_unit(text: &str) -> Option<usize> {
+    let first = text.chars().next()?;
+    if let Some(after) = text.strip_prefix("<U+") {
+        let digits = after.bytes().take_while(u8::is_ascii_hexdigit).count();
+        if (4..=6).contains(&digits) && after[digits..].starts_with('>') {
+            return Some("<U+".len() + digits + 1);
+        }
+    }
+    Some(first.len_utf8())
 }
 
 /// One pending decision sent from the tool loop to the terminal. Dropping

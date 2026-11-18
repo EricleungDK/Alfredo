@@ -2077,6 +2077,10 @@ Approval (ADR 0004); there is no skip-approval mode.
   file lock, so several Alfredo processes on one mission do not lose records. It is kept
   to the newest 500–1000 records and is separate from the task store, so it never uses
   task receipt capacity. F4 activity lists these first as `chat · Chat edit_file …`.
+  The target is what ran, shown as the card and `/allow` show it: a newline is `↵`, a
+  control or hidden character (bidi, zero-width, tag) is `<U+XXXX>`, and a target over
+  200 characters is cut and ends with `…` (issue #737). Records already on disk show the
+  same way in F4.
 - **Restarts.** A pending action is never saved; a restored session shows the turn as
   interrupted and never re-asks or runs it.
 - **`/undo`** (issue #325) is an owner-typed slash command, never a model tool. It
