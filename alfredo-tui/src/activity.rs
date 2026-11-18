@@ -199,29 +199,51 @@ pub struct Window {
     pub maximum: usize,
 }
 
+/// A chat record's text as F4 draws it (issue #737): `safe_visible`, so a hidden character
+/// shows as `<U+XXXX>`, a newline as `↵` (as `/allow` shows one) and a tab as `<U+0009>`.
+/// Nothing splits or merges a row. Records already hold this form; old ones may not.
+fn chat_visible(text: &str) -> String {
+    use crate::dashboard::safe_visible;
+    safe_visible(text)
+        .replace('\n', "↵")
+        .replace('\t', "<U+0009>")
+}
+
 fn entry_lines(entry: &Entry) -> Vec<ratatui::text::Line<'static>> {
-    use crate::dashboard::safe;
+    use crate::dashboard::safe_visible;
     use ratatui::{
         style::{Color, Style},
         text::Line,
     };
-    let heading = if entry.task == 0 {
-        format!("chat · {}", safe(&entry.summary))
+    let chat = entry.task == 0;
+    let shown = |text: &str| {
+        if chat {
+            chat_visible(text)
+        } else {
+            safe_visible(text)
+        }
+    };
+    let heading = if chat {
+        format!("chat · {}", shown(&entry.summary))
     } else {
         format!(
             "r{} · task #{} · {}",
             entry.revision,
             entry.task,
-            safe(&entry.summary)
+            shown(&entry.summary)
         )
     };
     let mut lines = vec![Line::styled(heading, Style::default().fg(Color::Cyan))];
+    // A task receipt's detail keeps its own line breaks; a chat record has none.
     lines.extend(
-        safe(&entry.detail)
+        shown(&entry.detail)
             .lines()
             .map(|line| Line::from(line.to_owned())),
     );
-    lines.push(Line::from(format!("Receipt: {}", safe(&entry.correlation))));
+    lines.push(Line::from(format!(
+        "Receipt: {}",
+        shown(&entry.correlation)
+    )));
     lines.push(Line::default());
     lines
 }
