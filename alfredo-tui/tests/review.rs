@@ -534,3 +534,53 @@ fn refreshing_an_open_view_discards_the_cached_layout() {
         before.maximum
     );
 }
+
+#[test]
+fn review_diff_shows_hidden_characters_visibly() {
+    let mut ev: Evidence = serde_json::from_str(&fixture()).unwrap();
+    ev.patch = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1,2 @@\n+# note\rprint(1)\n+ok = 1 \u{202E}x\u{200B}y\n".into();
+    let view = View::from_verified(42, &serde_json::to_string(&ev).unwrap()).unwrap();
+    let text: Vec<String> = view.lines().iter().map(|l| l.to_string()).collect();
+    assert!(text.iter().any(|l| l.contains("<U+000D>")), "lone CR vanished from the review diff");
+    assert!(text.iter().any(|l| l.contains("<U+202E>")), "bidi override drawn raw in the review diff");
+    assert!(text.iter().any(|l| l.contains("<U+200B>")), "zero-width space drawn raw in the review diff");
+    assert!(
+        text.iter().any(|l| l == "+# note<U+000D>print(1)"),
+        "a lone CR must not split or erase its line: {text:?}"
+    );
+    assert!(!text.iter().any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{200B}')));
+}
+
+fn receipt_with_output(stdout: &str, stderr: &str) -> alfredo_tui::execution::ExecutionReceipt {
+    serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "request_id": "check:run", "request_digest": "d", "effect": "local-agent",
+        "status": "failed", "started_at": "0", "ended_at": "1", "exit_code": 1,
+        "stdout": stdout, "stderr": stderr, "stdout_bytes": stdout.len(), "stderr_bytes": stderr.len(),
+        "stdout_sha256": "", "stderr_sha256": "", "effect_started": true, "reconciliation_required": false,
+        "error_code": "", "error_message": "", "receipt_id": "r", "owner_pid": null, "owner_identity": "",
+        "process_pid": null, "process_identity": "", "provider": "fixture"
+    }))
+    .unwrap()
+}
+
+#[test]
+fn review_check_output_shows_hidden_characters_visibly() {
+    let mut ev: Evidence = serde_json::from_str(&fixture()).unwrap();
+    ev.check = Some(receipt_with_output("out\rline \u{202E}rev\n", "err\rtail \u{2066}x\u{2069}\n"));
+    let view = View::from_verified(42, &serde_json::to_string(&ev).unwrap()).unwrap();
+    let text: Vec<String> = view.lines().iter().map(|l| l.to_string()).collect();
+    assert!(text.iter().any(|l| l == "out<U+000D>line <U+202E>rev"), "{text:?}");
+    assert!(text.iter().any(|l| l == "err<U+000D>tail <U+2066>x<U+2069>"), "{text:?}");
+    assert!(!text.iter().any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{2066}')));
+}
+
+#[test]
+fn review_crlf_lines_render_without_a_marker_and_ordinary_text_is_unchanged() {
+    let mut ev: Evidence = serde_json::from_str(&fixture()).unwrap();
+    ev.patch = "+x = 1\r\n+é 中文 🙂\r\n".into();
+    let view = View::from_verified(42, &serde_json::to_string(&ev).unwrap()).unwrap();
+    let text: Vec<String> = view.lines().iter().map(|l| l.to_string()).collect();
+    assert!(text.iter().any(|l| l == "+x = 1"), "{text:?}");
+    assert!(text.iter().any(|l| l == "+é 中文 🙂"), "{text:?}");
+    assert!(!text.iter().any(|l| l.contains("<U+")), "{text:?}");
+}

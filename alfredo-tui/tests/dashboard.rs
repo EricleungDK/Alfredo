@@ -1014,3 +1014,32 @@ fn arabic_number_marks_above_are_hidden_and_shown_as_code_points() {
     assert_eq!(safe_visible("a\u{890}b"), "a<U+0890>b");
     assert_eq!(single_line_visible("a\u{891}b"), "a<U+0891>b");
 }
+
+/// Issue #736: the dashboard evidence view shows a lone CR, bidi and zero-width characters
+/// in the diff and in the check output as code points, and keeps CRLF lines marker-free.
+#[test]
+fn dashboard_evidence_diff_and_check_output_show_hidden_characters_visibly() {
+    let mut evidence: alfredo_tui::worker::Evidence = serde_json::from_value(serde_json::json!({
+        "agent": null, "candidate_commit": null, "model_metrics": null, "failure_code": null,
+        "generation": null, "project_notes": null, "run": "run-1", "baseline": "a".repeat(40),
+        "status": "failed", "detail": "Check failed (exit 1)", "patch": "", "check": null
+    }))
+    .unwrap();
+    evidence.patch = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1,3 @@\n+# note\rprint(1)\n+ok = 1 \u{202E}x\u{200B}y\n+crlf = 1\r\n+é 中文 🙂\n".into();
+    evidence.check = Some(failed_check("out\rline \u{202E}rev\n", "err\rtail \u{2066}x\u{2069}\n"));
+    let raw = serde_json::to_string(&evidence).unwrap();
+    let text: Vec<String> = alfredo_tui::dashboard::outcome_lines(&raw)
+        .unwrap()
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    assert!(text.iter().any(|l| l == "+# note<U+000D>print(1)"), "{text:?}");
+    assert!(text.iter().any(|l| l == "+ok = 1 <U+202E>x<U+200B>y"), "{text:?}");
+    assert!(text.iter().any(|l| l == "+crlf = 1"), "{text:?}");
+    assert!(text.iter().any(|l| l == "+é 中文 🙂"), "{text:?}");
+    assert!(text.iter().any(|l| l == "out<U+000D>line <U+202E>rev"), "{text:?}");
+    // The failing-check tail is sanitized by the worker (its CR becomes a line break there), so
+    // this asserts only the format character that the tail keeps.
+    assert!(text.iter().any(|l| l == "tail <U+2066>x<U+2069>"), "{text:?}");
+    assert!(!text.iter().any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{2066}')));
+}
