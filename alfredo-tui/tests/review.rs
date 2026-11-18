@@ -607,3 +607,17 @@ fn review_crlf_lines_render_without_a_marker_and_ordinary_text_is_unchanged() {
     assert!(text.iter().any(|l| l == "+é 中文 🙂"), "{text:?}");
     assert!(!text.iter().any(|l| l.contains("<U+")), "{text:?}");
 }
+
+/// Issue #736 review round 1: a tab in a diff or check line is drawn as `→` plus spaces, so
+/// the tokens on either side never merge (ratatui draws a raw tab as nothing).
+#[test]
+fn review_diff_and_check_output_show_tabs_as_visible_whitespace() {
+    let mut ev: Evidence = serde_json::from_str(&fixture()).unwrap();
+    ev.patch = "+x = a\tor b\n".into();
+    ev.check = Some(receipt_with_output("k\tv\n", ""));
+    let view = View::from_verified(42, &serde_json::to_string(&ev).unwrap()).unwrap();
+    let text: Vec<String> = view.lines().iter().map(|l| l.to_string()).collect();
+    assert!(text.iter().any(|l| l == "+x = a→ or b"), "{text:?}");
+    assert!(text.iter().any(|l| l == "k→  v"), "{text:?}");
+    assert!(!text.iter().any(|l| l.contains('\t')), "{text:?}");
+}

@@ -1060,3 +1060,91 @@ fn dashboard_evidence_diff_and_check_output_show_hidden_characters_visibly() {
         .iter()
         .any(|l| l.contains('\r') || l.contains('\u{202E}') || l.contains('\u{2066}')));
 }
+
+fn outcome_text(stdout: &str, stderr: &str) -> Vec<String> {
+    let mut evidence: alfredo_tui::worker::Evidence = serde_json::from_value(serde_json::json!({
+        "agent": null, "candidate_commit": null, "model_metrics": null, "failure_code": null,
+        "generation": null, "project_notes": null, "run": "run-1", "baseline": "a".repeat(40),
+        "status": "failed", "detail": "Check failed (exit 1)", "patch": "", "check": null
+    }))
+    .unwrap();
+    evidence.check = Some(failed_check(stdout, stderr));
+    let raw = serde_json::to_string(&evidence).unwrap();
+    alfredo_tui::dashboard::outcome_lines(&raw)
+        .unwrap()
+        .iter()
+        .map(|line| line.to_string())
+        .collect()
+}
+
+/// Issue #736 review round 1: the dashboard diff and failing-check tail show tabs as visible
+/// whitespace, and the tail shows raw lines: no CR, ESC, OSC or U+0085 is hidden or split.
+#[test]
+fn dashboard_tail_and_diff_show_tabs_and_raw_control_characters_visibly() {
+    let mut evidence: alfredo_tui::worker::Evidence = serde_json::from_value(serde_json::json!({
+        "agent": null, "candidate_commit": null, "model_metrics": null, "failure_code": null,
+        "generation": null, "project_notes": null, "run": "run-1", "baseline": "a".repeat(40),
+        "status": "failed", "detail": "Check failed (exit 1)", "patch": "", "check": null
+    }))
+    .unwrap();
+    evidence.patch = "+x = a\tor b\n".into();
+    let raw = serde_json::to_string(&evidence).unwrap();
+    let diff: Vec<String> = alfredo_tui::dashboard::outcome_lines(&raw)
+        .unwrap()
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+    assert!(diff.iter().any(|l| l == "+x = a→ or b"), "{diff:?}");
+
+    let osc = outcome_text("", "ok\n\x1b]0;x\nHIDDEN\nthird\n");
+    for expected in ["ok", "<U+001B>]0;x", "HIDDEN", "third"] {
+        assert!(osc.iter().any(|l| l == expected), "{expected}: {osc:?}");
+    }
+    let cr = outcome_text("", "ok\rFAKE\n");
+    assert!(cr.iter().any(|l| l == "ok<U+000D>FAKE"), "{cr:?}");
+    let link = outcome_text("", "\x1b]8;;http://x.example/t\x07link\x1b]8;;\x07\n");
+    assert!(
+        link.iter().any(|l| l.contains("<U+001B>]8;;http://x.example/t<U+0007>link")),
+        "{link:?}"
+    );
+    let nel = outcome_text("", "a\u{85}b\n");
+    assert!(nel.iter().any(|l| l == "a<U+0085>b"), "{nel:?}");
+    let tab = outcome_text("k\tv\n", "");
+    assert!(tab.iter().any(|l| l == "k→  v"), "{tab:?}");
+}
+
+/// Issue #736 review round 1: a lone CR in the outcome's detail shows as `<U+000D>` on the
+/// one-line result, as the review view does, instead of being deleted.
+#[test]
+fn dashboard_outcome_detail_shows_a_lone_cr_visibly() {
+    let evidence = serde_json::to_string(&serde_json::json!({
+        "agent": null, "candidate_commit": null, "model_metrics": null, "failure_code": null,
+        "generation": null, "project_notes": null, "run": "run-1", "baseline": "a".repeat(40),
+        "status": "failed", "detail": "Check failed\rXYZ (exit 1)", "patch": "", "check": null
+    }))
+    .unwrap();
+    let lines = alfredo_tui::dashboard::outcome_lines(&evidence).unwrap();
+    let first = lines[0].to_string();
+    assert!(first.contains("Check failed<U+000D>XYZ"), "{first}");
+}
+
+/// Issue #736 review round 1: the live check output panel (inspector) shows a lone CR,
+/// bidi override and tab visibly.
+#[test]
+fn running_check_output_in_the_inspector_shows_hidden_characters_visibly() {
+    let mut fixture = calc_plan();
+    fixture.select(2);
+    let (_sender, receiver) = tokio::sync::watch::channel(Progress {
+        stage: "Running approved check",
+        check_stdout: "lone\rCR \u{202E}rtl\tTAB\n".as_bytes().to_vec(),
+        ..Default::default()
+    });
+    fixture
+        .control
+        .attach_progress(2, receiver, Arc::new(AtomicBool::new(false)));
+    let screen = text(&fixture.render(100, 30));
+    assert!(screen.contains("lone<U+000D>CR"), "{screen}");
+    assert!(screen.contains("<U+202E>rtl"), "{screen}");
+    assert!(screen.contains("TAB"), "{screen}");
+    assert!(!screen.contains("lone CR"), "{screen}");
+}
