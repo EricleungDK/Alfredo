@@ -1160,7 +1160,10 @@ fn dashboard_tail_keeps_a_cr_before_a_crlf_and_a_trailing_cr_visible() {
     assert!(trailing.iter().any(|l| l == "ok<U+000D>"), "{trailing:?}");
     // An ordinary CRLF line ending still shows no marker.
     let crlf = outcome_text("", "x\r\ny\r\n");
-    assert!(crlf.iter().any(|l| l == "x") && crlf.iter().any(|l| l == "y"), "{crlf:?}");
+    assert!(
+        crlf.iter().any(|l| l == "x") && crlf.iter().any(|l| l == "y"),
+        "{crlf:?}"
+    );
     assert!(!crlf.iter().any(|l| l.contains("<U+")), "{crlf:?}");
 }
 
@@ -1171,7 +1174,10 @@ fn dashboard_tail_keeps_a_hidden_character_in_a_shortened_worktree_path() {
     let bidi = outcome_text("", " /x\u{202E}/worktree/y\n");
     assert!(bidi.iter().any(|l| l.contains("<U+202E>")), "{bidi:?}");
     let isolate = outcome_text("", " /x\u{2066}/worktree/y\n");
-    assert!(isolate.iter().any(|l| l.contains("<U+2066>")), "{isolate:?}");
+    assert!(
+        isolate.iter().any(|l| l.contains("<U+2066>")),
+        "{isolate:?}"
+    );
     let plain = outcome_text("", " /home/u/worktree/y\n");
     assert!(plain.iter().any(|l| l == " y"), "{plain:?}");
 }
