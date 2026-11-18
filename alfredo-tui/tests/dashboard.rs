@@ -1050,10 +1050,10 @@ fn dashboard_evidence_diff_and_check_output_show_hidden_characters_visibly() {
         text.iter().any(|l| l == "out<U+000D>line <U+202E>rev"),
         "{text:?}"
     );
-    // The failing-check tail is sanitized by the worker (its CR becomes a line break there), so
-    // this asserts only the format character that the tail keeps.
+    // The failing-check tail shows the raw stream: the lone CR is a marker, not a line break.
     assert!(
-        text.iter().any(|l| l == "tail <U+2066>x<U+2069>"),
+        text.iter()
+            .any(|l| l == "err<U+000D>tail <U+2066>x<U+2069>"),
         "{text:?}"
     );
     assert!(!text
@@ -1104,7 +1104,8 @@ fn dashboard_tail_and_diff_show_tabs_and_raw_control_characters_visibly() {
     assert!(cr.iter().any(|l| l == "ok<U+000D>FAKE"), "{cr:?}");
     let link = outcome_text("", "\x1b]8;;http://x.example/t\x07link\x1b]8;;\x07\n");
     assert!(
-        link.iter().any(|l| l.contains("<U+001B>]8;;http://x.example/t<U+0007>link")),
+        link.iter()
+            .any(|l| l.contains("<U+001B>]8;;http://x.example/t<U+0007>link")),
         "{link:?}"
     );
     let nel = outcome_text("", "a\u{85}b\n");

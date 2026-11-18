@@ -1,5 +1,5 @@
 //! Readable projection of evidence already verified by `TaskStore`. No review authority.
-use crate::dashboard::safe_visible;
+use crate::dashboard::{safe_visible, show_tabs};
 use crate::worker::Evidence;
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -27,6 +27,12 @@ pub struct Page {
     pub lines: Vec<Line<'static>>,
     pub row: u16,
     pub maximum: usize,
+}
+
+/// Text as the review shows it: hidden characters as `<U+XXXX>` and each tab as a visible
+/// `→` stop (ratatui draws a raw tab as nothing, which merged tokens), issues #404 and #736.
+fn shown(text: &str) -> String {
+    show_tabs(&safe_visible(text))
 }
 
 fn heading(text: impl Into<String>) -> Line<'static> {
@@ -178,7 +184,7 @@ impl View {
         let replacement: Vec<_> = summary
             .map(|text| {
                 std::iter::once(heading("Recorded reviewer assessment"))
-                    .chain(text.lines().map(|line| Line::from(safe_visible(line))))
+                    .chain(text.lines().map(|line| Line::from(shown(line))))
                     .collect()
             })
             .unwrap_or_default();
@@ -202,7 +208,7 @@ impl View {
                 criteria
                     .iter()
                     .enumerate()
-                    .map(|(i, s)| Line::from(format!("{}. {}", i + 1, safe_visible(s)))),
+                    .map(|(i, s)| Line::from(format!("{}. {}", i + 1, shown(s)))),
             );
         }
         self.lines
@@ -250,9 +256,9 @@ impl View {
                 "Task #{task} · worker result {:?}",
                 evidence.status
             )),
-            Line::from(detail_line(task, &safe_visible(&evidence.detail), current)),
-            Line::from(format!("Run: {}", safe_visible(&evidence.run))),
-            Line::from(format!("Baseline: {}", safe_visible(&evidence.baseline))),
+            Line::from(detail_line(task, &shown(&evidence.detail), current)),
+            Line::from(format!("Run: {}", shown(&evidence.run))),
+            Line::from(format!("Baseline: {}", shown(&evidence.baseline))),
             Line::from(hint_line(task, current)),
             Line::from("Accepted changes remain in the isolated worktree."),
             Line::default(),
@@ -270,7 +276,7 @@ impl View {
         );
         lines.insert(
             4,
-            Line::from(safe_visible(&evidence.agent.as_ref().map_or_else(
+            Line::from(shown(&evidence.agent.as_ref().map_or_else(
                 || "Local Agent conversation unrecorded".into(),
                 super::agent::Record::summary,
             ))),
@@ -279,10 +285,7 @@ impl View {
             lines.insert(4, Line::from(metrics.summary()));
         }
         if let Some(candidate) = &evidence.candidate_commit {
-            lines.insert(
-                4,
-                Line::from(format!("Candidate: {}", safe_visible(candidate))),
-            );
+            lines.insert(4, Line::from(format!("Candidate: {}", shown(candidate))));
         }
         if let Some(check) = &evidence.check {
             let exit = check
@@ -291,8 +294,8 @@ impl View {
                 .unwrap_or_else(|| "unavailable".into());
             lines.push(Line::from(format!(
                 "{} · exit {exit} · provider {}",
-                safe_visible(&check.status),
-                safe_visible(&check.provider)
+                shown(&check.status),
+                shown(&check.provider)
             )));
             if check.reconciliation_required {
                 lines.push(Line::styled(
@@ -303,12 +306,9 @@ impl View {
                 ));
             }
             if !check.error_message.is_empty() {
-                lines.push(Line::from(safe_visible(&check.error_message)));
+                lines.push(Line::from(shown(&check.error_message)));
             }
-            lines.push(Line::from(format!(
-                "Receipt: {}",
-                safe_visible(&check.receipt_id)
-            )));
+            lines.push(Line::from(format!("Receipt: {}", shown(&check.receipt_id))));
         } else {
             lines.push(Line::from(
                 "No check receipt retained; no check success established.",
@@ -337,7 +337,7 @@ impl View {
                 } else {
                     Color::White
                 };
-                lines.push(Line::styled(safe_visible(line), Style::default().fg(color)));
+                lines.push(Line::styled(shown(line), Style::default().fg(color)));
             }
         }
         if let Some(check) = &evidence.check {
@@ -350,7 +350,7 @@ impl View {
                 if output.is_empty() {
                     lines.push(Line::from("(empty)"));
                 } else {
-                    lines.extend(output.lines().map(|line| Line::from(safe_visible(line))));
+                    lines.extend(output.lines().map(|line| Line::from(shown(line))));
                 }
             }
         }

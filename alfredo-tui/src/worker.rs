@@ -1087,9 +1087,15 @@ fn sanitize_output(text: &str) -> String {
             c => plain.push(c),
         }
     }
+    relative_worktree_paths(&plain)
+}
+
+/// Shorten absolute run-worktree paths to repository-relative ones (`.../worktree/x` becomes
+/// `x`). Display only; control characters pass through unchanged.
+pub(crate) fn relative_worktree_paths(plain: &str) -> String {
     const MARK: &str = "/worktree/";
     let mut out = String::with_capacity(plain.len());
-    let mut rest = plain.as_str();
+    let mut rest = plain;
     while let Some(index) = rest.find(MARK) {
         let before = &rest[..index];
         // Advance by the delimiter's own UTF-8 width: whitespace such as NBSP,
@@ -1120,8 +1126,22 @@ pub fn output_tail(check: &ExecutionReceipt) -> Option<(&'static str, String)> {
     Some((label, bounded_tail(raw)))
 }
 
+/// [`output_tail`] without sanitizing: the same stream and bounds, but the raw lines with
+/// only the worktree paths shortened, so a control character shows in the dashboard as a
+/// marker instead of being deleted, split into a line, or swallowed with an escape sequence.
+pub(crate) fn raw_output_tail(check: &ExecutionReceipt) -> Option<(&'static str, String)> {
+    let (label, raw) = [("stderr", &check.stderr), ("stdout", &check.stdout)]
+        .into_iter()
+        .find(|(_, text)| !text.trim().is_empty())?;
+    Some((label, bounded_lines(&relative_worktree_paths(raw))))
+}
+
 fn bounded_tail(raw: &str) -> String {
-    let clean = sanitize_output(raw);
+    bounded_lines(&sanitize_output(raw))
+}
+
+/// The last `TAIL_LINES` lines and at most `TAIL_BYTES` of already-clean text.
+fn bounded_lines(clean: &str) -> String {
     let lines: Vec<&str> = clean.trim_end().lines().collect();
     let mut tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
     if tail.len() > TAIL_BYTES {

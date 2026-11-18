@@ -477,6 +477,12 @@ pub fn footer(context: Footer, turn: Turn, width: usize) -> String {
     }
 }
 
+/// One line of outcome text with every hidden character shown as `<U+XXXX>`, controls
+/// included: a lone CR is not a line break here, so it must not vanish (issue #736).
+fn marked_line(text: &str) -> String {
+    safe_visible(&line_breaks_as_spaces(text))
+}
+
 /// Compact projection of verified run evidence: outcome first, then diff and output.
 /// Run, baseline and receipt identifiers stay in the F3 evidence view.
 pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
@@ -494,8 +500,8 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         .check
         .as_ref()
         .filter(|check| !crate::worker::check_passed(check));
-    let tail = failed_check.and_then(crate::worker::output_tail);
-    let mut detail = single_line_visible(&evidence.detail);
+    let tail = failed_check.and_then(crate::worker::raw_output_tail);
+    let mut detail = marked_line(&evidence.detail);
     if failed_check.is_some() {
         // The compact tail in the detail is shown below as formatted lines instead.
         for marker in [": stderr: ", ": stdout: ", " · stderr: ", " · stdout: "] {
@@ -533,7 +539,7 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         Some(_) if passed => {}
         // The outcome line already states the check result; do not repeat it.
         Some(check) if detail.starts_with("Check ") => {
-            let message = single_line_visible(&check.error_message);
+            let message = marked_line(&check.error_message);
             if !message.is_empty() && !detail.contains(&message) {
                 lines.push(Line::styled(message, Style::default().fg(Color::Red)));
             }
@@ -541,11 +547,11 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         Some(check) => {
             lines.push(Line::from(format!(
                 "Check · {}{exit}",
-                single_line_visible(&check.status)
+                marked_line(&check.status)
             )));
             if !check.error_message.is_empty() {
                 lines.push(Line::styled(
-                    single_line_visible(&check.error_message),
+                    marked_line(&check.error_message),
                     Style::default().fg(Color::Red),
                 ));
             }
@@ -555,10 +561,12 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
     if let Some((label, tail)) = &tail {
         lines.push(Line::default());
         lines.push(heading(&format!("{label} · last lines")));
-        lines.extend(
-            tail.lines()
-                .map(|line| Line::styled(safe_visible(line), Style::default().fg(Color::Red))),
-        );
+        lines.extend(tail.lines().map(|line| {
+            Line::styled(
+                show_tabs(&safe_visible(line)),
+                Style::default().fg(Color::Red),
+            )
+        }));
     }
     lines.push(Line::default());
     lines.push(heading("Diff"));
@@ -582,7 +590,10 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
             } else {
                 Color::Reset
             };
-            lines.push(Line::styled(safe_visible(line), Style::default().fg(color)));
+            lines.push(Line::styled(
+                show_tabs(&safe_visible(line)),
+                Style::default().fg(color),
+            ));
         }
     }
     if let Some(check) = &evidence.check {
@@ -597,7 +608,11 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
             if !output.trim().is_empty() && !shown {
                 lines.push(Line::default());
                 lines.push(heading(label));
-                lines.extend(output.lines().map(|line| Line::from(safe_visible(line))));
+                lines.extend(
+                    output
+                        .lines()
+                        .map(|line| Line::from(show_tabs(&safe_visible(line)))),
+                );
             }
         }
     }
