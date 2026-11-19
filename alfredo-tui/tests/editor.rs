@@ -309,7 +309,7 @@ fn session_switch_keeps_independent_drafts_and_cursor_positions() {
     let mut app = App::new("fixture".into());
     app.sessions[0].insert("ac");
     app.sessions[0].left();
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("second");
     app.sessions[0].insert("b");
     assert_eq!(app.sessions[0].draft, "abc");

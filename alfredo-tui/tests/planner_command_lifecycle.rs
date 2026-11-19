@@ -217,7 +217,7 @@ fn planner_saved_intent_generates_revises_fails_and_cancels_at_exact_origin() {
             },
         )
         .unwrap();
-    app.add_session();
+    app.open_chat();
     let mut autosave = Autosave::new(ConversationStore::open(&fixture.store, "default").unwrap());
     assert!(!autosave.contains_saved_command(0, &app.sessions[0].commands()[0]));
     autosave

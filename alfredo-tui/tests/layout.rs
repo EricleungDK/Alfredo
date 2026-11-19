@@ -429,7 +429,7 @@ fn command_receipt_binding_preserves_origin_and_never_enters_inference() {
         assert!(!text.contains("Task #7 proposed"));
     }
     let original = serde_json::to_value(&app.sessions[0]).unwrap();
-    app.add_session();
+    app.open_chat();
     let other = render(&app, &tasks);
     assert!(!other.contains("/task Origin work"));
     tasks.snapshot.as_mut().unwrap().receipts.push(Receipt {
@@ -598,7 +598,7 @@ fn worker_command_keeps_claim_and_result_at_origin_without_moving_later_reading(
     let claimed = render(&app, &tasks, 140, 32);
     assert!(claimed.contains("✓ Task #7 started"), "{claimed}");
     assert!(claimed.contains("no result yet"));
-    app.add_session();
+    app.open_chat();
     for status in [
         TaskStatus::ReviewReady,
         TaskStatus::Failed,
@@ -718,7 +718,7 @@ fn planner_outcomes_are_originating_drafts_and_plan_save_is_separate_authority()
     };
     app.sessions[0].set_command_state(&id, CommandState::Submitted);
     assert!(render(&app, &tasks, 140, 32).contains("Submitted · planner operation pending"));
-    app.add_session();
+    app.open_chat();
     app.sessions[0].set_command_state(
         &id,
         CommandState::Planner {
@@ -822,7 +822,7 @@ fn planner_outcomes_are_originating_drafts_and_plan_save_is_separate_authority()
     );
     let stopped = render(&app, &tasks, 140, 32);
     assert!(stopped.contains("Draft generation stopped"));
-    app.add_session();
+    app.open_chat();
     let selected = app.selected;
     let cancel = app.sessions[selected]
         .submit_command(
@@ -938,7 +938,7 @@ fn cancellation_request_stays_at_origin_and_does_not_overwrite_actual_worker_res
     assert!(!pending.contains("Cancellation requested"));
     app.sessions[0].set_command_state(&id, CommandState::Submitted);
     assert!(render(&app, &tasks, 140, 32).contains("Submitted · controller operation pending"));
-    app.add_session();
+    app.open_chat();
     app.sessions[0].set_command_state(
         &id,
         CommandState::Control {
@@ -1183,7 +1183,7 @@ fn automatic_launch_has_dispatch_actor_and_keeps_origin_reading_and_drafts() {
         },
     );
     app.sessions[0].insert("Origin unsent 🦀");
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("Selected unsent 中文");
     app.sessions[0]
         .submit_automatic_command(
@@ -1425,7 +1425,7 @@ fn automatic_architect_draft_stays_with_review_and_preserves_background_reading(
     };
     let marker = first_marker(&render(&app, &tasks, 100, 24));
     assert!(marker.is_some());
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("Selected unsent 中文");
     let intent = Intent::ArchitectDraft {
         request: ArchitectRequest {
@@ -1631,7 +1631,7 @@ fn wayfinder_scope_action_keeps_turn_origin_after_cancellation_and_restart() {
     assert!(!unknown.contains("Scope saved"), "{unknown}");
     assert_eq!(scope.snapshot().unwrap().revision, 0);
     assert!(tasks.workers.is_empty());
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("Unsent selected 中文");
     tasks.canonical_scope = Some(scope.transact(request.clone()).unwrap());
     assert!(!render(&app, &tasks, 140, 32).contains("Scope saved"));
@@ -2155,7 +2155,7 @@ fn selection_history_separates_creation_loading_and_actual_handoff() {
     }
     assert_eq!(app.sessions[0].draft, "Source unfinished draft 🦀");
     assert!(app.sessions[0].messages.is_empty());
-    app.add_session();
+    app.open_chat();
     assert!(!render(&app, 140, 32).contains("› Create /repo/created"));
     app.selected = 0;
     app.sessions[0].set_command_state(
@@ -2211,7 +2211,7 @@ fn selection_arrival_preserves_destination_reading_and_waits_for_actual_selectio
     };
     let marker = first_marker(&render(&app, 100, 24));
     assert!(marker.is_some());
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("Unrelated selected draft 中文");
     let id = app.sessions[0]
         .submit_selection_arrival(

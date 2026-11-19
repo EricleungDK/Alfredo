@@ -574,7 +574,7 @@ fn no_color_strips_colours_and_truecolor_uses_the_palette() {
 #[test]
 fn pane_without_task_state_lists_chats() {
     let mut app = App::new("fixture".into());
-    app.add_session();
+    app.open_chat();
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
     let buffer = terminal.backend().buffer().clone();
