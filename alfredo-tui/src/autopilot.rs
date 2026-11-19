@@ -106,6 +106,10 @@ struct Saved {
     report: Option<String>,
     #[serde(default)]
     branch: Option<String>,
+    /// What the integration branch changed against the baseline, measured once when
+    /// the run finished. Absent without a branch and in older state files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    changes: Option<Changes>,
     /// Owner follow-up tasks adopted as further families of this run.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     adopted: BTreeSet<u64>,
@@ -289,6 +293,47 @@ fn plural(count: u32, word: &str) -> String {
     format!("{count} {word}{}", if count == 1 { "" } else { "s" })
 }
 
+/// Files changed and lines added and deleted by an integration branch, summed from
+/// `git diff --numstat` once at the finish and kept in the saved state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Changes {
+    pub files: u32,
+    pub added: u32,
+    pub deleted: u32,
+}
+impl Changes {
+    /// Sums `added<TAB>deleted<TAB>path` lines; a binary file (`-`) counts as a file
+    /// and adds no lines, and a line without all three fields is skipped.
+    pub fn from_numstat(text: &str) -> Self {
+        let mut totals = Self::default();
+        for line in text.lines() {
+            let mut fields = line.splitn(3, '\t');
+            let (Some(added), Some(deleted), Some(_path)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            totals.files = totals.files.saturating_add(1);
+            totals.added = totals.added.saturating_add(added.parse().unwrap_or(0));
+            totals.deleted = totals.deleted.saturating_add(deleted.parse().unwrap_or(0));
+        }
+        totals
+    }
+    /// The value of the summary's `Changes` row.
+    pub fn row(&self) -> String {
+        format!(
+            "{}{GAP}+{} −{}",
+            plural(self.files, "file"),
+            self.added,
+            self.deleted
+        )
+    }
+    /// The headless result's `changes` object.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({"files": self.files, "added": self.added, "deleted": self.deleted})
+    }
+}
+
 /// Read-only projection for the UI. Counts derive from durable task receipts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
@@ -392,6 +437,45 @@ pub fn is_command(text: &str) -> bool {
     verb == "/go"
         || verb == "/clean"
         || matches!(text, "/pause" | "/resume" | "/stop" | "/autopilot")
+}
+
+/// Issue #721: `/stop` typed while the chat turn runs cancels that turn like Esc.
+pub fn cancels_chat_turn(text: &str, chat_active: bool) -> bool {
+    text == "/stop" && chat_active
+}
+
+/// Whether messages queued behind the running turn are waiting (they return to the prompt).
+pub fn queue_held(queued: &[String]) -> bool {
+    !queued.is_empty()
+}
+
+/// After the command ran: an ordinary command is remembered and clears (or rejects) the
+/// draft; a `/stop` that cancelled the chat turn already did both before the cancel, so the
+/// queued text the cancel restored stays in the prompt.
+pub fn settles_draft_after_command(chat_cancelled: bool) -> bool {
+    !chat_cancelled
+}
+
+/// The footer after `/stop`: the autopilot report, the chat turn it cancelled, and the
+/// queued text that came back.
+pub fn finish_notice(notice: &str, chat_cancelled: bool, held: bool) -> String {
+    let mut notice = stop_notice(notice, chat_cancelled);
+    if chat_cancelled && held {
+        notice.push_str(" · queued text is back in the prompt; nothing was sent");
+    }
+    notice
+}
+
+/// Issue #721: `/stop` also ends the active chat turn (like Esc). The footer names what was
+/// stopped: "No active autopilot" is only true when the chat turn was idle too.
+pub fn stop_notice(notice: &str, chat_cancelled: bool) -> String {
+    if !chat_cancelled {
+        return notice.to_owned();
+    }
+    match notice.strip_prefix("No active autopilot") {
+        Some(rest) => format!("Chat turn cancelled{rest}"),
+        None => format!("{notice} · chat turn cancelled"),
+    }
 }
 
 #[doc(hidden)]
@@ -645,6 +729,10 @@ impl Autopilot {
             (Some(saved), Some(snapshot)) => run_usage(tasks, snapshot, saved),
             _ => crate::metrics::Usage::default(),
         }
+    }
+    /// What the finished run's integration branch changed, as saved at the finish.
+    pub fn changes(&self) -> Option<Changes> {
+        self.saved.as_ref()?.changes
     }
     pub fn report(&self) -> Option<&str> {
         self.saved.as_ref()?.report.as_deref()
@@ -911,6 +999,7 @@ impl Autopilot {
             notice: String::new(),
             report: None,
             branch: None,
+            changes: None,
             adopted: ids.iter().copied().collect(),
             round: 0,
             stale: false,
@@ -2185,10 +2274,22 @@ impl Autopilot {
         let workspace = snapshot.workspace.clone();
         let goal = saved.goal.clone();
         runtime.spawn(async move {
-            let result =
-                integration_branch(store, workspace, baseline, sources, name.clone(), goal)
-                    .await
-                    .map(|commit| format!("{name}\0{commit}"));
+            let result = integration_branch(
+                store,
+                workspace.clone(),
+                baseline.clone(),
+                sources,
+                name.clone(),
+                goal,
+            )
+            .await;
+            let result = match result {
+                Ok(commit) => {
+                    let changes = branch_changes(&workspace, &baseline, &commit).await;
+                    Ok(format!("{name}\0{commit}\0{}", changes.unwrap_or_default()))
+                }
+                Err(error) => Err(error),
+            };
             let _ = sender.send(result);
         });
         self.job = Some(receiver);
@@ -2251,10 +2352,18 @@ impl Autopilot {
         if let Some(warning) = saved.dirty_warning() {
             lines.push(format!("{:<LABEL$}{warning}", "Warning"));
         }
+        let mut changes = None;
         let branch = match &result {
             Ok(value) => {
-                let (name, _) = value.split_once('\0').unwrap_or((value, ""));
+                let mut fields = value.splitn(3, '\0');
+                let name = fields.next().unwrap_or_default();
+                changes = fields
+                    .nth(1)
+                    .and_then(|text| serde_json::from_str::<Changes>(text).ok());
                 lines.push(format!("{:<LABEL$}{name}", "Branch"));
+                if let Some(changes) = &changes {
+                    lines.push(format!("{:<LABEL$}{}", "Changes", changes.row()));
+                }
                 Some(name.to_string())
             }
             Err(error) => {
@@ -2351,6 +2460,7 @@ impl Autopilot {
             saved.finished_through = through;
             saved.report = Some(report.clone());
             saved.branch = branch;
+            saved.changes = changes;
             saved.done = accepted as u32;
             saved.total = saved.roots().len() as u32;
         }
@@ -2564,6 +2674,27 @@ async fn integration_branch(
         }
     }
     Ok(commit)
+}
+
+/// The totals of `git diff --numstat baseline..commit` as JSON text, through the
+/// hardened host Git helper; `None` when Git cannot say, so the row is left out.
+async fn branch_changes(workspace: &Path, baseline: &str, commit: &str) -> Option<String> {
+    let range = format!("{baseline}..{commit}");
+    let numstat = crate::worker::git(
+        workspace,
+        &[
+            "diff",
+            "--numstat",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            &range,
+            "--",
+        ],
+    )
+    .await
+    .ok()?;
+    serde_json::to_string(&Changes::from_numstat(&numstat)).ok()
 }
 
 /// The run-level `autopilot` entry of a model-unreachable stop carries the id of the
