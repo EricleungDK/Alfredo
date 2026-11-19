@@ -28,7 +28,9 @@ use refusal::{
 };
 #[path = "autopilot_integration.rs"]
 mod integration;
-use integration::{branch_changes, integration_branch};
+use integration::branch_changes;
+#[doc(hidden)]
+pub use integration::integration_branch;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
