@@ -796,10 +796,11 @@ impl Autopilot {
         max_repairs: u32,
         tasks: &TaskControl,
     ) -> Result<String, String> {
-        let goal = goal.trim();
-        if !text(goal, 4096) {
-            return Err("Usage: /go GOAL, or /go to run the open plan (GOAL is 1–4096 bytes without control characters)".into());
+        let goal = crate::planner_command::normalise_goal(goal);
+        if let Some(refusal) = crate::planner_command::goal_refusal("Goal", &goal, 4096) {
+            return Err(refusal);
         }
+        let goal = goal.as_str();
         self.admit(model, max_repairs, tasks)?;
         // Before any planner request: a full task list can never take the plan (#696).
         if let Some(snapshot) = tasks

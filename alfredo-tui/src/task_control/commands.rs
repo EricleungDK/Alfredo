@@ -697,6 +697,11 @@ impl TaskControl {
             return Ok(());
         }
         if let Some(prompt) = text.trim().strip_prefix("/plan ") {
+            let prompt = crate::planner_command::normalise_goal(prompt);
+            if let Some(refusal) = crate::planner_command::goal_refusal("Request", &prompt, 8192) {
+                return Err(refusal);
+            }
+            let prompt = prompt.as_str();
             self.task_headroom()?;
             let revision = self
                 .snapshot
@@ -977,7 +982,7 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             return Err(bare_usage("/task").into());
         }
         return Ok(Action::Propose {
-            title: title.into(),
+            title: crate::planner_command::normalise_goal(title),
             model: model.into(),
             dependencies: vec![],
         });
@@ -997,7 +1002,7 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(Action::Propose {
-            title: title.into(),
+            title: crate::planner_command::normalise_goal(title),
             model: model.into(),
             dependencies,
         });

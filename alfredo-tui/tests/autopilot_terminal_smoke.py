@@ -28,6 +28,8 @@ class AutopilotServer:
     def __init__(self):
         self.lock = threading.Lock()
         self.requests = []
+        # Issue #743: the planner request's user prompt, in order.
+        self.plan_prompts = []
         self.errors = []
         self.release_app = threading.Event()
         self.prose_worker = False
@@ -125,6 +127,8 @@ class AutopilotServer:
                         raise AssertionError(f'Unexpected request: {prompt[:120]!r}')
                     with fixture.lock:
                         fixture.requests.append(marker)
+                        if marker == 'PLAN':
+                            fixture.plan_prompts.append(prompt)
                     if marker == 'PLAN' and fixture.hold_plan is not None and not fixture.hold_plan.wait(60):
                         raise AssertionError('Planner reply was never released')
                     if marker == 'CALC' and fixture.hold_calc is not None and not fixture.hold_calc.wait(60):
@@ -333,6 +337,18 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertNotIn('Unknown command', screen)
         self.assertNotIn('Usage', screen)
         self.screen_has(terminal, 'Autopilot')
+        self.quit(terminal)
+
+    def test_a_pasted_multi_line_go_goal_starts_autopilot_with_the_lines_joined_by_spaces(self):
+        terminal = self.terminal(resume=False)
+        terminal.send(b'\x1b[200~/go Fix the bug\rin calc.py\x1b[201~\r')
+        self.wait_until('autopilot planned', lambda: 'PLAN' in self.fixture.markers(), 60)
+        self.assertEqual(len(self.fixture.plan_prompts), 1)
+        self.assertIn('Fix the bug in calc.py', self.fixture.plan_prompts[0])
+        self.assertNotIn('Fix the bug\rin', self.fixture.plan_prompts[0])
+        self.assertNotIn('Fix the bug\nin', self.fixture.plan_prompts[0])
+        self.assertNotIn('Usage', terminal.screen())
+        self.fixture.release_app.set()
         self.quit(terminal)
 
     def test_stop_then_resume_runs_the_cancelled_task_again_without_a_repair(self):
