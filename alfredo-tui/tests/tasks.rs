@@ -2557,6 +2557,41 @@ fn task_receipt_notice_names_permit_before_approve() {
     );
 }
 
+/// Issue #741: a fix request that merely mentions "the new service" is a task, not a
+/// Wayfinder project start, so `/task` proposes it and `/tasks` lists it.
+#[test]
+fn task_that_mentions_a_new_service_is_proposed_not_sent_to_wayfinder() {
+    use alfredo_tui::task_control::TaskControl;
+    use std::time::{Duration, Instant};
+    let goal = "fix the new service worker caching";
+    assert_eq!(
+        alfredo_tui::wayfinder::entry_mode(&format!("/task {goal}")),
+        None
+    );
+    let fixture = Fixture::new();
+    let store = fixture.store("newservice");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut control = TaskControl::new(store.clone());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    control.refresh(&runtime);
+    while control.pending {
+        control.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    control
+        .command(&runtime, &format!("/task {goal}"), "fixture")
+        .unwrap();
+    while control.pending {
+        control.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let tasks = store.snapshot().unwrap().tasks;
+    assert_eq!(tasks.len(), 1, "{}", control.notice);
+    assert_eq!(tasks[0].title, goal);
+}
+
 /// Issue #702: the refusal text is pinned exactly, including the one-task / whole-plan
 /// switch at `needed == 1`, the free-slot arithmetic and the saturation past the limit.
 #[test]

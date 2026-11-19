@@ -12,6 +12,53 @@ use std::{
 use tokio::{runtime::Runtime, task::JoinHandle};
 static IDS: AtomicU64 = AtomicU64::new(0);
 
+/// The phrase of a "new app/service/project/…" start: a creation verb within four words
+/// before `new`, or `new <kind>` opening the text (issue #741). "fix the new app crash"
+/// is ordinary chat.
+fn new_project_phrase(words: &[&str]) -> Option<String> {
+    // The draft may still carry its command word: `/plan new app`, `/task ...`, `/after ...`.
+    let lead = usize::from(matches!(words.first(), Some(&("plan" | "task" | "after"))));
+    words.windows(2).enumerate().find_map(|(at, w)| {
+        if w[0] != "new"
+            || !matches!(
+                w[1],
+                "project" | "app" | "application" | "service" | "repository" | "product"
+            )
+        {
+            return None;
+        }
+        let verb = (at.saturating_sub(4)..at).find(|&i| {
+            matches!(
+                words[i],
+                "build"
+                    | "create"
+                    | "make"
+                    | "start"
+                    | "scaffold"
+                    | "bootstrap"
+                    | "develop"
+                    | "generate"
+                    | "setup"
+                    | "write"
+                    | "init"
+            ) || (matches!(words[i], "set" | "spin") && words[i + 1] == "up")
+        });
+        let from = if at <= lead { at } else { verb? };
+        Some(words[from..=at + 1].join(" "))
+    })
+}
+
+/// The "new app" phrase that made `prompt` a project start, for refusals that name it.
+pub fn project_start_phrase(prompt: &str) -> Option<String> {
+    entry_mode(prompt)?;
+    let lower = prompt.to_lowercase();
+    let words: Vec<_> = lower
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|s| !s.is_empty())
+        .collect();
+    new_project_phrase(&words)
+}
+
 /// Match the legacy first-contact vocabulary with word boundaries, without a model.
 pub fn entry_mode(prompt: &str) -> Option<Mode> {
     let explicit = crate::commands::capability_prompt(prompt).ok().flatten();
@@ -59,13 +106,7 @@ pub fn entry_mode(prompt: &str) -> Option<Mode> {
     }) {
         return explicit.map(|_| Mode::Chart);
     }
-    let new = words.windows(2).any(|w| {
-        w[0] == "new"
-            && matches!(
-                w[1],
-                "project" | "app" | "application" | "service" | "repository" | "product"
-            )
-    });
+    let new = new_project_phrase(&words).is_some();
     let object = |word: &str| {
         matches!(
             word,
