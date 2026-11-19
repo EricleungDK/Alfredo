@@ -68,6 +68,15 @@ class FlagTests(unittest.TestCase):
         for name in ('/exit', '/quit'):
             self.assertIn(f'`{name}`', reference)
 
+    def test_reference_says_line_breaks_in_a_goal_become_spaces(self):
+        # Issue #743: a pasted or scripted multi-line goal is joined into one line.
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        start = reference.index('## Autopilot')
+        end = reference.index('\n## ', start)
+        section = reference[start:end]
+        for text in ('each run of line breaks in a goal becomes one space', '--go "$(cat task.md)"', '4096 bytes'):
+            self.assertIn(text, section)
+
     def test_headless_chat_stdin_prompt_is_documented(self):
         # Issue #549: `--chat -` reads the prompt from stdin (256 KiB, UTF-8, nonempty).
         reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')

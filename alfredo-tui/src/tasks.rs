@@ -1706,9 +1706,14 @@ impl TaskStore {
                 model,
                 dependencies,
             } => {
-                if !text_valid(title, 8192) || !text_valid(model, 200) {
+                if let Some(refusal) =
+                    crate::planner_command::goal_refusal("Task title", title, 8192)
+                {
+                    return Err(refusal);
+                }
+                if !text_valid(model, 200) {
                     return Err(
-                        "Task title/model is empty, contains controls or exceeds its limit".into(),
+                        "Task model is empty, contains controls or exceeds its limit".into(),
                     );
                 }
                 if snapshot.tasks.len() == MAX_TASKS {
