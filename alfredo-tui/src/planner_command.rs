@@ -84,6 +84,33 @@ pub struct Event {
 fn text(value: &str, max: usize) -> bool {
     !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }
+/// A pasted goal keeps its line breaks (#743) but is one line downstream (commit
+/// subjects, `ALFREDO_GOAL`, single-line panels): each run of CR/LF becomes one space.
+pub fn normalise_goal(goal: &str) -> String {
+    let lines: Vec<&str> = goal
+        .trim()
+        .split(['\r', '\n'])
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines.join(" ")
+}
+/// Why a normalised goal, request or title is refused, naming the rule that failed.
+pub fn goal_refusal(what: &str, value: &str, limit: usize) -> Option<String> {
+    if value.trim().is_empty() {
+        Some(format!("{what} is empty"))
+    } else if value.chars().any(char::is_control) {
+        Some(format!(
+            "{what} has a control character: line breaks are fine but other control characters are not"
+        ))
+    } else if value.len() > limit {
+        Some(format!(
+            "{what} is {} bytes; the limit is {limit} bytes",
+            value.len()
+        ))
+    } else {
+        None
+    }
+}
 fn digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }

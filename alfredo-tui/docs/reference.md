@@ -79,6 +79,12 @@ stopped autopilot) is refused with the reason, and the draft and tasks are untou
 nor saved proposed tasks, bare `/go` answers `Usage: /go GOAL, or /go to run the open
 plan`.
 
+A goal may be pasted over several lines (an issue, a spec) or passed to `--go` with line
+breaks (`--go "$(cat task.md)"`): each run of line breaks in a goal becomes one space, so a
+goal stays one line in commit subjects, `ALFREDO_GOAL` and panels. `/plan REQUEST`,
+`/task` and `/after` do the same. Other control characters (such as ESC or NUL) are
+still refused, and the refusal says so, as does a goal over 4096 bytes after joining.
+
 In the interactive TUI, the denied-sandbox refusal of `/go` and `/run` is shown as chat rows with the whole sentence (bwrap's stderr without a trailing period, then the host-policy fix and the README Troubleshooting pointer) and a footer that leads with the fix: `/go refused: allow bubblewrap user namespaces · see README Troubleshooting`.
 
 In the interactive TUI, a bare `/go` that the unattended plan lint refuses is shown the same way: the chat rows carry the whole finding (without a doubled period) and `Fix it with /plan-revise (draft) or run it by hand with /approve`, and the footer reads `/go refused: the plan fails the unattended lint (see the chat rows above)`. From the task view (F2) `/go` returns to the chat view so the rows are visible.

@@ -98,6 +98,14 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD'), head)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
+    def test_a_multi_line_goal_runs_as_one_line_and_is_reported_as_one_line(self):
+        code, out, err = self.run_headless('--headless', goal='Make answer return 42\r\n\nand add app\n')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.result(out)['goal'], GOAL)
+        self.assertEqual(len(self.fixture.plan_prompts), 1)
+        self.assertIn(GOAL, self.fixture.plan_prompts[0])
+        self.assertNotIn('--go refused', err)
+
     def test_stream_json_prints_one_event_per_line_ending_with_the_result_object(self):
         code, out, err = self.run_headless('--headless', '--output-format', 'stream-json')
         self.assertEqual(code, 0, err)
