@@ -133,6 +133,86 @@ fn prepared_task_captures_selection_and_never_mutates_before_dispatch() {
     }
     assert!(mismatch.reconcile(Some(&snapshot), None).is_none());
 }
+/// Issue #743: a pasted multi-line description is one line in the proposed task.
+#[test]
+fn task_takes_a_pasted_multi_line_description_as_one_line() {
+    let fixture = Fixture::new();
+    let mut control = fixture.control();
+    let intent = control
+        .prepare_command(
+            "/task Fix the bug\r\nin calc.py\n\nand add a test",
+            "fixture",
+        )
+        .unwrap()
+        .unwrap();
+    let Intent::Task { request } = intent else {
+        panic!("not a task intent");
+    };
+    let Action::Propose { title, .. } = request.action else {
+        panic!("not a proposal");
+    };
+    assert_eq!(title, "Fix the bug in calc.py and add a test");
+}
+
+#[test]
+fn after_takes_a_pasted_multi_line_description_as_one_line() {
+    let fixture = Fixture::new();
+    fixture.propose("First");
+    let mut control = fixture.control();
+    let intent = control
+        .prepare_command("/after 1 Fix the bug\r\nin calc.py", "fixture")
+        .unwrap()
+        .unwrap();
+    let Intent::Task { request } = intent else {
+        panic!("not a task intent");
+    };
+    let Action::Propose { title, .. } = request.action else {
+        panic!("not a proposal");
+    };
+    assert_eq!(title, "Fix the bug in calc.py");
+}
+
+#[test]
+fn a_task_title_with_other_control_characters_is_refused_and_says_line_breaks_are_fine() {
+    let fixture = Fixture::new();
+    let error = fixture
+        .store
+        .transact(Request {
+            correlation: "controls".into(),
+            expected_revision: fixture.store.snapshot().unwrap().revision,
+            action: Action::Propose {
+                title: "Fix\x1bthe bug".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+            },
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("line breaks are fine") && error.contains("other control characters"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_task_model_with_control_characters_is_still_refused_by_its_own_rule() {
+    let fixture = Fixture::new();
+    let error = fixture
+        .store
+        .transact(Request {
+            correlation: "model".into(),
+            expected_revision: fixture.store.snapshot().unwrap().revision,
+            action: Action::Propose {
+                title: "Fix the bug".into(),
+                model: "fix\x1bture".into(),
+                dependencies: vec![],
+            },
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("Task model is empty"), "{error}");
+}
+
 #[test]
 fn an_acknowledged_task_command_does_not_block_clear_forever() {
     // Issue #654: task commands stay Submitted for the session; once their receipt

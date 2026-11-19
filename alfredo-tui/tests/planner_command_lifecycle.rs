@@ -185,6 +185,54 @@ fn wait(planner: &mut alfredo_tui::planner::Planner) {
         thread::sleep(Duration::from_millis(2));
     }
 }
+/// Issue #743: a pasted goal is one line downstream.
+#[test]
+fn planner_command_normalise_goal_joins_each_run_of_line_breaks_with_one_space() {
+    use alfredo_tui::planner_command::normalise_goal;
+    for (pasted, one_line) in [
+        ("Fix the bug\nin calc.py", "Fix the bug in calc.py"),
+        ("Fix the bug\rin calc.py", "Fix the bug in calc.py"),
+        ("Fix the bug\r\n\r\n\nin calc.py", "Fix the bug in calc.py"),
+        ("\r\n  Fix it \n\n", "Fix it"),
+        ("Fix\n a \nb", "Fix  a  b"),
+        ("one line", "one line"),
+        ("\r\n\n", ""),
+    ] {
+        assert_eq!(normalise_goal(pasted), one_line, "{pasted:?}");
+    }
+}
+
+#[test]
+fn planner_command_goal_refusal_names_the_rule_that_failed() {
+    use alfredo_tui::planner_command::goal_refusal;
+    assert_eq!(goal_refusal("Goal", "x", 1), None);
+    assert_eq!(goal_refusal("Goal", &"x".repeat(4096), 4096), None);
+    assert_eq!(
+        goal_refusal("Goal", "", 4096).as_deref(),
+        Some("Goal is empty")
+    );
+    assert_eq!(
+        goal_refusal("Goal", " \t ", 4096).as_deref(),
+        Some("Goal is empty")
+    );
+    for control in ["a\x1bb", "a\0b", "a\x7fb"] {
+        let refusal = goal_refusal("Goal", control, 4096).unwrap();
+        assert!(
+            refusal.starts_with("Goal has a control character")
+                && refusal.contains("line breaks are fine but other control characters are not"),
+            "{refusal}"
+        );
+    }
+    assert_eq!(
+        goal_refusal("Goal", &"x".repeat(4097), 4096).as_deref(),
+        Some("Goal is 4097 bytes; the limit is 4096 bytes")
+    );
+    assert_eq!(
+        goal_refusal("Request", &"é".repeat(5), 9).as_deref(),
+        Some("Request is 10 bytes; the limit is 9 bytes")
+    );
+}
+
 #[test]
 fn planner_saved_intent_generates_revises_fails_and_cancels_at_exact_origin() {
     use alfredo_tui::{

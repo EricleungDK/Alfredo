@@ -2812,6 +2812,113 @@ fn go_never_discards_a_users_own_plan_draft() {
     assert!(control.planner.checkpoint().is_some());
 }
 
+/// Issue #743: a pasted goal keeps its line breaks, and every goal command takes it as one line.
+#[test]
+fn go_joins_a_pasted_multi_line_goal_into_one_line_before_planning() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Fix the bug\r\n\r\nin calc.py\n", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "planner request",
+        |_, _| server.count() >= 1,
+    );
+    assert!(
+        server
+            .prompts()
+            .iter()
+            .any(|p| p.contains("Fix the bug in calc.py")),
+        "{:?}",
+        server.prompts()
+    );
+    assert_eq!(
+        autopilot.status(&control).unwrap().goal,
+        "Fix the bug in calc.py"
+    );
+    autopilot.stop(&runtime, &mut control);
+}
+
+#[test]
+fn go_refuses_other_control_characters_and_says_line_breaks_are_fine() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    for goal in ["Fix\x1bthe bug", "Fix\0the bug", "Fix\nthe\x1b[31m bug"] {
+        let error = autopilot.start(goal, "fixture", 2, &control).unwrap_err();
+        assert!(
+            error.contains("line breaks are fine") && error.contains("other control characters"),
+            "{error}"
+        );
+    }
+    assert_eq!(server.count(), 0);
+}
+
+#[test]
+fn go_over_the_limit_after_joining_lines_names_the_length_limit() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    let goal = format!("{}\n{}", "a".repeat(2500), "b".repeat(2500));
+    let error = autopilot.start(&goal, "fixture", 2, &control).unwrap_err();
+    assert!(
+        error.contains("5001 bytes") && error.contains("limit is 4096 bytes"),
+        "{error}"
+    );
+    assert_eq!(server.count(), 0);
+}
+
+#[test]
+fn plan_takes_a_pasted_multi_line_request_like_the_one_line_form() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    control
+        .command(&runtime, "/plan Fix the bug\r\rin calc.py", "fixture")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        server
+            .prompts()
+            .iter()
+            .any(|p| p.contains("Fix the bug in calc.py")),
+        "{:?}",
+        server.prompts()
+    );
+}
+
+#[test]
+fn plan_refuses_other_control_characters_and_says_line_breaks_are_fine() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let error = control
+        .command(&runtime, "/plan Fix\nthe\x1bbug", "fixture")
+        .unwrap_err();
+    assert!(
+        error.contains("line breaks are fine") && error.contains("other control characters"),
+        "{error}"
+    );
+    assert_eq!(server.count(), 0);
+}
+
 /// /stop cancels the running worker; /resume must run the same task again, not
 /// repair it, and the cancel must not read as a failure or spend repair budget.
 fn stopped_then_resumed(
