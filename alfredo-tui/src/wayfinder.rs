@@ -16,6 +16,8 @@ static IDS: AtomicU64 = AtomicU64::new(0);
 /// before `new`, or `new <kind>` opening the text (issue #741). "fix the new app crash"
 /// is ordinary chat.
 fn new_project_phrase(words: &[&str]) -> Option<String> {
+    // The draft may still carry its command word: `/plan new app`, `/task ...`, `/after ...`.
+    let lead = usize::from(matches!(words.first(), Some(&("plan" | "task" | "after"))));
     words.windows(2).enumerate().find_map(|(at, w)| {
         if w[0] != "new"
             || !matches!(
@@ -41,7 +43,7 @@ fn new_project_phrase(words: &[&str]) -> Option<String> {
                     | "init"
             ) || (matches!(words[i], "set" | "spin") && words[i + 1] == "up")
         });
-        let from = if at == 0 { 0 } else { verb? };
+        let from = if at <= lead { at } else { verb? };
         Some(words[from..=at + 1].join(" "))
     })
 }
