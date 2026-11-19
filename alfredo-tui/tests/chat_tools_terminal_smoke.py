@@ -564,6 +564,19 @@ class ChatTools(unittest.TestCase):
         self.assertIn('run_command', self.tool_names(chats[0]))
         self.assertNotIn('Wayfinder', self.terminal.screen())
 
+    def test_a_path_first_prompt_reaches_the_model_and_a_mistyped_command_does_not(self):
+        # Issue #744: `/etc/hosts what is this` is chat text; `/gp fix it` is not.
+        self.terminal.write(b'/gp fix it\r')
+        self.terminal.wait_for('Unknown command /gp')
+        self.assertEqual(self.fixture.chats(), [])
+        self.terminal.write(b'\x15/etc/hosts what is this\r')
+        self.terminal.wait_for('SUMMARY_FROM_TOOL')
+        self.assertNotIn('Unknown command /etc', self.terminal.screen())
+        chats = self.fixture.chats()
+        self.assertEqual(len(chats), 2, 'one request per tool round')
+        users = [m['content'] for m in chats[0]['messages'] if m['role'] == 'user']
+        self.assertEqual(users[-1], '/etc/hosts what is this')
+
     def test_a_tool_call_written_as_text_shows_the_notice_and_runs_nothing(self):
         # Issue #660: the reply stays as written, the footer says nothing ran, and Ctrl+R
         # asks again.
