@@ -50,6 +50,8 @@ class AutopilotServer:
         self.echo_worker = False
         # Issue #283: server counts added to every final frame (empty: the server reports none).
         self.usage = {}
+        # Issue #741: tool counts of the ordinary chat requests ("hello there").
+        self.chat_tools = []
         fixture = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -121,6 +123,11 @@ class AutopilotServer:
                         marker = 'APP'
                         content = json.dumps({'files': [{'path': 'app.py', 'content':
                             "from calc import answer\n\n\ndef main():\n    return f'answer={answer()}'\n"}]})
+                    elif prompt == 'hello there':
+                        marker = 'CHAT'
+                        with fixture.lock:
+                            fixture.chat_tools.append(len(request.get('tools') or []))
+                        content = 'CHAT_REPLY_MARKER'
                     else:
                         raise AssertionError(f'Unexpected request: {prompt[:120]!r}')
                     with fixture.lock:
@@ -308,6 +315,20 @@ class AutopilotTerminalSmoke(unittest.TestCase):
                         lambda: '#1' in second.screen(), 3)
         self.quit(second)
         self.quit(first)
+
+    def test_go_that_mentions_a_new_app_keeps_the_chat_tools_for_the_next_turn(self):
+        # Issue #741: the goal is a fix, not a project start, so no goal-derived scope
+        # turns the chat tools off afterwards.
+        self.fixture.single_task = True
+        terminal = self.terminal(resume=False)
+        terminal.send('/go fix the new app crash on startup\r')
+        self.screen_has(terminal, 'git switch alfredo/go-', 60)
+        terminal.send('hello there\r')
+        self.screen_has(terminal, 'CHAT_REPLY_MARKER', 30)
+        self.assertEqual(len(self.fixture.chat_tools), 1)
+        self.assertGreater(self.fixture.chat_tools[0], 0, 'chat request carries the tools')
+        self.assertNotIn('tools off here', terminal.screen())
+        self.quit(terminal)
 
     def test_rejected_commands_explain_themselves_and_never_concatenate_with_the_next_command(self):
         terminal = self.terminal(resume=False)

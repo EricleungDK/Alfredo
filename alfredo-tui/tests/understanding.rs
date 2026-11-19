@@ -326,6 +326,14 @@ fn canonical_wayfinder_routes_first_contact_and_reuses_flow_across_missions() {
         "fix the typo in the architecture diagram caption",
         "Rename the redesign flag in the config",
         "migrate this test to the new helper",
+        // A bare "new app" mention without a creation verb is ordinary chat (issue #741).
+        "fix the new app crash on startup",
+        "the new service returns 500, fix it",
+        "add tests for the new application form",
+        "rename the new project field in config",
+        "update the docs for the new product page",
+        "fix the typo in the new repository section of the README",
+        "/task fix the new service worker caching",
     ] {
         assert_eq!(entry_mode(prompt), None, "{prompt}");
     }
