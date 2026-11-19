@@ -309,6 +309,7 @@ pub struct Changes {
 impl Changes {
     /// Sums `added<TAB>deleted<TAB>path` lines; a binary file (`-`) counts as a file
     /// and adds no lines, and a line without all three fields is skipped.
+    #[must_use]
     pub fn from_numstat(text: &str) -> Self {
         let mut totals = Self::default();
         for line in text.lines() {
@@ -325,6 +326,7 @@ impl Changes {
         totals
     }
     /// The value of the summary's `Changes` row.
+    #[must_use]
     pub fn row(&self) -> String {
         format!(
             "{}{GAP}+{} −{}",
@@ -334,6 +336,7 @@ impl Changes {
         )
     }
     /// The headless result's `changes` object.
+    #[must_use]
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({"files": self.files, "added": self.added, "deleted": self.deleted})
     }
@@ -445,11 +448,13 @@ pub fn is_command(text: &str) -> bool {
 }
 
 /// Issue #721: `/stop` typed while the chat turn runs cancels that turn like Esc.
+#[must_use]
 pub fn cancels_chat_turn(text: &str, chat_active: bool) -> bool {
     text == "/stop" && chat_active
 }
 
 /// Whether messages queued behind the running turn are waiting (they return to the prompt).
+#[must_use]
 pub fn queue_held(queued: &[String]) -> bool {
     !queued.is_empty()
 }
@@ -457,12 +462,14 @@ pub fn queue_held(queued: &[String]) -> bool {
 /// After the command ran: an ordinary command is remembered and clears (or rejects) the
 /// draft; a `/stop` that cancelled the chat turn already did both before the cancel, so the
 /// queued text the cancel restored stays in the prompt.
+#[must_use]
 pub fn settles_draft_after_command(chat_cancelled: bool) -> bool {
     !chat_cancelled
 }
 
 /// The footer after `/stop`: the autopilot report, the chat turn it cancelled, and the
 /// queued text that came back.
+#[must_use]
 pub fn finish_notice(notice: &str, chat_cancelled: bool, held: bool) -> String {
     let mut notice = stop_notice(notice, chat_cancelled);
     if chat_cancelled && held {
@@ -473,6 +480,7 @@ pub fn finish_notice(notice: &str, chat_cancelled: bool, held: bool) -> String {
 
 /// Issue #721: `/stop` also ends the active chat turn (like Esc). The footer names what was
 /// stopped: "No active autopilot" is only true when the chat turn was idle too.
+#[must_use]
 pub fn stop_notice(notice: &str, chat_cancelled: bool) -> String {
     if !chat_cancelled {
         return notice.to_owned();
