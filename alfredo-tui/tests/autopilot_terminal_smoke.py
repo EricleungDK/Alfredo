@@ -269,6 +269,11 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertNotIn('Autopilot resumed', terminal.screen())
         self.assertEqual(self.git('show', f'{branch}:calc.py'), 'def answer():\n    return 42')
         self.assertIn("answer={answer()}", self.git('show', f'{branch}:app.py'))
+        # Issue #708: the summary says what the branch changed, from one git diff at the finish.
+        rows = [row.split('\t') for row in self.git('diff', '--numstat', f'main..{branch}').splitlines()]
+        added, deleted = sum(int(row[0]) for row in rows), sum(int(row[1]) for row in rows)
+        self.assertEqual((len(rows), added, deleted), (2, 6, 1), rows)
+        self.screen_has(terminal, f'Changes   {len(rows)} files   +{added} −{deleted}')
         subjects = self.git('log', '--format=%s', f'main..{branch}').splitlines()
         self.assertIn('Make answer return 42', subjects, subjects)
         self.assertEqual(subjects.count('Make answer return 42'), 1, subjects)

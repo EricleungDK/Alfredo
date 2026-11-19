@@ -26,6 +26,19 @@ fn history_traversal_restores_unsent_unicode_draft_and_cursor() {
     assert_eq!(session.draft, "A界🦀Z");
 }
 
+/// Issue #721: the F1 entry for /stop names the chat turn it also cancels.
+#[test]
+fn f1_stop_entry_names_the_chat_turn() {
+    let (_, help) = alfredo_tui::commands::COMMANDS
+        .iter()
+        .find(|(name, _)| *name == "/stop")
+        .unwrap();
+    assert_eq!(
+        *help,
+        "pause autopilot, cancel running workers and the chat turn"
+    );
+}
+
 #[test]
 fn completion_filters_cycles_and_only_produces_a_draft() {
     let mut picker = Completion::open("/mod").unwrap();
@@ -268,7 +281,7 @@ fn history_is_bounded_and_does_not_cross_sessions() {
         app.sessions[0].remember_submission();
         app.sessions[0].clear_draft();
     }
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("second draft");
     app.sessions[1].history_previous();
     assert_eq!(app.sessions[1].draft, "second draft");

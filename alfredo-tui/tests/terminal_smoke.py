@@ -2062,7 +2062,8 @@ class TerminalSmoke(unittest.TestCase):
                 wait_for('◈ ○ chat 1'.encode())
                 self.assertNotIn('AUTO_TWO', visible_screen(output))
                 self.assertNotIn('FAST_REPLY', visible_screen(output))
-                os.write(master, b'\x0eSIDE_DRAFT\t/workspace\r')
+                # Issue #728: Ctrl+N needs a non-empty chat, so chat 1 holds a throwaway draft that Ctrl+U clears.
+                os.write(master, b'a\x0eSIDE_DRAFT\t\x15/workspace\r')
                 wait_for(b'Workspace selection required')
                 os.write(master, b'\x15' + workspace.name.encode() + b'\r')
                 wait_for(b'Mission selection required')

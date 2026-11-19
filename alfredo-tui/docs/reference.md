@@ -208,6 +208,10 @@ and creates one local branch `alfredo/go-<id>`. HEAD, the index and working file
 untouched; nothing is pushed. The summary lists each task's outcome and the `git switch`
 / `git merge` commands, and says when the branch holds only an accepted subset. The branch tip is an extra commit
 on the composed tree whose subject is the goal (first 72 characters).
+The summary's `Changes` row, `Changes   2 files   +6 −1`, sums `git diff --numstat` from the
+baseline to the branch tip (a binary file counts as a file and adds no lines). It is measured once
+when the run finishes, saved with the run and shown unchanged after a restart; it is left out when
+no branch was made or Git cannot report the diff.
 The finish notice and summary add one totals line, `tokens 12.3k in / 1.1k out · model 38 s`,
 summed over the planner, the workers and the repairs of this run's own tasks (counts
 and total model time as the server reported them; no cost estimate). The line is
@@ -232,12 +236,14 @@ name that does not exist exits 2 with `use --new-mission NAME to create it`). Ea
 line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`; a repair
 names its trigger: `check failed`, `no files changed` or `worker failed`;
 `done 2/2 alfredo/go-ab12`). On exit stdout carries exactly one JSON object:
-`{model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage}` with
+`{model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage[, changes]}` with
 `state` one of `done`, `partial`, `failed` or `paused`. `usage` is
 `{prompt_tokens, completion_tokens, model_seconds}`, the same totals as the `/go` summary line:
 planner, worker and repair calls summed from the server's `prompt_eval_count`, `eval_count`
 and `total_duration` (`model_seconds` is that duration in seconds, not client wall-clock time).
-A field the server never reported is `null`; the object is always present. Exit codes: 0 every task
+A field the server never reported is `null`; the object is always present. `changes` is
+`{files, added, deleted}`, the same totals as the summary's `Changes` row, and is present only when
+the run made an integration branch. Exit codes: 0 every task
 accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
 without `--go`, with `--select` or `--doctor`, no repository, no
 sandbox, Ollama unreachable, model not installed; these print `Error: …` on stderr and
@@ -309,7 +315,7 @@ within version 1; consumers should ignore unknown ones.
 
 A run left paused (SIGINT/SIGTERM, `/stop`, an autopilot self-pause, or a restart of
 Alfredo) belongs to its conversation. `alfredo-tui --resume --headless` continues the
-default mission's paused run exactly as `/resume` does (same approvals, task policies and
+paused run of the default mission, or of the one `--mission NAME` names, exactly as `/resume` does (same approvals, task policies and
 checks; a finished plan is not replanned, but a run paused mid-planning plans again, as `/resume` does) and prints `resuming “GOAL” (1/2 accepted)` on stderr,
 then the usual progress lines, the same JSON object (`goal` is the paused run's goal)
 and the same exit codes. With no paused run (none, or one that already finished) it
@@ -338,7 +344,7 @@ restored conversation's model applies, as in the terminal.
 ### Headless chat (`--chat PROMPT --headless`)
 
 `alfredo-tui --chat PROMPT --headless [--approve workspace-edits]` runs one Chat Agent
-turn (issue #240) without a terminal, on the repository's default mission, with the same
+turn (issue #240) without a terminal, on the repository's default mission or the one `--mission NAME` / `--new-mission NAME` names, with the same
 system context and tool loop as chat. Read tools run. Mutating calls go through the
 Approval gate, answered by a scripted policy instead of a card:
 
@@ -721,7 +727,8 @@ symlinks followed; `../state` from inside the repo is fine, `sub/../state` is no
 gets an independent `rust-tasks-v1/<sha256>/tasks.json`.
 
 `--conversation NAME` selects a named conversation set within that workspace/mission
-(default: `default`). Each set restores up to eight conversations. One terminal
+(default: `default`). Each set restores up to eight conversations (the limit; `/clear` empties
+one, `--conversation NAME` starts another set). One terminal
 owns a set at a time; use another name for a concurrent terminal sharing the task
 queue. `--model` supplies the initial model for a new set; restored conversations
 keep their saved models in the terminal, which you can change using `/model` when eligible.
@@ -1100,7 +1107,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Ctrl+W / Ctrl+U | Delete previous whitespace-delimited word / clear draft |
 | Ctrl+J, Alt+Enter | Insert a newline on any terminal; the 16 KiB limit applies |
 | Shift+Enter | Insert newline when the terminal reports it (kitty protocol) |
-| Ctrl+N | Create another conversation (up to eight) |
+| Ctrl+N | Create another conversation (up to eight). On an empty chat (no messages, empty draft, no running turn) it adds nothing and says `This chat is empty; type here, or Tab to another chat`. At eight chats: `Eight chats is the limit; /clear empties this chat, or start another set with --conversation NAME` |
 | F2 | Switch the right pane between task detail and conversation |
 | F3 | Open evidence for the selected task; groups require a task selection |
 | Tab / Shift+Tab | Select next / previous conversation |
@@ -1756,7 +1763,8 @@ The summary runs off the UI thread; Esc cancels it and keeps your prompt in the 
   while a command in the conversation is still in flight (not yet acknowledged; a task
   command whose receipt is shown never blocks it), while the pending plan
   draft was generated by a command in it (`/plan-save` or `/plan-cancel` first; nothing is
-  changed), and inside an agent view. Ctrl+N opens another conversation instead (maximum eight).
+  changed), and inside an agent view. Ctrl+N opens another conversation instead (maximum eight; with eight chats the notice
+  after `/clear` names the limit instead). The prompt title shows `Tab chats` from two chats on.
 
 ## Chat tools (read-only)
 

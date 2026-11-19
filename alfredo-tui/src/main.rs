@@ -298,7 +298,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "--version" | "-V" => {
-                println!("alfredo-tui {}", env!("CARGO_PKG_VERSION"));
+                out(format_args!("alfredo-tui {}", env!("CARGO_PKG_VERSION")));
                 return Ok(());
             }
             _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
@@ -351,7 +351,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             let report = alfredo_tui::qualification::read(&path)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
-            println!("{}", report.summary());
+            out(format_args!("{}", report.summary()));
             return Ok(());
         }
         if parallel_models_explicit && parallel_models != 1 {
@@ -369,12 +369,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             structured_thinking,
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ))?;
-        println!(
+        out(format_args!(
             "{}\nReport: {}\nRetained artifacts: {}",
             report.summary(),
             path.display(),
             report.manifest.artifact_directory.display()
-        );
+        ));
         if !report.finished {
             std::process::exit(2);
         }
@@ -407,7 +407,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model_explicit,
             &provider,
         ));
-        println!("{}", report.text);
+        out(format_args!("{}", report.text));
         drop(runtime);
         if !report.passed {
             std::process::exit(2);
@@ -1775,6 +1775,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             let text = work.app.sessions[index].draft.trim().to_owned();
                             let model = work.app.sessions[index].model.clone();
+                            // Issue #721: /stop ends the running chat turn like Esc (and kills a
+                            // running run_command); idle chat is left untouched.
+                            let chat_cancelled = alfredo_tui::autopilot::cancels_chat_turn(
+                                &text,
+                                work.app.sessions[index].status.active(),
+                            );
+                            let held = alfredo_tui::autopilot::queue_held(
+                                work.app.sessions[index].queued_messages(),
+                            );
+                            if chat_cancelled {
+                                // Record only "/stop" and empty the prompt first, so the queued
+                                // text the cancel returns to the prompt is kept, as with Esc.
+                                work.app.sessions[index].remember_submission();
+                                work.app.sessions[index].clear_draft();
+                                at_lookup.cancel();
+                                command_staging::cancel_chat_turn(
+                                    &mut work.app,
+                                    index,
+                                    &mut jobs,
+                                    &mut approval_replies,
+                                );
+                            }
                             match work.autopilot.command(
                                 &runtime,
                                 &mut work.tasks,
@@ -1783,9 +1805,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 max_repairs,
                             ) {
                                 Ok(notice) => {
-                                    work.app.sessions[index].remember_submission();
-                                    work.app.sessions[index].clear_draft();
-                                    work.app.notice = notice;
+                                    if alfredo_tui::autopilot::settles_draft_after_command(
+                                        chat_cancelled,
+                                    ) {
+                                        work.app.sessions[index].remember_submission();
+                                        work.app.sessions[index].clear_draft();
+                                    }
+                                    work.app.notice = alfredo_tui::autopilot::finish_notice(
+                                        &notice,
+                                        chat_cancelled,
+                                        held,
+                                    );
                                     if text.split_whitespace().next() == Some("/go") {
                                         work.app.append_history_warning(index);
                                         // Autopilot work is watched on the dashboard.
@@ -1806,7 +1836,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         work.app.notice = error;
                                     }
-                                    work.app.sessions[index].reject_draft();
+                                    if alfredo_tui::autopilot::settles_draft_after_command(
+                                        chat_cancelled,
+                                    ) {
+                                        work.app.sessions[index].reject_draft();
+                                    }
                                 }
                             }
                         }
@@ -1927,7 +1961,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(job) = jobs[index].take() {
                                             job.abort();
                                         }
-                                        work.app.notice = "Conversation cleared. Tasks and their evidence are unchanged; Ctrl+N opens another conversation".into();
+                                        work.app.notice = work.app.cleared_notice();
                                     }
                                     Err(error) => {
                                         work.app.notice = error.into();
@@ -2601,7 +2635,7 @@ const HELP_LINES: &[&str] = &[
     "Enter send · Ctrl+N new · Tab switch · Esc or Ctrl+C (while replying) cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
     "Chat transcript: Home/End (empty prompt) or Ctrl+Home/Ctrl+End jump to the oldest/latest row; End resumes following new output. With text in the prompt, Home/End move the cursor.",
-    "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
+    "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}], changes:{files,added,deleted} when a branch was made} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission, or the one --mission NAME / --new-mission NAME names.",
     "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals); PROMPT `-` reads the prompt from stdin to EOF (UTF-8, at most 256 KiB, nonempty; otherwise exit 2), as in `git diff | alfredo-tui --chat - --headless`: read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {model, state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
     "--resume --headless continues the mission's paused run (left by SIGINT/SIGTERM, /stop or a restart) with the same stderr lines, JSON result and exit codes as --go; exit 2 with nothing on stdout when there is no paused run. After a model-unreachable stop it queues the same retry as /repair ID retry and continues without planning again. --go GOAL --headless over a paused run exits 2 naming the paused goal and progress and plans nothing; start a different goal with --conversation NAME (a new name has no paused run) or /go GOAL in the terminal.",
     "--output-format text|stream-json (default text) with --headless (--go, --resume or --chat): stream-json prints one JSON object per line on stdout, each {\"v\":1,\"type\":…}: task_started {id}, repair {id,cause,head} and check {id,passed[,reason]} for --go/--resume, tool {tool,path,result[,detail]} for --chat, and last the usual final object with type \"result\" added. Nothing else reaches stdout; stderr keeps the same progress lines; exit codes are unchanged (a setup error still prints nothing on stdout). Any other value exits 2.",
@@ -2615,7 +2649,23 @@ const HELP_LINES: &[&str] = &[
 ];
 
 fn print_help() {
-    println!("{}", HELP_LINES.join("\n"));
+    out(format_args!("{}", HELP_LINES.join("\n")));
+}
+
+/// Writes one line of top-level CLI output to stdout. A reader that went away
+/// (`alfredo-tui --help | head`) is the normal Unix way to stop early: exit 0 quietly
+/// instead of the panic `println!` raises on `EPIPE`. Any other write error is reported
+/// on stderr with status 1. Scoped to these print sites: SIGPIPE stays ignored process-wide.
+fn out(line: std::fmt::Arguments) {
+    use io::Write;
+    let mut stdout = io::stdout().lock();
+    if let Err(error) = writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        eprintln!("Error: cannot write to stdout: {error}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -2729,7 +2779,7 @@ mod tests {
                 },
             )
             .unwrap();
-        app.add_session();
+        app.open_chat();
         app.sessions[1].insert("Unfinished work in another session");
         (app, id)
     }
@@ -2860,7 +2910,7 @@ mod tests {
             (1, "@wayfinder review Wayfinder ticket #42"),
         ] {
             if session == 1 {
-                work.app.add_session();
+                work.app.open_chat();
             }
             work.app.sessions[session].insert(prompt);
             let messages = work.app.sessions[session].begin().unwrap();
@@ -2898,7 +2948,7 @@ mod tests {
     fn unrelated_barrier(
         work: &mut alfredo_tui::workstation::Workstation,
     ) -> Option<(usize, String)> {
-        work.app.add_session();
+        work.app.open_chat();
         let origin = work.app.selected;
         work.app.sessions[origin].insert("Unfinished selected draft 🦀");
         let id = work.app.sessions[origin]

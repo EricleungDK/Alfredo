@@ -143,7 +143,7 @@ alfredo-tui --model qwen2.5-coder:14b
    `/plan-save` and have not started.
 3. Press F5 to pause or resume at any time; `/stop` also cancels running workers;
    `/autopilot` shows status.
-4. When done, the summary names the branch `alfredo/go-<id>`. Your HEAD, index and
+4. When done, the summary names the branch `alfredo/go-<id>` and its size (`Changes   N files   +A −D`). Your HEAD, index and
    working files were never touched. Review and merge it yourself:
 
 ```bash
@@ -155,7 +155,7 @@ git merge alfredo/go-<id>              # on your branch, when satisfied
 You can also start unattended: `alfredo-tui --model qwen2.5-coder:14b --go "GOAL"`.
 For scripts and CI, add `--headless`: it runs without a terminal, prints progress lines
 on stderr and ends with one JSON object on stdout
-(`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage}`);
+(`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason[,last_failure]}], usage[, changes]}`);
 SIGINT/SIGTERM cancel workers like `/stop`; `--resume --headless` continues a paused run, or retries a run an unreachable model stopped. Exit 2 means setup failed (Ollama down, model
 not installed) with the reason on stderr; with `--on-finish`, headless waits for the hook
 (10 s limit) after printing the JSON and reports a failed hook on stderr.
@@ -195,7 +195,7 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | PageUp / PageDown | Scroll transcript, agent view, details or evidence |
 | Home / End (empty prompt), Ctrl+Home / Ctrl+End | Jump to the oldest / latest transcript row; End resumes following new output. With text in the prompt, Home / End move the cursor |
 | Tab / Shift+Tab | Next / previous conversation |
-| Ctrl+N | New conversation (max 8); `/clear` restarts the current one, `/compact` summarises its older turns |
+| Ctrl+N | New conversation (max 8; not on an empty chat, which says so; at 8, `/clear` it or use `--conversation NAME`); `/clear` restarts the current one, `/compact` summarises its older turns |
 | Esc | Cancel the current model request (keeps partial reply); close pickers. You can then send a new prompt or switch `/model`. Esc (or Ctrl+Q, which also quits) stops a running chat `run_command`; `/stop` does too |
 | Ctrl+R | Retry a failed or cancelled turn, until you send a new prompt |
 | y / n / a (approval card) | Approve / deny / always allow (`a`, see `/allow`; not offered for pushes, HOST (escalated) runs, over-long commands, or writes that create directories) a chat tool call: file edit, shell command, git write or push; Esc denies and ends the turn |

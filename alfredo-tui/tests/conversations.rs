@@ -70,7 +70,7 @@ fn restart_restores_models_selection_drafts_and_partial_text_without_replay() {
     app.sessions[0].insert("question");
     app.sessions[0].begin().unwrap();
     app.sessions[0].apply(1, Update::Token("partial answer".into()));
-    app.add_session();
+    app.open_chat();
     app.sessions[1].model = "second-model".into();
     app.sessions[1].insert("A界Z");
     app.sessions[1].left();
@@ -1236,7 +1236,7 @@ fn older_completed_autosave_cannot_release_newer_or_changed_command_intent() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut save = Autosave::new(store);
     let mut app = App::new("fixture".into());
-    app.add_session();
+    app.open_chat();
     app.sessions[0]
         .submit_command("/task First".into(), command_intent("first-request"))
         .unwrap();
@@ -2599,7 +2599,7 @@ fn same_command_cannot_claim_two_saved_session_origins() {
     app.sessions[0]
         .submit_command("/task Original".into(), command_intent("unique-origin"))
         .unwrap();
-    app.add_session();
+    app.open_chat();
     let valid = Snapshot::capture(&app, "default");
     store.save(&valid).unwrap();
     let path = fixture.file();
@@ -2721,7 +2721,7 @@ fn planner_schema12_preserves_v11_and_restores_only_exact_saved_draft_origin() {
         )
         .unwrap();
     app.sessions[0].set_command_state(&id, CommandState::Submitted);
-    app.add_session();
+    app.open_chat();
     let unrelated = Request {
         correlation: "unrelated-planner".into(),
         ..request.clone()
@@ -3039,7 +3039,7 @@ fn a_refused_clear_changes_nothing_and_a_clear_without_a_draft_still_saves() {
     );
     assert_eq!(Snapshot::capture(&app, "default"), before);
     // Another conversation does not hold the origin, so it clears and still saves.
-    app.add_session();
+    app.open_chat();
     app.sessions[1]
         .clear_conversation(draft.origin.as_ref(), |_| false)
         .unwrap();
@@ -3089,7 +3089,7 @@ fn controller_schema13_preserves_v12_and_never_reactivates_restored_control() {
             outcome: Outcome::DispatchChanged { enabled: true },
         },
     );
-    app.add_session();
+    app.open_chat();
     for (correlation, state) in [
         ("pending-control", CommandState::Pending),
         ("submitted-control", CommandState::Submitted),
@@ -3329,7 +3329,7 @@ fn automatic_run_schema14_requires_its_exact_earlier_enabled_parent_and_preserve
             },
         ],
     );
-    app.add_session();
+    app.open_chat();
     let snapshot = Snapshot::capture(&app, "default");
     assert_eq!(snapshot.schema_version, 19);
     let backup = path.with_extension("v13-backup");
@@ -3543,7 +3543,7 @@ fn architect_schema15_preserves_v14_and_restores_only_the_saved_draft_owner() {
         .submit_automatic_command("Architect revision for task #2".into(), automatic)
         .unwrap();
     app.sessions[0].set_command_state(&id, CommandState::Submitted);
-    app.add_session();
+    app.open_chat();
     let mut draft = saved_plan();
     draft.revision = 5;
     draft.origin = Some(request.request.clone());
@@ -3746,7 +3746,7 @@ fn wayfinder_schema16_binds_delayed_scope_intent_to_its_turn_and_preserves_v15()
     assert_eq!(app.sessions[0].commands()[0].sequence, 1);
     assert_eq!(app.sessions[0].commands()[1].sequence, 2);
     assert!(!app.sessions[0].commands()[1].text.contains(prompt));
-    app.add_session();
+    app.open_chat();
     let snapshot = Snapshot::capture(&app, "default");
     let backup = path.with_extension("v15-backup");
     fs::write(&backup, b"conflicting backup").unwrap();
@@ -3899,7 +3899,7 @@ fn selection_schema17_preserves_v16_and_requires_exact_source_identity_without_r
         );
     }
     app.sessions[0].set_command_state(&id, CommandState::Submitted);
-    app.add_session();
+    app.open_chat();
     let snapshot = Snapshot::capture(&app, "default");
     assert_eq!(snapshot.schema_version, 19);
     let backup = path.with_extension("v16-backup");
