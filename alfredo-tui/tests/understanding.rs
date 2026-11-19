@@ -297,6 +297,68 @@ fn task_view_observes_cross_mission_scope_and_never_resumes_dispatch_on_confirma
         .is_err());
 }
 
+/// Issue #741: every creation verb, the four-word window and the leading `new <kind>`.
+#[test]
+fn a_new_app_pair_starts_wayfinder_only_after_a_creation_verb_or_at_the_start() {
+    use alfredo_tui::{
+        understanding::Mode,
+        wayfinder::{entry_mode, project_start_phrase},
+    };
+    for verb in [
+        "build",
+        "create",
+        "make",
+        "start",
+        "scaffold",
+        "bootstrap",
+        "develop",
+        "generate",
+        "setup",
+        "write",
+        "init",
+        "set up",
+        "spin up",
+    ] {
+        let prompt = format!("{verb} a new app");
+        assert_eq!(entry_mode(&prompt), Some(Mode::Chart), "{prompt}");
+        assert_eq!(
+            project_start_phrase(&prompt).as_deref(),
+            Some(prompt.as_str())
+        );
+    }
+    for kind in [
+        "project",
+        "app",
+        "application",
+        "service",
+        "repository",
+        "product",
+    ] {
+        let prompt = format!("new {kind} for billing");
+        assert_eq!(entry_mode(&prompt), Some(Mode::Chart), "{prompt}");
+        assert_eq!(project_start_phrase(&prompt), Some(format!("new {kind}")));
+    }
+    // Four words between the verb and "new" still count; five do not.
+    assert_eq!(entry_mode("build the big shiny new app"), Some(Mode::Chart));
+    assert_eq!(entry_mode("build all of the old new app"), None);
+    assert_eq!(
+        project_start_phrase("Please build the big shiny new app").as_deref(),
+        Some("build the big shiny new app")
+    );
+    // Not a project start, so nothing to name.
+    assert_eq!(project_start_phrase("fix the new app crash"), None);
+    assert_eq!(
+        project_start_phrase("plan a migration of the whole system"),
+        None
+    );
+    assert_eq!(
+        project_start_phrase("diagnose how to build a new app"),
+        None
+    );
+    assert_eq!(entry_mode("add a new feature to the app"), None);
+    assert_eq!(entry_mode("a new app"), None);
+}
+
 #[test]
 fn canonical_wayfinder_routes_first_contact_and_reuses_flow_across_missions() {
     use alfredo_tui::{
@@ -310,6 +372,12 @@ fn canonical_wayfinder_routes_first_contact_and_reuses_flow_across_missions() {
         "Plan a migration from Postgres to SQLite",
         "Redesign the architecture of the importer",
         "Let's design a new architecture for billing",
+        "create a new app that prints hello",
+        "build a new service",
+        "start a new project",
+        "new app: todo list",
+        "set up a new repository for docs",
+        "plan a migration to postgres",
     ] {
         assert_eq!(entry_mode(prompt), Some(Mode::Chart), "{prompt}");
     }

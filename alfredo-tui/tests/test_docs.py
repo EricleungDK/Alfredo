@@ -104,6 +104,14 @@ class FlagTests(unittest.TestCase):
             self.assertNotIn("the default mission's paused run", section, heading)
             self.assertNotIn('on the repository\'s default mission,', section, heading)
 
+    def test_new_app_wayfinder_rule_is_documented_as_a_verb_rule(self):
+        # Issue #741: "the new app" alone is ordinary chat; a creation verb starts Wayfinder.
+        reference = ' '.join((ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8').split())
+        self.assertIn('counts only after a creation verb within four words', reference)
+        self.assertIn('names the matched phrase', reference)
+        main = ' '.join((ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8').split())
+        self.assertIn('starts Wayfinder only after a creation verb', main)
+
     def test_masked_secret_files_are_documented_as_permission_denied(self):
         # Issue #582: /dev/null is bound nodev, so a masked file fails to open.
         reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
