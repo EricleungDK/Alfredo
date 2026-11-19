@@ -312,6 +312,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         }
         Some((tasks, target)) => crate::agent_view::prompt_title(tasks, target),
         None if session.status.active() => " Prompt · Esc stop ".to_string(),
+        None if app.sessions.len() > 1 => " Prompt · Enter send · Tab chats ".to_string(),
         None => " Prompt · Enter send ".to_string(),
     };
     let draft_width = rows[3].width.saturating_sub(4) as usize;

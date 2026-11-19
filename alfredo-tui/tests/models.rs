@@ -77,7 +77,7 @@ fn model_selection_is_explicit_and_does_not_reassign_active_turns() {
     app.sessions[0].begin().unwrap();
     assert!(app.select_model("other").is_err());
     assert_eq!(app.sessions[0].model, "original");
-    app.add_session();
+    app.open_chat();
     app.select_model("other").unwrap();
     assert_eq!(app.sessions[0].model, "original");
     assert_eq!(app.sessions[1].model, "other");
@@ -159,7 +159,7 @@ fn not_installed_notice_caps_the_list_and_still_points_to_models() {
 #[test]
 fn queued_model_applies_to_the_chat_that_asked_not_the_selected_one() {
     let mut app = App::new("original".into());
-    app.add_session();
+    app.open_chat();
     app.selected = 0;
     assert!(app.queue_model("llama3:8b"));
     app.selected = 1;
@@ -171,7 +171,7 @@ fn queued_model_applies_to_the_chat_that_asked_not_the_selected_one() {
 #[test]
 fn queued_model_is_refused_with_a_notice_when_its_chat_became_busy() {
     let mut app = App::new("original".into());
-    app.add_session();
+    app.open_chat();
     app.selected = 0;
     assert!(app.queue_model("llama3:8b"));
     app.sessions[0].status = Status::Streaming;

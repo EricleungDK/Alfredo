@@ -117,7 +117,7 @@ fn selection_origin_and_arrival_persist_separately_and_never_grant_task_authorit
         .finish(&runtime, &source, Default::default(), None)
         .unwrap();
     let mut target = App::new("target-model".into());
-    target.add_session();
+    target.open_chat();
     target.sessions[1].insert("Prior destination discussion");
     target.sessions[1].begin().unwrap();
     target.sessions[1].apply(1, Update::Token("Destination history\n".repeat(20)));
@@ -363,12 +363,12 @@ fn handoff_keeps_captured_origin_session_and_destination_drafts_reading() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut work = fixture.open_workstation();
     work.app.sessions[0].insert("Captured origin draft");
-    work.app.add_session();
+    work.app.open_chat();
     work.app.sessions[1].insert("Other selected source session");
     assert_eq!(work.app.selected, 1);
     let mut target = App::new("first-destination-model".into());
     target.sessions[0].insert("First destination draft");
-    target.add_session();
+    target.open_chat();
     target.sessions[1].model = "selected-destination-model".into();
     target.sessions[1].insert("Earlier target question");
     target.sessions[1].begin().unwrap();

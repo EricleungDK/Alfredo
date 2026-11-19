@@ -821,10 +821,12 @@ impl Session {
         self.cursor = start;
     }
 
-    /// Inserts sanitized text at the cursor. Tabs become four spaces, `\r\n` becomes
-    /// `\n`, other control characters are dropped, and the 16 KiB limit never splits
-    /// a grapheme cluster. The result reports what was kept so callers need not re-derive it.
+    /// Inserts sanitized text at the cursor. Tabs become four spaces, `\r\n` and a lone
+    /// `\r` become `\n`, other control characters are dropped, and the 16 KiB limit
+    /// (counted on the normalised text) never splits a grapheme cluster. The result reports
+    /// what was kept so callers need not re-derive it.
     pub fn insert(&mut self, text: &str) -> Inserted {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let cursor = self.cursor();
         let mut clean = String::new();
         let mut truncated = false;
@@ -2079,11 +2081,38 @@ impl App {
         Ok(())
     }
 
+    /// Notice shown after `/clear` empties the selected chat. At the chat limit it names the
+    /// limit instead of promising a Ctrl+N that would refuse (issue #728).
+    pub fn cleared_notice(&self) -> String {
+        let base = "Conversation cleared. Tasks and their evidence are unchanged";
+        if self.sessions.len() >= MAX_SESSIONS {
+            format!("{base}; eight chats is the limit, so keep typing here")
+        } else {
+            format!("{base}; Ctrl+N opens another conversation")
+        }
+    }
+
     pub fn add_session(&mut self) {
-        if self.sessions.len() == MAX_SESSIONS {
-            self.notice = "Eight-session limit reached".into();
+        let current = &self.sessions[self.selected];
+        if current.messages.is_empty()
+            && current.draft.is_empty()
+            && current.compaction.is_none()
+            && current.compacting.is_none()
+            && !current.status.active()
+        {
+            self.notice = "This chat is empty; type here, or Tab to another chat".into();
             return;
         }
+        if self.sessions.len() == MAX_SESSIONS {
+            self.notice = "Eight chats is the limit; /clear empties this chat, or start another set with --conversation NAME".into();
+            return;
+        }
+        self.open_chat();
+    }
+
+    /// Open and select a new chat without the empty-chat and limit checks of
+    /// [`App::add_session`]; callers guarantee `sessions.len() < MAX_SESSIONS`.
+    pub fn open_chat(&mut self) {
         let model = self.sessions[self.selected].model.clone();
         self.sessions.push(Session::new(model));
         self.selected = self.sessions.len() - 1;

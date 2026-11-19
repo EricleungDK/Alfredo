@@ -89,7 +89,7 @@ fn handoff_restores_each_missions_drafts_models_task_view_and_owner_without_task
     work.app.sessions[0].begin().unwrap();
     work.app.sessions[0].apply(1, Update::Token("retained answer".into()));
     work.app.sessions[0].apply(1, Update::Done);
-    work.app.add_session();
+    work.app.open_chat();
     work.app.sessions[1].model = "other-model".into();
     work.app.sessions[1].insert("older draft");
     work.tasks

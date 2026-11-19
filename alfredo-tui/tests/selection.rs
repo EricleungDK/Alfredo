@@ -1,4 +1,5 @@
-use alfredo_tui::selection::acknowledge;
+use alfredo_tui::model::Session;
+use alfredo_tui::selection::{acknowledge, entry};
 use std::{
     fs,
     sync::atomic::{AtomicU64, Ordering},
@@ -279,4 +280,12 @@ fn selector_wording_is_unchanged() {
         alfredo_tui::tasks::MISSION_EXISTS,
         "Mission already exists; choose Resume or another name"
     );
+}
+
+#[test]
+fn selector_paste_with_cr_line_breaks_keeps_the_lines_apart() {
+    // The selector's Event::Paste handler calls this same `Session::insert`.
+    let mut input = Session::new("selection".into());
+    input.insert("one\rtwo\r\nthree");
+    assert_eq!(entry(&input, "placeholder"), "one\ntwo\nthree");
 }
