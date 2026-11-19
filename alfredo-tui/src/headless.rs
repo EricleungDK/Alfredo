@@ -545,6 +545,9 @@ pub fn run(options: Options) -> Result<i32, String> {
                 say(reentry_next_line(&work.tasks, id));
             }
             result["usage"] = work.autopilot.usage(&work.tasks).json();
+            if let Some(changes) = work.autopilot.changes() {
+                result["changes"] = changes.json();
+            }
             print_result(result);
             // The JSON is out; now let a started hook finish (or be killed) and report.
             let grace = alfredo_tui::on_finish::TIMEOUT + Duration::from_secs(5);
