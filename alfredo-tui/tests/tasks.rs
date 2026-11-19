@@ -2556,3 +2556,98 @@ fn task_receipt_notice_names_permit_before_approve() {
         control.notice
     );
 }
+
+/// Issue #702: the refusal text is pinned exactly, including the one-task / whole-plan
+/// switch at `needed == 1`, the free-slot arithmetic and the saturation past the limit.
+#[test]
+fn capacity_refusal_wording_is_exact_for_one_task_and_whole_plans() {
+    use alfredo_tui::tasks::{capacity_refusal, MAX_TASKS};
+    let way_out = "start a new mission (alfredo-tui --new-mission NAME, or Start New Mission in the mission picker)";
+    for needed in [0, 1] {
+        assert_eq!(
+            capacity_refusal(256, needed),
+            format!("Task capacity reached: this mission has 256 of {MAX_TASKS} tasks and finished tasks are never reclaimed; {way_out} to keep planning")
+        );
+    }
+    assert_eq!(
+        capacity_refusal(254, 2),
+        format!("Task capacity reached: this plan needs 2 task slots but only 2 free (254 of {MAX_TASKS} used); {way_out} to keep planning")
+    );
+    assert_eq!(
+        capacity_refusal(10, 3),
+        format!("Task capacity reached: this plan needs 3 task slots but only 246 free (10 of {MAX_TASKS} used); {way_out} to keep planning")
+    );
+    // Past the limit the free count saturates at zero instead of underflowing.
+    assert_eq!(
+        capacity_refusal(300, 2),
+        format!("Task capacity reached: this plan needs 2 task slots but only 0 free (300 of {MAX_TASKS} used); {way_out} to keep planning")
+    );
+    assert!(alfredo_tui::tasks::is_capacity_refusal(
+        "x Task capacity reached: y"
+    ));
+    assert!(!alfredo_tui::tasks::is_capacity_refusal(
+        "Task capacity reached:"
+    ));
+}
+
+#[test]
+fn status_labels_unknown_task_and_not_run_text_are_exact() {
+    use alfredo_tui::tasks::{not_run, proposed_run, status_label, unknown_task};
+    for (status, word) in [
+        (TaskStatus::Proposed, "proposed"),
+        (TaskStatus::Approved, "approved"),
+        (TaskStatus::Cancelled, "cancelled"),
+        (TaskStatus::Running, "running"),
+        (TaskStatus::ReviewReady, "review-ready"),
+        (TaskStatus::NeedsHumanReview, "needs-human-review"),
+        (TaskStatus::Accepted, "accepted"),
+        (TaskStatus::Failed, "failed"),
+        (TaskStatus::Rejected, "rejected"),
+    ] {
+        assert_eq!(status_label(&status), word);
+    }
+    assert_eq!(unknown_task(9), "Unknown task 9; the task panel lists ids");
+    assert_eq!(proposed_run(4), "Task #4 is proposed; /approve 4 first");
+    for status in [
+        TaskStatus::Approved,
+        TaskStatus::Running,
+        TaskStatus::Failed,
+    ] {
+        let fixture = Fixture::new();
+        let (store, _) = task_in_status(&fixture, status, true);
+        let task = store.snapshot().unwrap().tasks[0].clone();
+        assert_eq!(not_run(&task), "Task #1 has not run; /run 1 first");
+    }
+    let fixture = Fixture::new();
+    let (store, _) = task_in_status(&fixture, TaskStatus::Cancelled, true);
+    let task = store.snapshot().unwrap().tasks[0].clone();
+    assert_eq!(
+        not_run(&task),
+        "Task #1 was cancelled before it ran; /task describes new work to do instead"
+    );
+}
+
+#[test]
+fn refusal_kinds_classify_display_and_convert() {
+    use alfredo_tui::understanding::LockError;
+    let stale = Refusal::Stale(None);
+    let busy = Refusal::Busy;
+    let denied = Refusal::Denied("no".into());
+    let uncertain = Refusal::Uncertain("maybe".into());
+    assert!(stale.transient() && busy.transient());
+    assert!(!denied.transient() && !uncertain.transient());
+    assert!(denied.final_refusal());
+    assert!(!stale.final_refusal() && !busy.final_refusal() && !uncertain.final_refusal());
+    assert_eq!(
+        stale.to_string(),
+        "Task state changed; refresh before submitting again"
+    );
+    assert_eq!(busy.to_string(), "Task store is busy; refresh and retry");
+    assert_eq!(denied.to_string(), "no");
+    assert_eq!(uncertain.to_string(), "maybe");
+    assert!(matches!(Refusal::from("a".to_string()), Refusal::Denied(r) if r == "a"));
+    assert!(matches!(Refusal::from("b"), Refusal::Denied(r) if r == "b"));
+    assert!(matches!(Refusal::from(LockError::Busy), Refusal::Busy));
+    assert!(matches!(Refusal::from(LockError::Failed("c".into())), Refusal::Denied(r) if r == "c"));
+    assert_eq!(String::from(Refusal::Denied("d".into())), "d");
+}
