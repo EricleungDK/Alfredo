@@ -196,7 +196,7 @@ fn an_unselected_session_drains_its_own_queue_without_touching_others() {
     app.sessions[0] = running();
     app.sessions[0].insert("next");
     app.sessions[0].queue_draft().unwrap();
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("other chat prompt");
     assert_eq!(app.selected, 1);
     app.sessions[0].apply(1, Update::Done);
@@ -211,7 +211,7 @@ fn an_unselected_session_drains_its_own_queue_without_touching_others() {
 fn switching_sessions_keeps_drafts_and_inference_independent() {
     let mut app = App::new("model".into());
     app.sessions[0] = started();
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("next prompt 🦀");
     app.apply(Event {
         session: 0,
@@ -622,7 +622,7 @@ fn shared_queue_observations_stay_with_the_attempt_and_never_restore_live_capaci
     };
     let mut app = App::new("fixture".into());
     app.sessions[0] = started();
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("Unrelated unfinished draft 🦀");
     app.apply(Event {
         session: 0,
@@ -836,7 +836,7 @@ fn streamed_output_does_not_displace_the_history_being_read() {
         .draw(|frame| alfredo_tui::ui::draw(frame, &app))
         .unwrap();
     assert_eq!(first_history(&compact), before);
-    app.add_session();
+    app.open_chat();
     compact
         .draw(|frame| alfredo_tui::ui::draw(frame, &app))
         .unwrap();

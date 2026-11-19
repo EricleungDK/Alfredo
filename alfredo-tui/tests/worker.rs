@@ -5595,7 +5595,7 @@ fn automatic_architect_waits_for_saved_review_origin_and_keeps_draft_adoption_se
         wire.try_recv(),
         Err(std::sync::mpsc::TryRecvError::Empty)
     ));
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("Keep reading while Architect drafts");
     let intent = Intent::ArchitectDraft {
         request: request.clone(),

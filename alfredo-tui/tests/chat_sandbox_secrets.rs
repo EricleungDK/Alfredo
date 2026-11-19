@@ -542,7 +542,12 @@ fn hidden_note_and_escalate_hint_do_not_contradict() {
     write(&root, ".npmrc", "registry=x\n");
     write(&root, ".ssh/id_rsa", "k\n");
     let out = run(&root, "cat .npmrc .ssh/id_rsa");
-    assert!(out.contains("exit code 1"), "{out}");
+    // The run failed. GNU cat exits 1 for any failing file; uutils cat (the default on newer
+    // Ubuntu images, 0.2 to 0.6) exits 2 when more than one file fails, so accept either.
+    assert!(
+        out.starts_with("exit code 1 ") || out.starts_with("exit code 2 "),
+        "{out}"
+    );
     let note = note_line(&out).unwrap();
     assert!(note.contains("2 secret file(s)/directory(ies)"), "{note}");
     assert!(note.contains("No such file or directory"), "{note}");

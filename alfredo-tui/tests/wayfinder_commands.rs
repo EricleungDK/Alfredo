@@ -106,7 +106,7 @@ fn wayfinder_entry_draft_and_confirmation_wait_for_saved_origin_and_replay_exact
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut router = Router::new(scope.clone());
     let mut app = App::new("fixture".into());
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("Unrelated conversation draft");
     let mut autosave = Autosave::new(ConversationStore::open(&fixture.tasks, "default").unwrap());
     let prompts = [
