@@ -359,6 +359,24 @@ fn a_new_app_pair_starts_wayfinder_only_after_a_creation_verb_or_at_the_start() 
     assert_eq!(entry_mode("a new app"), None);
 }
 
+/// Issue #741: main.rs hands entry_mode the whole draft, so a leading `/plan`, `/task` or
+/// `/after` must not hide a `new <kind>` that opens the request.
+#[test]
+fn a_leading_slash_command_does_not_hide_a_new_project_request() {
+    use alfredo_tui::{understanding::Mode, wayfinder::entry_mode};
+    for prompt in [
+        "/plan new app: todo list",
+        "/task new service for billing",
+        "/after new project for docs",
+        "/task build a new app",
+    ] {
+        assert_eq!(entry_mode(prompt), Some(Mode::Chart), "{prompt}");
+    }
+    assert_eq!(entry_mode("/task fix the new app crash"), None);
+    // "set" is a creation verb only as "set up".
+    assert_eq!(entry_mode("set the new app crash"), None);
+}
+
 #[test]
 fn canonical_wayfinder_routes_first_contact_and_reuses_flow_across_missions() {
     use alfredo_tui::{
