@@ -15,8 +15,9 @@ use crate::{
 #[doc(hidden)]
 pub mod failure;
 use failure::{
-    context_failure, held_or_done, interrupted_reason, last_failure_line, run_usage,
-    sandbox_failure, too_large_failure, unreachable_failure, BUDGET_EXHAUSTED, INTERRUPTED,
+    context_failure, held_or_done, interrupted_reason, last_failure_line, reentry_fix,
+    reentry_resume_refusal, run_usage, sandbox_failure, too_large_failure, unreachable_failure,
+    BUDGET_EXHAUSTED, INTERRUPTED,
 };
 pub(crate) use failure::{failure_detail, title_failure_line};
 #[path = "autopilot_refusal.rs"]
@@ -148,10 +149,10 @@ struct Saved {
     /// again instead of spending automatic repairs the owner never asked for.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     limits: BTreeMap<u64, u32>,
-    /// The run stopped because the model server was unreachable (`model-unreachable`):
-    /// the one `Failed` stop whose advertised way forward is the owner's `/repair`, so
-    /// that repair re-enters the loop like one after a budget stop. Every other
-    /// `Failed` cause leaves it unset and stays finished.
+    /// The run stopped because the model server was unreachable (`model-unreachable`) or
+    /// a prompt exceeded `--num-ctx` (`context-too-small`): the two `Failed` stops whose
+    /// advertised way forward is the owner's `/repair`, so that repair re-enters the loop
+    /// like one after a budget stop. Every other `Failed` cause leaves it unset.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     reentrant: bool,
 }
@@ -1069,11 +1070,15 @@ impl Autopilot {
     }
 
     pub fn resume(&mut self, tasks: &TaskControl) -> Result<String, String> {
+        let reentry = self.reentrant_run(tasks);
         let saved = self
             .saved
             .as_mut()
             .ok_or("No autopilot goal; use /go GOAL")?;
         if !saved.active() {
+            if let Some((_, id)) = reentry {
+                return Err(reentry_resume_refusal(tasks, id));
+            }
             let repairable: Vec<String> = tasks
                 .snapshot
                 .as_ref()
@@ -2603,16 +2608,7 @@ pub fn name_stopped_task(result: &mut serde_json::Value, id: u64) {
 /// The headless `next:` line for a re-entrant stop of task `id` (issues #584, #706): what
 /// to fix first, then `--resume --headless` retries the task.
 pub fn reentry_next_line(tasks: &TaskControl, id: u64) -> String {
-    let context = tasks
-        .snapshot
-        .as_ref()
-        .and_then(|snapshot| snapshot.tasks.iter().find(|task| task.id == id))
-        .is_some_and(|head| context_failure(tasks, head).is_some());
-    let fix = if context {
-        "raise --num-ctx"
-    } else {
-        "start the model server"
-    };
+    let fix = reentry_fix(tasks, id);
     format!("next: {fix}, then --resume --headless retries #{id} without planning again")
 }
 
