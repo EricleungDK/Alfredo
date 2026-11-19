@@ -2004,6 +2004,36 @@ fn unreachable_two_task_run(
 }
 
 #[test]
+fn resume_after_a_reentrant_stop_names_repair_retry() {
+    let fixture = Fixture::new();
+    let server = two_task_server();
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, control) = context_two_task_run(&fixture, &server, &runtime);
+    let err = autopilot.resume(&control).unwrap_err();
+    assert!(err.contains("/repair 1 retry"), "{err}");
+    assert!(
+        err.contains("raise --num-ctx, then /repair 1 retry"),
+        "{err}"
+    );
+    assert!(err.ends_with("or /go GOAL starts a new loop"), "{err}");
+}
+
+#[test]
+fn resume_after_an_unreachable_stop_names_the_model_server_and_repair_retry() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down, false);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, control) = unreachable_two_task_run(&fixture, &server, &runtime, 2);
+    let err = autopilot.resume(&control).unwrap_err();
+    assert!(
+        err.contains("start the model server, then /repair 1 retry"),
+        "{err}"
+    );
+    assert!(err.ends_with("or /go GOAL starts a new loop"), "{err}");
+}
+
+#[test]
 fn repair_after_an_unreachable_stop_reenters_the_loop_runs_dependents_and_integrates() {
     let fixture = Fixture::new();
     let head = fixture.head();
