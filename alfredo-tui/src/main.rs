@@ -1961,7 +1961,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(job) = jobs[index].take() {
                                             job.abort();
                                         }
-                                        work.app.notice = "Conversation cleared. Tasks and their evidence are unchanged; Ctrl+N opens another conversation".into();
+                                        work.app.notice = work.app.cleared_notice();
                                     }
                                     Err(error) => {
                                         work.app.notice = error.into();
@@ -2779,7 +2779,7 @@ mod tests {
                 },
             )
             .unwrap();
-        app.add_session();
+        app.open_chat();
         app.sessions[1].insert("Unfinished work in another session");
         (app, id)
     }
@@ -2910,7 +2910,7 @@ mod tests {
             (1, "@wayfinder review Wayfinder ticket #42"),
         ] {
             if session == 1 {
-                work.app.add_session();
+                work.app.open_chat();
             }
             work.app.sessions[session].insert(prompt);
             let messages = work.app.sessions[session].begin().unwrap();
@@ -2948,7 +2948,7 @@ mod tests {
     fn unrelated_barrier(
         work: &mut alfredo_tui::workstation::Workstation,
     ) -> Option<(usize, String)> {
-        work.app.add_session();
+        work.app.open_chat();
         let origin = work.app.selected;
         work.app.sessions[origin].insert("Unfinished selected draft 🦀");
         let id = work.app.sessions[origin]

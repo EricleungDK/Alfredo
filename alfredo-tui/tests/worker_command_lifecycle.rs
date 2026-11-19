@@ -194,7 +194,7 @@ fn worker_command_links_start_finish_and_recovery_to_original_session_across_res
         let id = app.sessions[0]
             .submit_command("/run 1".into(), intent.clone())
             .unwrap();
-        app.add_session();
+        app.open_chat();
         assert_eq!(app.selected, 1);
         let mut autosave =
             Autosave::new(ConversationStore::open(&fixture.store, "default").unwrap());

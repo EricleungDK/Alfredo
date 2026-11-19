@@ -243,7 +243,7 @@ fn queued_worker_waits_for_model_capacity() {
 fn architect_draft_row_sits_above_the_tree_and_chats_below() {
     let mut fixture = textutil();
     fixture.control.planner.draft = Some(plan("textutil module", 2));
-    fixture.app.add_session();
+    fixture.app.open_chat();
     fixture.app.sessions[1].insert("hello");
     fixture.app.sessions[1].begin().unwrap();
     fixture.app.sessions[1].apply(1, Update::Token("partial".into()));
@@ -296,14 +296,14 @@ fn chat_rows_without_a_usable_user_message_stay_one_line_beside_one_with_a_previ
     let mut app = App::new("fixture".into());
     app.sessions[0].insert("why does login fail");
     app.sessions[0].begin().unwrap();
-    app.add_session();
+    app.open_chat();
     app.sessions[1].insert("only a draft");
-    app.add_session();
+    app.open_chat();
     app.sessions[2].messages.push(alfredo_tui::model::Message {
         role: "user".into(),
         content: " \t\n\u{a0} ".into(),
     });
-    app.add_session();
+    app.open_chat();
     app.sessions[3].messages.push(alfredo_tui::model::Message {
         role: "user".into(),
         content: "a".repeat(300),
@@ -576,7 +576,7 @@ fn pane_keys_move_switch_sections_open_and_return_to_the_prompt() {
 fn opening_rows_uses_agent_views_group_detail_and_chat() {
     use alfredo_tui::agent_view::Target;
     let mut fixture = textutil();
-    fixture.app.add_session();
+    fixture.app.open_chat();
     fixture.app.selected = 0;
     fixture.control.set_visible(false);
     // A task opens the agent view of its repair lineage.
