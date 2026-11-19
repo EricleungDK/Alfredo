@@ -8,7 +8,7 @@ use crate::{
     command_intent::Intent,
     dispatch::TRANSIENT_LIMIT,
     task_control::TaskControl,
-    tasks::{Action, Snapshot, Task, TaskStatus, TaskStore},
+    tasks::{Action, Snapshot, Task, TaskStatus},
     understanding,
 };
 #[path = "autopilot_failure.rs"]
