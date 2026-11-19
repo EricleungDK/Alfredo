@@ -14,6 +14,101 @@ fn help_and_version_work_without_a_terminal_or_model_server() {
     }
 }
 
+/// Runs the binary with stdout piped, drops the read end at once (like `| head -0`), and
+/// returns the exit status and stderr.
+fn run_with_closed_stdout(args: &[&str]) -> (std::process::ExitStatus, String) {
+    use std::{io::Read, process::Stdio};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(args)
+        .env("OLLAMA_HOST", "http://127.0.0.1:1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    (child.wait().unwrap(), stderr)
+}
+
+#[test]
+fn version_into_a_closed_pipe_exits_quietly_with_status_zero() {
+    for flag in ["--version", "-V"] {
+        let (status, stderr) = run_with_closed_stdout(&[flag]);
+        assert!(!stderr.contains("panicked"), "{flag}: {stderr}");
+        assert!(stderr.is_empty(), "{flag}: {stderr}");
+        assert_eq!(status.code(), Some(0), "{flag}");
+    }
+}
+
+#[test]
+fn help_into_a_closed_pipe_exits_quietly_with_status_zero() {
+    for flag in ["--help", "-h"] {
+        let (status, stderr) = run_with_closed_stdout(&[flag]);
+        assert!(!stderr.contains("panicked"), "{flag}: {stderr}");
+        assert!(stderr.is_empty(), "{flag}: {stderr}");
+        assert_eq!(status.code(), Some(0), "{flag}");
+    }
+}
+
+#[test]
+fn doctor_into_a_closed_pipe_prints_no_panic() {
+    let dir = std::env::temp_dir().join(format!("alfredo-cli-doctor-pipe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    assert!(Command::new("git")
+        .args([
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "init",
+            "-q"
+        ])
+        .arg(&workspace)
+        .status()
+        .unwrap()
+        .success());
+    let (status, stderr) = run_with_closed_stdout(&[
+        "--doctor",
+        "--endpoint",
+        "http://127.0.0.1:1",
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--state-dir",
+        dir.join("state").to_str().unwrap(),
+    ]);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn version_and_help_into_a_fully_read_pipe_keep_their_exit_status_and_text() {
+    let version = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(version.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout),
+        format!("alfredo-tui {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    let help = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(help.stdout.ends_with(b"\n"));
+    assert!(help.stderr.is_empty());
+}
+
 #[test]
 fn help_documents_zero_ceremony_start_and_select_flag() {
     let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
