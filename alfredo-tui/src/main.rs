@@ -1775,6 +1775,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             let text = work.app.sessions[index].draft.trim().to_owned();
                             let model = work.app.sessions[index].model.clone();
+                            // Issue #721: /stop ends the running chat turn like Esc (and kills a
+                            // running run_command); idle chat is left untouched.
+                            let chat_cancelled = alfredo_tui::autopilot::cancels_chat_turn(
+                                &text,
+                                work.app.sessions[index].status.active(),
+                            );
+                            let held = alfredo_tui::autopilot::queue_held(
+                                work.app.sessions[index].queued_messages(),
+                            );
+                            if chat_cancelled {
+                                // Record only "/stop" and empty the prompt first, so the queued
+                                // text the cancel returns to the prompt is kept, as with Esc.
+                                work.app.sessions[index].remember_submission();
+                                work.app.sessions[index].clear_draft();
+                                at_lookup.cancel();
+                                command_staging::cancel_chat_turn(
+                                    &mut work.app,
+                                    index,
+                                    &mut jobs,
+                                    &mut approval_replies,
+                                );
+                            }
                             match work.autopilot.command(
                                 &runtime,
                                 &mut work.tasks,
@@ -1783,9 +1805,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 max_repairs,
                             ) {
                                 Ok(notice) => {
-                                    work.app.sessions[index].remember_submission();
-                                    work.app.sessions[index].clear_draft();
-                                    work.app.notice = notice;
+                                    if alfredo_tui::autopilot::settles_draft_after_command(
+                                        chat_cancelled,
+                                    ) {
+                                        work.app.sessions[index].remember_submission();
+                                        work.app.sessions[index].clear_draft();
+                                    }
+                                    work.app.notice = alfredo_tui::autopilot::finish_notice(
+                                        &notice,
+                                        chat_cancelled,
+                                        held,
+                                    );
                                     if text.split_whitespace().next() == Some("/go") {
                                         work.app.append_history_warning(index);
                                         // Autopilot work is watched on the dashboard.
@@ -1806,7 +1836,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         work.app.notice = error;
                                     }
-                                    work.app.sessions[index].reject_draft();
+                                    if alfredo_tui::autopilot::settles_draft_after_command(
+                                        chat_cancelled,
+                                    ) {
+                                        work.app.sessions[index].reject_draft();
+                                    }
                                 }
                             }
                         }
