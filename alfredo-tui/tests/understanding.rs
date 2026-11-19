@@ -357,6 +357,9 @@ fn a_new_app_pair_starts_wayfinder_only_after_a_creation_verb_or_at_the_start() 
     );
     assert_eq!(entry_mode("add a new feature to the app"), None);
     assert_eq!(entry_mode("a new app"), None);
+    // The pair needs both words: "new" before a non-kind, or a kind after a non-"new".
+    assert_eq!(entry_mode("build a new feature"), None);
+    assert_eq!(entry_mode("build an old app"), None);
 }
 
 /// Issue #741: main.rs hands entry_mode the whole draft, so a leading `/plan`, `/task` or
