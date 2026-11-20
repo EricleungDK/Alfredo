@@ -363,8 +363,8 @@ fn a_new_app_pair_starts_wayfinder_only_after_a_creation_verb_or_at_the_start() 
     assert_eq!(entry_mode("build an old app"), None);
 }
 
-/// Issue #752: only article/filler words (`a`, `an`, `another`, `brand`, `my`, `our`; at most
-/// two) may sit between the creation verb and "new", so everyday coding prompts that contain
+/// Issue #752: only article/filler words (`a`, `an`, `another`, `brand`, `my`, `our`, plus #763's
+/// `me`, `us` and intensifiers; at most three) may sit between the creation verb and "new", so everyday coding prompts that contain
 /// `write`, `make` or `start` near "the new app" stay ordinary chat.
 #[test]
 fn only_filler_words_may_sit_between_the_creation_verb_and_new() {
@@ -401,8 +401,8 @@ fn only_filler_words_may_sit_between_the_creation_verb_and_new() {
         assert_eq!(project_start_phrase(prompt).as_deref(), Some(phrase));
     }
     assert_eq!(entry_mode("new app: todo"), Some(Mode::Chart));
-    // Three filler words, or filler before a non-verb, do not reach a verb.
-    assert_eq!(entry_mode("build a my our new app"), None);
+    // Four filler words, or filler before a non-verb, do not reach a verb (issue #763: cap 3).
+    assert_eq!(entry_mode("build a my our brand new app"), None);
     assert_eq!(entry_mode("tests a brand new app"), None);
     // "up" bridges only after "set"/"spin", and "set" alone is no verb; a bare leading "up" is safe.
     assert_eq!(entry_mode("give up a new app"), None);
@@ -410,9 +410,67 @@ fn only_filler_words_may_sit_between_the_creation_verb_and_new() {
     assert_eq!(entry_mode("set a new app"), None);
     assert_eq!(entry_mode("spin a new app"), None);
     assert_eq!(entry_mode("a new app"), None);
-    // Exactly two filler words still reach the verb (at-3); the verb itself is not filler.
+    // Exactly two filler words still reach the verb; the verb itself is not filler.
     assert_eq!(entry_mode("make my own new app"), None);
     assert_eq!(entry_mode("build our brand new app"), Some(Mode::Chart));
+}
+
+/// Issue #763: indirect-object pronouns (`me`, `us`) and intensifiers (`whole`, `completely`,
+/// `entirely`, `totally`) are filler too, and up to three filler words may sit between the verb
+/// and "new" ("build me a brand new app"); the #752 negatives stay ordinary chat.
+#[test]
+fn pronoun_and_intensifier_filler_still_starts_wayfinder() {
+    use alfredo_tui::{
+        understanding::Mode,
+        wayfinder::{entry_mode, project_start_phrase},
+    };
+    for prompt in [
+        "build me a new app",
+        "create me a new service",
+        "make us a new app",
+        "build me a brand new app",
+        "build a whole new app",
+        "create a completely new app",
+        "build an entirely new app",
+        "create a totally new service",
+        "build me new app",
+        "build us new app",
+        "build whole new app",
+        "build completely new app",
+        "build entirely new app",
+        "build totally new app",
+        // Exactly three filler words reach the verb.
+        "build me a brand new app",
+        "create us another whole new service",
+        "set up me a brand new app",
+    ] {
+        assert_eq!(entry_mode(prompt), Some(Mode::Chart), "{prompt}");
+        assert_eq!(
+            project_start_phrase(prompt).as_deref(),
+            Some(prompt),
+            "{prompt}"
+        );
+    }
+    for prompt in [
+        "tell me the new app crashes",
+        "write me the new service tests",
+        "write tests for the new service",
+        "make sure the new app starts",
+        "fix the crash when I start the new app",
+        "please make the new app",
+        "build the new app",
+        // Four filler words are one too many.
+        "build me a my brand new app",
+        "create us a whole brand new service",
+        "build a my our brand new app",
+        // Filler without a creation verb before it.
+        "tell me a whole new app",
+        "show us a completely new service",
+        "me a new app",
+    ] {
+        assert_eq!(entry_mode(prompt), None, "{prompt}");
+        assert_eq!(project_start_phrase(prompt), None, "{prompt}");
+    }
 }
 
 /// Issue #741: main.rs hands entry_mode the whole draft, so a leading `/plan`, `/task` or

@@ -35,7 +35,9 @@ once with the validation error appended, then autopilot stops.
 an autopilot run ends `done`, `partial` or `failed`, so a long local run can notify you.
 It is a launch option only; Alfredo never reads a hook from the repository or the
 state directory. `PROGRAM` must be an absolute path to an existing executable regular
-file, or Alfredo exits with a usage error before starting.
+file, or Alfredo exits with a usage error before starting. `--on-finish` and
+`--max-repairs` apply only to `--go`, `--resume` and the terminal: an explicit one with
+`--chat` or `--doctor` exits 2 naming the flag, while `ALFREDO_ON_FINISH` is ignored there.
 
 - Started directly (no shell, no arguments), outside the sandbox, with your own
   permissions; standard input, output and error are discarded.
@@ -510,8 +512,8 @@ migration", "redesign the architecture", "build a new app") to enter Wayfinder C
 The bare words "migration" or "architecture" in an ordinary request do not enter it. A "new
 app", "new application", "new service", "new project", "new repository" or "new product" counts only
 directly after a creation verb (build, create, make, start, scaffold, bootstrap, develop, generate,
-set up, spin up, write, init) with at most two of `a`, `an`, `another`, `brand`, `my`, `our` between
-them ("build a brand new app"; not `the`), or at the start of the text ("new app: todo list");
+set up, spin up, write, init) with at most three of `a`, `an`, `another`, `brand`, `my`, `our`, `me`, `us`, `whole`, `completely`, `entirely`, `totally` between
+them ("build a brand new app", "build me a new app"; not `the`), or at the start of the text ("new app: todo list");
 "fix the new app crash", "write tests for the new service" and "make sure the new app starts" are
 ordinary requests. A reference such as “Wayfinder ticket #42” enters Work-through. Ordinary
 read-only questions stay outside automatic entry. A saved flow continues across
