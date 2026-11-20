@@ -12,9 +12,48 @@ use std::{
 use tokio::{runtime::Runtime, task::JoinHandle};
 static IDS: AtomicU64 = AtomicU64::new(0);
 
-/// The phrase of a "new app/service/project/…" start: a creation verb within four words
-/// before `new`, or `new <kind>` opening the text (issue #741). "fix the new app crash"
-/// is ordinary chat.
+/// Words that may sit between a creation verb and `new` ("create a brand new service").
+/// `the` is not one: "write tests for the new service" is ordinary chat (issue #752).
+fn is_filler(word: &str) -> bool {
+    matches!(word, "a" | "an" | "another" | "brand" | "my" | "our")
+}
+
+/// Index of the creation verb that starts the phrase ending at `new` (`at`): walk back over
+/// at most two filler words, then require the verb (`set up`/`spin up` count from `set`).
+fn creation_verb_before(words: &[&str], at: usize) -> Option<usize> {
+    let mut i = at;
+    for _ in 0..=2 {
+        i = i.checked_sub(1)?;
+        if matches!(
+            words[i],
+            "build"
+                | "create"
+                | "make"
+                | "start"
+                | "scaffold"
+                | "bootstrap"
+                | "develop"
+                | "generate"
+                | "setup"
+                | "write"
+                | "init"
+        ) {
+            return Some(i);
+        }
+        if words[i] == "up" && i > 0 && matches!(words[i - 1], "set" | "spin") {
+            return Some(i - 1);
+        }
+        if !is_filler(words[i]) {
+            return None;
+        }
+    }
+    None
+}
+
+/// The phrase of a "new app/service/project/…" start: a creation verb directly before `new`
+/// with only article/filler words between (at most two), or `new <kind>` opening the text
+/// (issues #741, #752). "fix the new app crash" and "write tests for the new service" are
+/// ordinary chat.
 fn new_project_phrase(words: &[&str]) -> Option<String> {
     // The draft may still carry its command word: `/plan new app`, `/task ...`, `/after ...`.
     let lead = usize::from(matches!(words.first(), Some(&("plan" | "task" | "after"))));
@@ -27,22 +66,7 @@ fn new_project_phrase(words: &[&str]) -> Option<String> {
         {
             return None;
         }
-        let verb = (at.saturating_sub(4)..at).find(|&i| {
-            matches!(
-                words[i],
-                "build"
-                    | "create"
-                    | "make"
-                    | "start"
-                    | "scaffold"
-                    | "bootstrap"
-                    | "develop"
-                    | "generate"
-                    | "setup"
-                    | "write"
-                    | "init"
-            ) || (matches!(words[i], "set" | "spin") && words[i + 1] == "up")
-        });
+        let verb = creation_verb_before(words, at);
         let from = if at <= lead { at } else { verb? };
         Some(words[from..=at + 1].join(" "))
     })

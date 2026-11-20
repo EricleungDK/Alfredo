@@ -338,12 +338,13 @@ fn a_new_app_pair_starts_wayfinder_only_after_a_creation_verb_or_at_the_start() 
         assert_eq!(entry_mode(&prompt), Some(Mode::Chart), "{prompt}");
         assert_eq!(project_start_phrase(&prompt), Some(format!("new {kind}")));
     }
-    // Four words between the verb and "new" still count; five do not.
-    assert_eq!(entry_mode("build the big shiny new app"), Some(Mode::Chart));
+    // Issue #752: only up to two filler words may sit between the verb and "new".
+    assert_eq!(entry_mode("build a brand new app"), Some(Mode::Chart));
+    assert_eq!(entry_mode("build the big shiny new app"), None);
     assert_eq!(entry_mode("build all of the old new app"), None);
     assert_eq!(
-        project_start_phrase("Please build the big shiny new app").as_deref(),
-        Some("build the big shiny new app")
+        project_start_phrase("Please build a brand new app").as_deref(),
+        Some("build a brand new app")
     );
     // Not a project start, so nothing to name.
     assert_eq!(project_start_phrase("fix the new app crash"), None);
@@ -388,12 +389,12 @@ fn only_filler_words_may_sit_between_the_creation_verb_and_new() {
         ("build a new app", "build a new app"),
         ("create a brand new service", "create a brand new service"),
         ("set up a new project", "set up a new project"),
-        (
-            "spin up another new service",
-            "spin up another new service",
-        ),
+        ("spin up another new service", "spin up another new service"),
         ("make my new app", "make my new app"),
-        ("develop our brand new product", "develop our brand new product"),
+        (
+            "develop our brand new product",
+            "develop our brand new product",
+        ),
         ("build an brand new app", "build an brand new app"),
     ] {
         assert_eq!(entry_mode(prompt), Some(Mode::Chart), "{prompt}");
@@ -403,6 +404,15 @@ fn only_filler_words_may_sit_between_the_creation_verb_and_new() {
     // Three filler words, or filler before a non-verb, do not reach a verb.
     assert_eq!(entry_mode("build a my our new app"), None);
     assert_eq!(entry_mode("tests a brand new app"), None);
+    // "up" bridges only after "set"/"spin", and "set" alone is no verb; a bare leading "up" is safe.
+    assert_eq!(entry_mode("give up a new app"), None);
+    assert_eq!(entry_mode("up a new app"), None);
+    assert_eq!(entry_mode("set a new app"), None);
+    assert_eq!(entry_mode("spin a new app"), None);
+    assert_eq!(entry_mode("a new app"), None);
+    // Exactly two filler words still reach the verb (at-3); the verb itself is not filler.
+    assert_eq!(entry_mode("make my own new app"), None);
+    assert_eq!(entry_mode("build our brand new app"), Some(Mode::Chart));
 }
 
 /// Issue #741: main.rs hands entry_mode the whole draft, so a leading `/plan`, `/task` or
