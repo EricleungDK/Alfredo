@@ -1633,3 +1633,28 @@ fn a_reply_that_is_only_a_text_tool_call_adds_the_notice_and_keeps_the_exit_code
         let _ = fs::remove_dir_all(root);
     }
 }
+
+#[test]
+fn only_the_environment_hook_leaves_a_chat_turn_running_normally() {
+    let root = repository("env-hook");
+    let fixture = scripted_chat(vec![done("Plain answer.")]);
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--model", "fixture", "--endpoint", &fixture.endpoint])
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .args(["--chat", "Hi", "--headless"])
+        .env("ALFREDO_ON_FINISH", "/bin/true")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(result(&output)["reply"], "Plain answer.");
+    let _ = fs::remove_dir_all(&root);
+}
