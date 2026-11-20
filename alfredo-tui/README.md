@@ -299,6 +299,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/execution.rs` | Bounded process execution: limits, sandbox, process-group cleanup, execution receipts |
 | `src/wake.rs` | Run-loop wake source: one channel for terminal input and "a result is ready" wakes |
 | `src/headless.rs` | `--go GOAL --headless`: autopilot without a terminal; `--chat PROMPT --headless`: one Chat Agent turn with a scripted approval policy; JSON result on stdout |
+| `src/cli_support.rs` | Binary-only CLI helpers `run()` uses: the known-flag list, the `--chat -` stdin prompt reader and the selection-failure message |
 | `src/command_staging.rs` | Binary-only helpers `run()` uses to stage, submit and withdraw wayfinder, owner and autopilot commands, start compaction jobs and cancel a chat turn |
 | `src/on_finish.rs` | `--on-finish PROGRAM` completion hook (no shell, outside the sandbox, 10 s limit) |
 | `src/clean.rs` | `/clean`: removes retained worktrees of finished runs only |
