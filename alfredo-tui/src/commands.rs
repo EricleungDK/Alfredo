@@ -520,6 +520,7 @@ impl Completion {
     }
     /// What `code` does as the F1 key: `None` for any other key, else the command picker
     /// for an empty prompt or the notice explaining why a draft blocks it.
+    #[must_use]
     pub fn f1(
         code: crossterm::event::KeyCode,
         draft_is_empty: bool,
