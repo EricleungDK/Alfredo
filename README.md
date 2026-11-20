@@ -176,7 +176,7 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | Enter | Send prompt or command |
 | Enter (while a reply runs) | Queue the prompt (`You · queued`); it is sent when the reply completes. Esc or a failed reply returns it to the prompt, never sent |
 | Ctrl+J / Alt+Enter | New line on any terminal; Shift+Enter too where the terminal reports it, and paste also works. The prompt box grows to show up to six lines |
-| F1 | Command picker (empty prompt; type to filter); typing `/` lists matching commands, Tab or Enter completes |
+| F1 | Command picker (empty prompt; type to filter); typing `/` lists matching commands, Tab or Enter completes; in the picker PgUp/PgDn page, Home/End jump |
 | F2 | Right pane: task detail / conversation |
 | F3 | Evidence for the selected task (task detail) |
 | F4 | Activity (saved task receipts) |
@@ -192,7 +192,7 @@ Tool list and details: [alfredo-tui/README.md](alfredo-tui/README.md) and
 | Ctrl+O (conversation) | Show tool results in full (200 lines each) / one line |
 | Ctrl+O (Plan draft) | Readable task list / raw draft JSON |
 | Alt+Left / Alt+Right | Collapse / expand a task branch |
-| PageUp / PageDown | Scroll transcript, agent view, details or evidence |
+| PageUp / PageDown | Scroll transcript, agent view, details or evidence (in the F1 picker: moves the selection) |
 | Home / End (empty prompt), Ctrl+Home / Ctrl+End | Jump to the oldest / latest transcript row; End resumes following new output. With text in the prompt, Home / End move the cursor |
 | Tab / Shift+Tab | Next / previous conversation |
 | Ctrl+N | New conversation (max 8; not on an empty chat, which says so; at 8, `/clear` it or use `--conversation NAME`); `/clear` restarts the current one, `/compact` summarises its older turns |

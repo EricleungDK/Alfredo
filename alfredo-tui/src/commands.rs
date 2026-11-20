@@ -252,6 +252,9 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Shown when F1 is pressed with text in the prompt.
+pub const F1_DRAFT_NOTICE: &str = "F1 help needs an empty prompt; Ctrl+U clears the draft";
+
 pub struct Completion {
     pub choices: Vec<Choice>,
     pub selected: usize,
@@ -497,6 +500,54 @@ impl Completion {
         } else {
             (self.selected + self.choices.len() - 1) % self.choices.len()
         };
+    }
+    /// Handles a paging key of the F1 picker (PgUp/PgDn page, Home/End jump); false when
+    /// the key is not one or this list is not the F1 picker, so the caller treats it as before.
+    pub fn help_key(&mut self, code: crossterm::event::KeyCode, page_rows: usize) -> bool {
+        use crossterm::event::KeyCode;
+        if !self.help {
+            return false;
+        }
+        match code {
+            KeyCode::PageUp | KeyCode::PageDown => {
+                self.page(code == KeyCode::PageDown, page_rows.max(1));
+            }
+            KeyCode::Home => self.first(),
+            KeyCode::End => self.last(),
+            _ => return false,
+        }
+        true
+    }
+    /// What `code` does as the F1 key: `None` for any other key, else the command picker
+    /// for an empty prompt or the notice explaining why a draft blocks it.
+    pub fn f1(
+        code: crossterm::event::KeyCode,
+        draft_is_empty: bool,
+    ) -> Option<Result<Self, &'static str>> {
+        (code == crossterm::event::KeyCode::F(1)).then(|| {
+            if draft_is_empty {
+                Ok(Self::all())
+            } else {
+                Err(F1_DRAFT_NOTICE)
+            }
+        })
+    }
+    /// Moves the selection by one page of `rows` choices (PgUp/PgDn), stopping at the ends.
+    pub fn page(&mut self, down: bool, rows: usize) {
+        let last = self.choices.len().saturating_sub(1);
+        self.selected = if down {
+            (self.selected + rows).min(last)
+        } else {
+            self.selected.saturating_sub(rows)
+        };
+    }
+    /// Selects the first choice (Home).
+    pub fn first(&mut self) {
+        self.selected = 0;
+    }
+    /// Selects the last choice (End).
+    pub fn last(&mut self) {
+        self.selected = self.choices.len().saturating_sub(1);
     }
     pub fn draft(&self) -> String {
         self.choices[self.selected].draft.clone()

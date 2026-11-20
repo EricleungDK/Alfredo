@@ -1102,7 +1102,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | --- | --- |
 | Enter | Send current prompt (or fill draft when command picker is open) |
 | Enter (while a reply runs) | Queue the prompt (`You · queued`, up to 3 messages / 8 KiB, plain text only, no `/` commands); each is sent as its own turn, in order, when the reply completes. Esc, a failed reply or a restart returns queued text to the prompt as a draft and never sends it; a full queue keeps the text in the prompt and says so; an approval card keeps its own keys |
-| F1 | Open command picker when draft is empty (`/help` opens it too) |
+| F1 | Open command picker when draft is empty (`/help` opens it too); with a draft it keeps the draft and says so. In the picker PgUp/PgDn move a page, Home/End jump to the first/last command |
 | Tab after `/prefix` | Fill the selected matching slash command |
 | Up / Down in conversation | Move between lines of a multi-line draft; from its first / last line (or a single-line draft) browse prompt history and restore unsent draft |
 | First printable key or paste after a rejected command | Replaces the rejected text (shown reversed); Left, Right, Home, End, Backspace, Delete, Ctrl+W and the first Up keep it for editing; Up again, or Up from an emptied prompt, browses history where it is the newest entry |
@@ -1495,7 +1495,9 @@ hint. Up/Down choose; Enter or Tab fills `/name ` into the prompt without
 submitting it; Esc closes the list and keeps the text; backspacing past `/` closes it.
 A fully typed command name still submits on Enter, and a message that is a path
 (`/path/in/chat ...`, with a space) or plain text and `@` mentions are unaffected.
-In the F1 picker, typing filters the list the same way (Backspace edits the filter).
+In the F1 picker, typing filters the list the same way (Backspace edits the filter);
+PgUp/PgDn move a page and Home/End jump to the first/last command. The `/` and `@`
+lists still close on those keys.
 
 ## Installed-model completion
 

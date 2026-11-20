@@ -207,6 +207,95 @@ fn quit_aliases_match_only_the_bare_commands_and_share_the_ctrl_q_steps() {
 }
 
 #[test]
+fn f1_picker_pages_and_jumps_without_wrapping() {
+    // Issue #758: PgUp/PgDn move by the visible page, Home/End jump to the ends.
+    let mut help = Completion::all();
+    let last = help.choices.len() - 1;
+    help.page(true, 5);
+    assert_eq!(help.selected, 5);
+    help.page(true, 5);
+    assert_eq!(help.selected, 10);
+    help.page(false, 5);
+    assert_eq!(help.selected, 5);
+    help.page(false, 50);
+    assert_eq!(help.selected, 0, "PgUp stops at the first choice");
+    help.page(true, 10_000);
+    assert_eq!(help.selected, last, "PgDn stops at the last choice");
+    help.page(true, 0);
+    assert_eq!(help.selected, last, "an empty page height still clamps");
+    help.first();
+    assert_eq!(help.selected, 0);
+    help.last();
+    assert_eq!(help.selected, last);
+    assert!(help.help, "paging keeps the picker open");
+}
+
+#[test]
+fn help_key_consumes_paging_keys_only_in_the_f1_picker() {
+    // Issue #758: the F1 picker takes PgUp/PgDn/Home/End; every other list lets them fall through.
+    use crossterm::event::KeyCode;
+    let mut help = Completion::all();
+    assert!(help.help_key(KeyCode::PageDown, 4));
+    assert_eq!(help.selected, 4);
+    assert!(help.help_key(KeyCode::PageUp, 3));
+    assert_eq!(help.selected, 1);
+    assert!(help.help_key(KeyCode::End, 4));
+    assert_eq!(help.selected, help.choices.len() - 1);
+    assert!(help.help_key(KeyCode::Home, 4));
+    assert_eq!(help.selected, 0);
+    assert!(
+        help.help_key(KeyCode::PageDown, 0),
+        "a zero page still moves one"
+    );
+    assert_eq!(help.selected, 1);
+    for code in [
+        KeyCode::Up,
+        KeyCode::Char('a'),
+        KeyCode::Enter,
+        KeyCode::Delete,
+    ] {
+        assert!(!help.help_key(code, 4), "{code:?}");
+        assert_eq!(help.selected, 1);
+    }
+    for code in [
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::Home,
+        KeyCode::End,
+    ] {
+        let mut typeahead = Completion::typeahead("/pla").expect("typeahead");
+        typeahead.selected = 1;
+        assert!(
+            !typeahead.help_key(code, 4),
+            "{code:?} must close a `/` list as before"
+        );
+        assert_eq!(typeahead.selected, 1);
+    }
+}
+
+#[test]
+fn f1_opens_the_picker_for_an_empty_prompt_and_explains_a_draft() {
+    use alfredo_tui::commands::F1_DRAFT_NOTICE;
+    use crossterm::event::KeyCode;
+    let opened = Completion::f1(KeyCode::F(1), true)
+        .expect("F1")
+        .expect("empty prompt opens");
+    assert!(opened.help && opened.selected == 0);
+    assert_eq!(
+        Completion::f1(KeyCode::F(1), false).expect("F1").err(),
+        Some(F1_DRAFT_NOTICE)
+    );
+    assert_eq!(
+        F1_DRAFT_NOTICE,
+        "F1 help needs an empty prompt; Ctrl+U clears the draft"
+    );
+    for code in [KeyCode::F(2), KeyCode::Char('1'), KeyCode::Enter] {
+        assert!(Completion::f1(code, true).is_none(), "{code:?}");
+        assert!(Completion::f1(code, false).is_none(), "{code:?}");
+    }
+}
+
+#[test]
 fn f1_picker_filters_by_typed_text() {
     let mut help = Completion::all();
     let total = help.choices.len();

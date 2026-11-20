@@ -920,12 +920,37 @@ class ModelPicker(unittest.TestCase):
                 terminal.wait_for('Commands ·')
                 terminal.write(b'\x7f\x7f\x7f\x7f')
                 terminal.wait_gone('Commands ·')
+                # Issue #758: the live `/` list keeps closing on PgDn (only the F1 picker pages).
+                terminal.write(b'/pla')
+                terminal.wait_for('Commands ·')
+                terminal.write(b'\x1b[6~')
+                terminal.wait_gone('Commands ·')
+                terminal.write(b'\x15')
                 terminal.write(b'\x1bOP')  # F1 on an empty prompt
                 terminal.wait_for('Help')
+                # Issue #758: PgDn/PgUp/Home/End move the selection and keep the picker open.
+                terminal.wait_for('Help ·')
+                terminal.wait_for('› ')
+                first = next(row[row.index('› '):].rstrip() for row in terminal.screen().splitlines() if '› ' in row)
+                terminal.write(b'\x1b[6~')  # PgDn
+                terminal.wait_gone(first)
+                terminal.wait_for('Help ·')
+                terminal.write(b'\x1b[5~')  # PgUp
+                terminal.wait_for(first)
+                terminal.write(b'\x1b[F')  # End
+                terminal.wait_gone(first)
+                terminal.wait_for('Help ·')
+                terminal.write(b'\x1b[H')  # Home
+                terminal.wait_for(first)
                 terminal.write(b'pla')
                 terminal.wait_for('Help /pla')
                 terminal.write(b'\r')
                 terminal.wait_for('/plan ▏')
+                # Issue #758: F1 with a draft keeps it and says why nothing opened.
+                terminal.write(b'\x1bOP')
+                terminal.wait_for('F1 help needs an empty prompt')
+                terminal.wait_for('/plan ▏')
+                terminal.wait_gone('Help ·')
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
             finally:
