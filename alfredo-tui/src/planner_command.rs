@@ -85,14 +85,30 @@ fn text(value: &str, max: usize) -> bool {
     !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }
 /// A pasted goal keeps its line breaks (#743) but is one line downstream (commit
-/// subjects, `ALFREDO_GOAL`, single-line panels): each run of CR/LF becomes one space.
+/// subjects, `ALFREDO_GOAL`, single-line panels): each run of CR, LF, TAB, VT, FF or
+/// NEL (U+0085) becomes one space (#751). ESC, NUL, DEL and other controls stay, to be
+/// refused by `goal_refusal`.
 pub fn normalise_goal(goal: &str) -> String {
     let lines: Vec<&str> = goal
         .trim()
-        .split(['\r', '\n'])
+        .split(['\r', '\n', '\t', '\x0b', '\x0c', '\u{85}'])
         .filter(|line| !line.is_empty())
         .collect();
     lines.join(" ")
+}
+/// The text after `verb` when whitespace of any kind (space, tab, line break) follows it,
+/// so `/plan\nFix it` is `/plan Fix it` and `/planet` is not `/plan`.
+pub fn verb_argument<'a>(text: &'a str, verb: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix(verb)?;
+    rest.starts_with(char::is_whitespace).then_some(rest)
+}
+/// A `/plan` or `/plan-revise` request as one line, or the refusal that names why not.
+pub fn request_text(raw: &str) -> Result<String, String> {
+    let request = normalise_goal(raw);
+    match goal_refusal("Request", &request, 8192) {
+        Some(refusal) => Err(refusal),
+        None => Ok(request),
+    }
 }
 /// Why a normalised goal, request or title is refused, naming the rule that failed.
 pub fn goal_refusal(what: &str, value: &str, limit: usize) -> Option<String> {

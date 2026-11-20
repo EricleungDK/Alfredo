@@ -2913,6 +2913,30 @@ fn prepared_plan_followed_directly_by_a_newline_is_a_planner_request() {
     assert!(matches!(intent, Some(Intent::Planner { .. })), "{intent:?}");
 }
 
+/// Issue #751: the capacity refusal comes before any request, whatever whitespace follows
+/// the verb, and a longer word is not the verb.
+#[test]
+fn prepared_plan_at_task_capacity_is_refused_for_any_whitespace_after_the_verb() {
+    let fixture = Fixture::new();
+    pad_tasks(&fixture.store, 256);
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let expected = alfredo_tui::tasks::capacity_refusal(256, 1);
+    for text in [
+        "/plan\nMake answer return 42",
+        "/plan-revise\nMake it smaller",
+        "/plan\tMake answer return 42",
+    ] {
+        assert_eq!(
+            control.prepare_command(text, "fixture").unwrap_err(),
+            expected,
+            "{text:?}"
+        );
+    }
+    assert_eq!(server.count(), 0);
+}
+
 #[test]
 fn plan_refuses_other_control_characters_and_says_line_breaks_are_fine() {
     let fixture = Fixture::new();

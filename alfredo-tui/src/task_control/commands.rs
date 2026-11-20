@@ -696,11 +696,8 @@ impl TaskControl {
             self.scroll = 0;
             return Ok(());
         }
-        if let Some(prompt) = text.trim().strip_prefix("/plan ") {
-            let prompt = crate::planner_command::normalise_goal(prompt);
-            if let Some(refusal) = crate::planner_command::goal_refusal("Request", &prompt, 8192) {
-                return Err(refusal);
-            }
+        if let Some(prompt) = crate::planner_command::verb_argument(text.trim(), "/plan") {
+            let prompt = crate::planner_command::request_text(prompt)?;
             let prompt = prompt.as_str();
             self.task_headroom()?;
             let revision = self

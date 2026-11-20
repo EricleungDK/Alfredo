@@ -81,9 +81,13 @@ plan`.
 
 A goal may be pasted over several lines (an issue, a spec) or passed to `--go` with line
 breaks (`--go "$(cat task.md)"`): each run of line breaks in a goal becomes one space, so a
-goal stays one line in commit subjects, `ALFREDO_GOAL` and panels. `/plan REQUEST`,
-`/task` and `/after` do the same. Other control characters (such as ESC or NUL) are
-still refused, and the refusal says so, as does a goal over 4096 bytes after joining.
+goal stays one line in commit subjects, `ALFREDO_GOAL` and panels. Tabs, vertical tabs,
+form feeds and U+0085 join the same way, so a goal from a file with tab-indented list items
+runs. `/plan REQUEST`, `/plan-revise REQUEST`, `/task` and `/after` do the same, and `/plan`
+may be followed directly by a line break (`/plan\nFix it` is `/plan Fix it`).
+Other control characters (such as ESC, NUL or DEL) are still refused, and the refusal says
+so, as does a goal over 4096 bytes after joining; a `/plan` or `/plan-revise` request over
+8192 bytes says `Request is N bytes; the limit is 8192 bytes`.
 
 In the interactive TUI, the denied-sandbox refusal of `/go` and `/run` is shown as chat rows with the whole sentence (bwrap's stderr without a trailing period, then the host-policy fix and the README Troubleshooting pointer) and a footer that leads with the fix: `/go refused: allow bubblewrap user namespaces · see README Troubleshooting`.
 
