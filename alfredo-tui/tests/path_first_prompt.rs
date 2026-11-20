@@ -1,6 +1,9 @@
 // Issue #744: a prompt whose first token is a file path (`/etc/hosts what is this`) is chat
 // text, not a slash command; real command names never contain a second `/`.
-use alfredo_tui::{commands::is_command_token, model::Session};
+use alfredo_tui::{
+    commands::{is_command_token, Completion},
+    model::Session,
+};
 
 #[test]
 fn a_first_token_with_a_second_slash_is_not_a_command() {
@@ -62,4 +65,30 @@ fn a_mistyped_command_is_still_refused_by_the_queue_and_keeps_its_text() {
         assert_eq!(session.draft, draft);
         assert!(session.queued_messages().is_empty());
     }
+}
+
+#[test]
+fn completion_does_not_accept_a_path_first_draft() {
+    for draft in ["/etc/", "/etc/hosts", "//go", "/usr/bin/env"] {
+        assert!(!Completion::accepts(draft), "{draft}");
+        assert!(Completion::typeahead(draft).is_none(), "{draft}");
+        assert!(Completion::open(draft).is_none(), "{draft}");
+    }
+}
+
+#[test]
+fn completion_still_accepts_commands_mentions_and_model_arguments() {
+    for draft in ["/", "/go", "/clea", "@wayfinder", "@", "/model ", "/model ll"] {
+        assert!(Completion::accepts(draft), "{draft}");
+    }
+    for draft in ["", "hello", "/go X", "/etc/hosts what", "@wayfinder x"] {
+        assert!(!Completion::accepts(draft), "{draft}");
+    }
+    assert!(Completion::typeahead("/clea").is_some());
+    assert!(Completion::typeahead("/").is_some());
+    assert!(Completion::typeahead("/clear x").is_none());
+    assert!(Completion::open("/clea").is_some());
+    assert!(Completion::open("/").is_some());
+    assert!(Completion::open("@").is_some());
+    assert!(Completion::open("/clear x").is_none());
 }
