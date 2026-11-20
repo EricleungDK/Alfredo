@@ -323,6 +323,7 @@ or the flag without `--headless`, exits 2 with nothing on stdout.
 | `repair` | `--go`, `--resume` | `id`, `cause` (`check failed`, ...), `head` (the repair task's id) |
 | `check` | `--go`, `--resume` | `id`, `passed`; `reason` when `passed` is false |
 | `tool` | `--chat` | `tool`, `path` (or `null`), `result` (`ok`, `denied`, `malformed`, `error`), `detail` when not `ok` |
+| `text` | `--chat` | `delta`, one chunk of the model's reply as it arrives, unchanged; the chunks in order add up to `reply` in `result` (apart from surrounding whitespace the result trims) |
 | `result` | all | the final object described in this section, plus `v` and `type`; always the last line |
 
 Stdout carries only these lines. Stderr keeps the same progress lines as without the flag, exit codes are

@@ -80,6 +80,16 @@ class FlagTests(unittest.TestCase):
         for text in ('`/plan-revise`', 'tabs', 'vertical tabs', 'form feeds'):
             self.assertIn(text, section)
 
+    def test_stream_json_text_event_is_named_in_help_and_reference(self):
+        # Issue #762: --chat stream-json emits text {delta} events.
+        source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        self.assertIn('text {delta} for --chat', ' '.join(source.split()))
+        start = reference.index('### Event stream: `--output-format stream-json`')
+        section = reference[start:reference.index('\n### ', start + 10)]
+        self.assertIn('| `text` | `--chat` |', section)
+        self.assertIn('`delta`', section)
+
     def test_reference_states_the_combined_bound_for_plan_revise(self):
         text = " ".join((ROOT / "alfredo-tui/docs/reference.md").read_text(encoding="utf-8").split())
         for phrase in (
