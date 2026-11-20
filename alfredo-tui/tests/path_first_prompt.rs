@@ -78,7 +78,15 @@ fn completion_does_not_accept_a_path_first_draft() {
 
 #[test]
 fn completion_still_accepts_commands_mentions_and_model_arguments() {
-    for draft in ["/", "/go", "/clea", "@wayfinder", "@", "/model ", "/model ll"] {
+    for draft in [
+        "/",
+        "/go",
+        "/clea",
+        "@wayfinder",
+        "@",
+        "/model ",
+        "/model ll",
+    ] {
         assert!(Completion::accepts(draft), "{draft}");
     }
     for draft in ["", "hello", "/go X", "/etc/hosts what", "@wayfinder x"] {
