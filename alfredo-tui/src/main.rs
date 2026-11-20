@@ -1335,6 +1335,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     work.app.transient_rows.clear();
                     at_lookup.on_key(&key);
                     if let Some(completion) = work.app.completion.as_mut() {
+                        // The list sits under the header and prompt and loses a row to
+                        // each group heading, so a page is a bit shorter than the screen.
+                        let page_rows = usize::from(terminal.size()?.height.saturating_sub(10));
+                        // F1 picker: page and jump through the catalog instead of closing.
+                        if completion.help_key(key.code, page_rows) {
+                            continue;
+                        }
                         let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
                         match key.code {
                             KeyCode::Up | KeyCode::BackTab => {
@@ -1387,21 +1394,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             // F1 picker: page and jump through the catalog instead of closing.
-                            KeyCode::PageUp | KeyCode::PageDown if completion.help => {
-                                // The list sits under the header and prompt and loses
-                                // a row to each group heading, so a page is a bit shorter.
-                                let rows = usize::from(terminal.size()?.height.saturating_sub(10));
-                                completion.page(key.code == KeyCode::PageDown, rows.max(1));
-                                continue;
-                            }
-                            KeyCode::Home if completion.help => {
-                                completion.first();
-                                continue;
-                            }
-                            KeyCode::End if completion.help => {
-                                completion.last();
-                                continue;
-                            }
                             _ => work.app.completion = None,
                         }
                     }
@@ -1527,6 +1519,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             _ => {}
                         }
                     }
+                    match alfredo_tui::commands::Completion::f1(
+                        key.code,
+                        work.app.sessions[index].draft.is_empty(),
+                    ) {
+                        Some(Ok(help)) => work.app.completion = Some(help),
+                        Some(Err(notice)) => work.app.notice = notice.into(),
+                        None => {}
+                    }
                     match key.code {
                         KeyCode::Char(answer @ ('y' | 'n' | 'a'))
                             if !ctrl
@@ -1641,13 +1641,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // Chat view: Ctrl+O shows every tool result in full (issue #258).
                         KeyCode::Char('o') if ctrl && !work.tasks.visible => {
                             work.app.sessions[index].toggle_tool_results();
-                        }
-                        KeyCode::F(1) if work.app.sessions[index].draft.is_empty() => {
-                            work.app.completion = Some(alfredo_tui::commands::Completion::all());
-                        }
-                        KeyCode::F(1) => {
-                            work.app.notice =
-                                "F1 help needs an empty prompt; Ctrl+U clears the draft".into();
                         }
                         // The open model list owns the arrows; Enter picks unless a command is typed.
                         KeyCode::Up if work.app.models_visible => work.app.move_model_cursor(false),
