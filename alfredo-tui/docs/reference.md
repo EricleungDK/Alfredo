@@ -35,7 +35,9 @@ once with the validation error appended, then autopilot stops.
 an autopilot run ends `done`, `partial` or `failed`, so a long local run can notify you.
 It is a launch option only; Alfredo never reads a hook from the repository or the
 state directory. `PROGRAM` must be an absolute path to an existing executable regular
-file, or Alfredo exits with a usage error before starting.
+file, or Alfredo exits with a usage error before starting. `--on-finish` and
+`--max-repairs` apply only to `--go`, `--resume` and the terminal: an explicit one with
+`--chat` or `--doctor` exits 2 naming the flag, while `ALFREDO_ON_FINISH` is ignored there.
 
 - Started directly (no shell, no arguments), outside the sandbox, with your own
   permissions; standard input, output and error are discarded.
@@ -88,6 +90,11 @@ may be followed directly by a line break (`/plan\nFix it` is `/plan Fix it`).
 Other control characters (such as ESC, NUL or DEL) are still refused, and the refusal says
 so, as does a goal over 4096 bytes after joining; a `/plan` or `/plan-revise` request over
 8192 bytes says `Request is N bytes; the limit is 8192 bytes`.
+
+A `/plan-revise` request also has to fit the whole plan prompt: the draft's prompt, then ` | Revision request: `
+(21 bytes), then your request, stay within 8192 bytes. When they would not, it refuses before asking
+the planner, keeps the draft, and says `Revision would make the plan prompt N bytes; the limit is 8192.
+Use a shorter request, or /plan a fresh one`.
 
 In the interactive TUI, the denied-sandbox refusal of `/go` and `/run` is shown as chat rows with the whole sentence (bwrap's stderr without a trailing period, then the host-policy fix and the README Troubleshooting pointer) and a footer that leads with the fix: `/go refused: allow bubblewrap user namespaces · see README Troubleshooting`.
 
@@ -506,8 +513,8 @@ migration", "redesign the architecture", "build a new app") to enter Wayfinder C
 The bare words "migration" or "architecture" in an ordinary request do not enter it. A "new
 app", "new application", "new service", "new project", "new repository" or "new product" counts only
 directly after a creation verb (build, create, make, start, scaffold, bootstrap, develop, generate,
-set up, spin up, write, init) with at most two of `a`, `an`, `another`, `brand`, `my`, `our` between
-them ("build a brand new app"; not `the`), or at the start of the text ("new app: todo list");
+set up, spin up, write, init) with at most three of `a`, `an`, `another`, `brand`, `my`, `our`, `me`, `us`, `whole`, `completely`, `entirely`, `totally` between
+them ("build a brand new app", "build me a new app"; not `the`), or at the start of the text ("new app: todo list");
 "fix the new app crash", "write tests for the new service" and "make sure the new app starts" are
 ordinary requests. A reference such as “Wayfinder ticket #42” enters Work-through. Ordinary
 read-only questions stay outside automatic entry. A saved flow continues across

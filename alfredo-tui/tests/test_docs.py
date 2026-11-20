@@ -90,6 +90,14 @@ class FlagTests(unittest.TestCase):
         self.assertIn('| `text` | `--chat` |', section)
         self.assertIn('`delta`', section)
 
+    def test_reference_states_the_combined_bound_for_plan_revise(self):
+        text = " ".join((ROOT / "alfredo-tui/docs/reference.md").read_text(encoding="utf-8").split())
+        for phrase in (
+            "the draft's prompt, then ` | Revision request: ` (21 bytes), then your request, stay within 8192 bytes",
+            "Revision would make the plan prompt N bytes; the limit is 8192. Use a shorter request, or /plan a fresh one",
+        ):
+            self.assertIn(phrase, text)
+
     def test_headless_chat_stdin_prompt_is_documented(self):
         # Issue #549: `--chat -` reads the prompt from stdin (256 KiB, UTF-8, nonempty).
         reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
@@ -146,10 +154,11 @@ class FlagTests(unittest.TestCase):
         reference = ' '.join((ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8').split())
         self.assertIn('counts only directly after a creation verb', reference)
         self.assertIn('names the matched phrase', reference)
-        self.assertIn('with at most two of `a`, `an`, `another`, `brand`, `my`, `our` between them', reference)
+        self.assertIn('with at most three of `a`, `an`, `another`, `brand`, `my`, `our`, `me`, `us`, `whole`, `completely`, `entirely`, `totally` between them', reference)
         self.assertNotIn('within four words', reference)
         main = ' '.join((ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8').split())
         self.assertIn('starts Wayfinder only right after a creation verb and articles', main)
+        self.assertIn('me, us, whole, completely, entirely, totally', main)
 
     def test_masked_secret_files_are_documented_as_permission_denied(self):
         # Issue #582: /dev/null is bound nodev, so a masked file fails to open.
@@ -197,6 +206,14 @@ class FlagTests(unittest.TestCase):
         readme = (ROOT / 'README.md').read_text(encoding='utf-8')
         self.assertIn(version, readme)
         self.assertIn(f'Rust {toolchain}', readme)
+
+
+    def test_on_finish_and_max_repairs_name_their_modes(self):
+        # Issue #765: explicit flags with --chat/--doctor exit 2; help and reference say so.
+        source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        for text in (' '.join(source.split()), ' '.join(reference.split())):
+            self.assertIn('apply only to --go, --resume and the terminal', text.replace('`', ''))
 
 
 class StatusTests(unittest.TestCase):

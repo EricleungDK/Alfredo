@@ -108,6 +108,27 @@ fn read_stdin_prompt(reader: impl std::io::Read) -> Result<String, String> {
     Ok(prompt)
 }
 
+/// Issue #765: `--on-finish` and `--max-repairs` configure autopilot runs, so naming either
+/// with `--chat` or `--doctor` is refused rather than silently ignored. The environment
+/// variable is never explicit and never refuses.
+fn explicit_flag_refusal(
+    chat: bool,
+    doctor: bool,
+    on_finish_explicit: bool,
+    max_repairs_explicit: bool,
+) -> Option<&'static str> {
+    if !(chat || doctor) {
+        return None;
+    }
+    if on_finish_explicit {
+        Some("--on-finish applies only to --go, --resume or the terminal")
+    } else if max_repairs_explicit {
+        Some("--max-repairs applies only to --go, --resume or the terminal")
+    } else {
+        None
+    }
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let starting = std::env::current_dir()?;
     let mut workspace = None;
@@ -137,6 +158,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut go_goal: Option<String> = None;
     let mut resume = false;
     let mut max_repairs_explicit = false;
+    let mut on_finish_explicit = false;
     let mut headless = false;
     let mut chat_prompt: Option<String> = None;
     let mut approve: Option<headless::Policy> = None;
@@ -205,6 +227,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("--max-repairs needs a number from 0 to 16")?;
             }
             "--on-finish" => {
+                on_finish_explicit = true;
                 on_finish = Some(
                     args.next()
                         .ok_or("--on-finish needs an absolute program path")?,
@@ -326,6 +349,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if approve.is_some() && chat_prompt.is_none() {
         return Err("--approve applies only to --chat PROMPT --headless".into());
+    }
+    if let Some(message) = explicit_flag_refusal(
+        chat_prompt.is_some(),
+        doctor,
+        on_finish_explicit,
+        max_repairs_explicit,
+    ) {
+        eprintln!("Error: {message}");
+        std::process::exit(2);
     }
     if headless && ((go_goal.is_none() && chat_prompt.is_none() && !resume) || select || doctor) {
         return Err("--headless needs --go GOAL or --chat PROMPT and opens the repository's default mission, or the one --mission NAME or --new-mission NAME names; omit --select and --doctor".into());
@@ -2634,7 +2666,7 @@ const HELP_LINES: &[&str] = &[
     "/go GOAL · /go (runs the open or saved /plan, no re-planning) · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)",
     "/task description · /after 1,2 description · /approve ID · /cancel-task ID",
     "/permit ID JSON · /run ID · /evidence ID · /recover ID [requeue] · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /requeue ID · /resolve-repair ID · /branch ID",
-    "@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry · /scope-clear · \"new app/service/project\" starts Wayfinder only right after a creation verb and articles (\"build a new app\")",
+    "@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry · /scope-clear · \"new app/service/project\" starts Wayfinder only right after a creation verb and articles (\"build a new app\"; also me, us, whole, completely, entirely, totally)",
     "/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel (Esc too, while a request generates) · /assign ID MODEL · /dispatch on|off",
     "/watch ID|architect · /tell ID|architect TEXT",
     "@path in a chat prompt attaches that file's working-tree text (8 mentions, 32 KiB per prompt; no spaces or quotes in the path; secrets, symlinks, ignored, binary and files over 256 KiB are refused); each refusal is listed in the transcript",
@@ -2656,6 +2688,7 @@ const HELP_LINES: &[&str] = &[
     "--doctor checks startup prerequisites without entering terminal mode or running inference.",
     "--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.",
     "--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.",
+    "--on-finish and --max-repairs apply only to --go, --resume and the terminal; an explicit one with --chat or --doctor exits 2, while ALFREDO_ON_FINISH is ignored there.",
     "--on-finish PROGRAM (env ALFREDO_ON_FINISH) runs your executable (absolute path, no shell, outside the sandbox, 10 s limit) when an autopilot run ends done, partial or failed, with ALFREDO_STATE, ALFREDO_BRANCH, ALFREDO_GOAL, ALFREDO_ACCEPTED, ALFREDO_TOTAL and ALFREDO_REPAIRS set.",
     "Environment: ALFREDO_ON_FINISH, ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE, ALFREDO_NUM_CTX, ALFREDO_ICONS, ALFREDO_NO_MOTION, COLORTERM, NO_COLOR",
 ];

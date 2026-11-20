@@ -1389,6 +1389,33 @@ fn revision_uses_previous_tasks_and_preserves_explicit_save_and_approval() {
     server.join().unwrap();
 }
 
+/// Issue #764: the TUI command path shows the overflow refusal and sends nothing.
+#[test]
+fn plan_revise_overflowing_the_combined_prompt_is_refused_before_any_request() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let mut original = plan();
+    original.prompt = "spec ".repeat(1200).trim().into();
+    let (provider, _server) = server("{}".into(), true, Duration::ZERO);
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider);
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control.planner.draft = Some(original.clone());
+    let request = "more ".repeat(700);
+    let request = request.trim();
+    let combined = original.prompt.len() + " | Revision request: ".len() + request.len();
+    let error = control
+        .command(&runtime, &format!("/plan-revise {request}"), "fixture")
+        .unwrap_err();
+    assert_eq!(
+        error,
+        format!("Revision would make the plan prompt {combined} bytes; the limit is 8192. Use a shorter request, or /plan a fresh one")
+    );
+    assert!(!control.planner.active());
+    assert_eq!(control.planner.draft.as_ref(), Some(&original));
+}
+
 #[test]
 fn failed_revision_restores_prior_draft_and_original_stale_revision() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
