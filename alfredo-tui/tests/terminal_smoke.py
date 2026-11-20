@@ -920,6 +920,12 @@ class ModelPicker(unittest.TestCase):
                 terminal.wait_for('Commands ·')
                 terminal.write(b'\x7f\x7f\x7f\x7f')
                 terminal.wait_gone('Commands ·')
+                # Issue #758: the live `/` list keeps closing on PgDn (only the F1 picker pages).
+                terminal.write(b'/pla')
+                terminal.wait_for('Commands ·')
+                terminal.write(b'\x1b[6~')
+                terminal.wait_gone('Commands ·')
+                terminal.write(b'\x15')
                 terminal.write(b'\x1bOP')  # F1 on an empty prompt
                 terminal.wait_for('Help')
                 # Issue #758: PgDn/PgUp/Home/End move the selection and keep the picker open.

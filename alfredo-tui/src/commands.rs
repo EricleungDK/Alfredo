@@ -498,6 +498,23 @@ impl Completion {
             (self.selected + self.choices.len() - 1) % self.choices.len()
         };
     }
+    /// Moves the selection by one page of `rows` choices (PgUp/PgDn), stopping at the ends.
+    pub fn page(&mut self, down: bool, rows: usize) {
+        let last = self.choices.len().saturating_sub(1);
+        self.selected = if down {
+            (self.selected + rows).min(last)
+        } else {
+            self.selected.saturating_sub(rows)
+        };
+    }
+    /// Selects the first choice (Home).
+    pub fn first(&mut self) {
+        self.selected = 0;
+    }
+    /// Selects the last choice (End).
+    pub fn last(&mut self) {
+        self.selected = self.choices.len().saturating_sub(1);
+    }
     pub fn draft(&self) -> String {
         self.choices[self.selected].draft.clone()
     }

@@ -1386,6 +1386,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 completion.set_query(query);
                                 continue;
                             }
+                            // F1 picker: page and jump through the catalog instead of closing.
+                            KeyCode::PageUp | KeyCode::PageDown if completion.help => {
+                                // The list sits under the header and prompt and loses
+                                // a row to each group heading, so a page is a bit shorter.
+                                let rows = usize::from(terminal.size()?.height.saturating_sub(10));
+                                completion.page(key.code == KeyCode::PageDown, rows.max(1));
+                                continue;
+                            }
+                            KeyCode::Home if completion.help => {
+                                completion.first();
+                                continue;
+                            }
+                            KeyCode::End if completion.help => {
+                                completion.last();
+                                continue;
+                            }
                             _ => work.app.completion = None,
                         }
                     }
@@ -1628,6 +1644,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::F(1) if work.app.sessions[index].draft.is_empty() => {
                             work.app.completion = Some(alfredo_tui::commands::Completion::all());
+                        }
+                        KeyCode::F(1) => {
+                            work.app.notice =
+                                "F1 help needs an empty prompt; Ctrl+U clears the draft".into();
                         }
                         // The open model list owns the arrows; Enter picks unless a command is typed.
                         KeyCode::Up if work.app.models_visible => work.app.move_model_cursor(false),
