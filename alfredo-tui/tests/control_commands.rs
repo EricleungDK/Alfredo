@@ -743,3 +743,42 @@ fn failed_automatic_intent_save_stops_selection_and_off_invalidates_a_saved_laun
         );
     }
 }
+
+#[test]
+fn a_saved_run_starts_at_its_revision_and_is_refused_once_the_state_moved_on() {
+    let fixture = Fixture::new();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (provider, job, seen, release) = server(true);
+    let mut control = control(&fixture, provider);
+    let stale = prepared(&mut control, "/run 1");
+    // The task state moves on after the run was saved.
+    let revision = fixture.store.snapshot().unwrap().revision;
+    fixture
+        .store
+        .transact(Request {
+            correlation: "moved-on".into(),
+            expected_revision: revision,
+            action: Action::Propose {
+                title: "Another task".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+            },
+        })
+        .unwrap();
+    control.snapshot = Some(fixture.store.snapshot().unwrap());
+    let error = control.dispatch_prepared(&runtime, &stale).unwrap_err();
+    assert!(error.contains("Task state changed"), "{error}");
+    assert!(control.workers.is_empty());
+    // A run saved against the current revision still starts the worker.
+    let current = prepared(&mut control, "/run 1");
+    control.dispatch_prepared(&runtime, &current).unwrap();
+    seen.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(control.workers.contains_key(&1));
+    release.send(()).unwrap();
+    wait_workers(&mut control);
+    job.join().unwrap();
+    assert_eq!(
+        fixture.store.snapshot().unwrap().tasks[0].status,
+        TaskStatus::ReviewReady
+    );
+}
