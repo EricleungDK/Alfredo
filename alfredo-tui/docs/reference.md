@@ -505,8 +505,8 @@ migration", "redesign the architecture", "build a new app") to enter Wayfinder C
 The bare words "migration" or "architecture" in an ordinary request do not enter it. A "new
 app", "new application", "new service", "new project", "new repository" or "new product" counts only
 directly after a creation verb (build, create, make, start, scaffold, bootstrap, develop, generate,
-set up, spin up, write, init) with at most two of `a`, `an`, `another`, `brand`, `my`, `our` between
-them ("build a brand new app"; not `the`), or at the start of the text ("new app: todo list");
+set up, spin up, write, init) with at most three of `a`, `an`, `another`, `brand`, `my`, `our`, `me`, `us`, `whole`, `completely`, `entirely`, `totally` between
+them ("build a brand new app", "build me a new app"; not `the`), or at the start of the text ("new app: todo list");
 "fix the new app crash", "write tests for the new service" and "make sure the new app starts" are
 ordinary requests. A reference such as “Wayfinder ticket #42” enters Work-through. Ordinary
 read-only questions stay outside automatic entry. A saved flow continues across
