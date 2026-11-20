@@ -136,6 +136,8 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual(set(content), {'model', 'state', 'goal', 'branch', 'accepted', 'total', 'repairs', 'failed', 'usage', 'changes'})
         self.assertEqual((content['state'], content['goal'], content['accepted'], content['total'],
                           content['repairs'], content['failed']), ('done', GOAL, 2, 2, 1, []))
+        # Issue #762: --go streams no text events.
+        self.assertNotIn('text', [e['type'] for e in events])
         started = [e['id'] for e in events if e['type'] == 'task_started']
         self.assertEqual(started, [1, 2], events)
         repairs = [e for e in events if e['type'] == 'repair']

@@ -870,7 +870,10 @@ impl Turn {
     fn update(&mut self, update: Update) {
         match update {
             // After a stop the text is only the TUI's "ask again" notice.
-            Update::Token(text) if self.stopped.is_none() => self.reply.push_str(&text),
+            Update::Token(text) if self.stopped.is_none() => {
+                emit("text", serde_json::json!({ "delta": text }));
+                self.reply.push_str(&text);
+            }
             Update::Stopped(stop) => self.stopped = Some(stop),
             Update::Notice(text) if text == alfredo_tui::chat_tools::text_call::NOTICE => {
                 say(text.clone());
