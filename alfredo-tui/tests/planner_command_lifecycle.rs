@@ -375,6 +375,131 @@ fn prepare_command_joins_a_pasted_multi_line_plan_revise_request() {
     );
 }
 
+/// A planner holding a finished draft whose prompt is `goal`.
+fn drafted_from(
+    fixture: &Fixture,
+    runtime: &tokio::runtime::Runtime,
+    goal: &str,
+) -> alfredo_tui::planner::Planner {
+    let mut planner = alfredo_tui::planner::Planner::default();
+    let snapshot = fixture.store.snapshot().unwrap();
+    let request = planner
+        .prepare_command("first", &format!("/plan {goal}"), "fixture", &snapshot)
+        .unwrap()
+        .unwrap();
+    let (provider, job, _) = server_capture(
+        serde_json::json!({"tasks": plan().tasks}).to_string(),
+        true,
+        Duration::ZERO,
+    );
+    planner
+        .dispatch_command(runtime, provider, &request, fixture.store.clone())
+        .unwrap();
+    wait(&mut planner);
+    job.join().unwrap();
+    planner
+}
+
+/// The bytes ` | Revision request: ` adds between the draft prompt and the request.
+const REVISION_SEPARATOR: usize = " | Revision request: ".len();
+
+fn overflow_message(combined: usize) -> String {
+    format!("Revision would make the plan prompt {combined} bytes; the limit is 8192. Use a shorter request, or /plan a fresh one")
+}
+
+/// Issue #764.
+#[test]
+fn plan_revise_refuses_a_request_that_overflows_the_combined_prompt() {
+    let fixture = Fixture::new();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let planner = drafted_from(&fixture, &runtime, &"spec ".repeat(1200));
+    let saved = planner.checkpoint().unwrap();
+    let draft_len = saved.plan.prompt.len();
+    assert!(draft_len >= 5999, "{draft_len}");
+    let request = "more ".repeat(700);
+    let request = request.trim();
+    let snapshot = fixture.store.snapshot().unwrap();
+    let expected = overflow_message(draft_len + REVISION_SEPARATOR + request.len());
+    assert_eq!(
+        planner.prepare_command(
+            "r",
+            &format!("/plan-revise {request}"),
+            "fixture",
+            &snapshot
+        ),
+        Err(expected.clone())
+    );
+    assert!(expected.contains("8192"));
+    assert_eq!(planner.checkpoint().unwrap(), saved);
+
+    // A request that skipped prepare_command is refused by dispatch before any planner request.
+    let short = planner
+        .prepare_command("s", "/plan-revise short", "fixture", &snapshot)
+        .unwrap()
+        .unwrap();
+    let alfredo_tui::planner_command::Operation::Revise {
+        revision,
+        base_sha256,
+        ..
+    } = short.operation
+    else {
+        panic!("not a revise")
+    };
+    let forged = alfredo_tui::planner_command::Request {
+        correlation: "r".into(),
+        operation: alfredo_tui::planner_command::Operation::Revise {
+            prompt: request.into(),
+            revision,
+            base_sha256,
+        },
+    };
+    let mut planner = planner;
+    let (provider, _job, received) = server_capture(
+        serde_json::json!({"tasks": plan().tasks}).to_string(),
+        true,
+        Duration::ZERO,
+    );
+    assert_eq!(
+        planner.dispatch_command(&runtime, provider, &forged, fixture.store.clone()),
+        Err(expected)
+    );
+    assert!(received.recv_timeout(Duration::from_millis(300)).is_err());
+    assert!(!planner.active());
+    assert_eq!(planner.checkpoint().unwrap(), saved);
+}
+
+#[test]
+fn plan_revise_accepts_a_combined_prompt_of_exactly_8192_bytes_and_refuses_one_more() {
+    let fixture = Fixture::new();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut planner = drafted_from(&fixture, &runtime, &"spec ".repeat(1200));
+    let draft_len = planner.checkpoint().unwrap().plan.prompt.len();
+    let room = 8192 - draft_len - REVISION_SEPARATOR;
+    let snapshot = fixture.store.snapshot().unwrap();
+    let over = "r".repeat(room + 1);
+    assert_eq!(
+        planner.prepare_command("r", &format!("/plan-revise {over}"), "fixture", &snapshot),
+        Err(overflow_message(8193))
+    );
+    let exact = "r".repeat(room);
+    let request = planner
+        .prepare_command("r", &format!("/plan-revise {exact}"), "fixture", &snapshot)
+        .unwrap()
+        .unwrap();
+    let (provider, job, received) = server_capture(
+        serde_json::json!({"tasks": plan().tasks}).to_string(),
+        true,
+        Duration::ZERO,
+    );
+    planner
+        .dispatch_command(&runtime, provider, &request, fixture.store.clone())
+        .unwrap();
+    wait(&mut planner);
+    job.join().unwrap();
+    received.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(planner.checkpoint().unwrap().plan.prompt.len(), 8192);
+}
+
 #[test]
 fn planner_command_goal_refusal_names_the_rule_that_failed() {
     use alfredo_tui::planner_command::goal_refusal;
