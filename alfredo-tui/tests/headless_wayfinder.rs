@@ -35,6 +35,22 @@ fn a_fix_goal_that_mentions_a_new_app_is_not_refused_as_a_wayfinder_goal() {
     assert_eq!(code, Some(2), "{err}");
 }
 
+/// Issue #752: everyday coding goals with a creation verb a few words before "the new ..."
+/// plan normally instead of being refused as a project start.
+#[test]
+fn coding_goals_with_a_verb_near_the_new_app_are_not_refused() {
+    for (tag, goal) in [
+        ("tests", "write tests for the new service"),
+        ("sure", "make sure the new app starts"),
+        ("crash", "fix the crash when I start the new app"),
+    ] {
+        let (code, err) = headless(goal, tag);
+        assert!(!err.contains("Wayfinder goals need"), "{goal}: {err}");
+        assert!(err.contains("is not a Git repository"), "{goal}: {err}");
+        assert_eq!(code, Some(2), "{err}");
+    }
+}
+
 #[test]
 fn a_project_start_goal_is_refused_naming_the_phrase_and_the_way_out() {
     let (code, err) = headless("Build a new app that prints hello", "build");
