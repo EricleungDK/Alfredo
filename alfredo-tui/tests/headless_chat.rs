@@ -1633,3 +1633,156 @@ fn a_reply_that_is_only_a_text_tool_call_adds_the_notice_and_keeps_the_exit_code
         let _ = fs::remove_dir_all(root);
     }
 }
+
+/// One streamed reply of several chunks, optionally ending in tool calls (issue #762).
+fn chunked(chunks: &[&str], calls: &[(&str, Value)]) -> Reply {
+    let mut frames: Vec<Vec<u8>> = chunks
+        .iter()
+        .map(|c| format!("{}\n", json!({"message":{"content":c},"done":false})).into_bytes())
+        .collect();
+    if !calls.is_empty() {
+        let calls: Vec<_> = calls
+            .iter()
+            .map(|(n, a)| json!({"function":{"name":n,"arguments":a}}))
+            .collect();
+        frames.push(
+            format!(
+                "{}\n",
+                json!({"message":{"role":"assistant","content":"","tool_calls":calls},"done":false})
+            )
+            .into_bytes(),
+        );
+    }
+    frames.push(format!("{}\n", json!({"message":{"content":""},"done":true})).into_bytes());
+    Reply::Stream(frames, std::time::Duration::from_millis(5))
+}
+
+/// Stdout events split on `\n` only: U+2028 inside a string is not a line break.
+fn events(output: &Output) -> Vec<Value> {
+    String::from_utf8_lossy(&output.stdout)
+        .split('\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn deltas(events: &[Value]) -> Vec<String> {
+    events
+        .iter()
+        .filter(|e| e["type"] == "text")
+        .map(|e| e["delta"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn stream_chat(tag: &str, script: Vec<Reply>, extra: &[&str]) -> (Output, PathBuf) {
+    let root = repository(tag);
+    let fixture = scripted_chat(script);
+    let mut args = vec![
+        "--chat",
+        "say hi",
+        "--headless",
+        "--output-format",
+        "stream-json",
+    ];
+    args.extend_from_slice(extra);
+    let output = run(&root, &fixture, &args);
+    (output, root)
+}
+
+#[test]
+fn stream_json_chat_emits_one_text_event_per_chunk_before_the_result() {
+    let (output, root) = stream_chat(
+        "text-chunks",
+        vec![chunked(&["The ", "answer ", "is zero."], &[])],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let events = events(&output);
+    assert_eq!(deltas(&events), ["The ", "answer ", "is zero."]);
+    assert!(events
+        .iter()
+        .filter(|e| e["type"] == "text")
+        .all(|e| e["v"] == 1));
+    let last = events.last().unwrap();
+    assert_eq!(last["type"], "result");
+    assert!(events[..events.len() - 1]
+        .iter()
+        .all(|e| e["type"] != "result"));
+    assert_eq!(deltas(&events).concat(), last["reply"].as_str().unwrap());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn stream_json_chat_orders_text_and_tool_events_as_they_happen() {
+    let (output, root) = stream_chat(
+        "text-tool-order",
+        vec![
+            chunked(
+                &["Let me ", "look. "],
+                &[("read_file", json!({"path": "greet.py"}))],
+            ),
+            chunked(&["It says ", "Hello."], &[]),
+        ],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let events = events(&output);
+    let order: Vec<String> = events
+        .iter()
+        .map(|e| match e["type"].as_str().unwrap() {
+            "text" => format!("text:{}", e["delta"].as_str().unwrap()),
+            other => other.to_owned(),
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "text:Let me ",
+            "text:look. ",
+            "tool",
+            "text:It says ",
+            "text:Hello.",
+            "result"
+        ]
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn stream_json_text_delta_is_the_chunk_exactly_as_reply_carries_it() {
+    let chunk = "a\u{202e}b\u{2028}c\u{200b}d";
+    let (output, root) = stream_chat("text-format-chars", vec![chunked(&[chunk], &[])], &[]);
+    assert_eq!(output.status.code(), Some(0));
+    let events = events(&output);
+    assert_eq!(deltas(&events), [chunk]);
+    assert_eq!(events.last().unwrap()["reply"], chunk);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_stopped_turn_emits_no_text_event_after_the_stop() {
+    let (output, root) = stream_chat(
+        "text-stopped",
+        vec![chunked(&["Looking."], &[("list_files", json!({}))])],
+        &["--max-turns", "2"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let events = events(&output);
+    assert_eq!(events.last().unwrap()["stopped"], "step_limit");
+    let texts = deltas(&events);
+    assert!(!texts.is_empty());
+    assert!(texts.iter().all(|t| t == "Looking."), "{texts:?}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn default_output_has_no_text_events_even_when_the_reply_streams() {
+    let root = repository("text-default");
+    let fixture = scripted_chat(vec![chunked(&["The ", "answer."], &[])]);
+    let output = run(&root, &fixture, &["--chat", "Hi", "--headless"]);
+    assert_eq!(output.status.code(), Some(0));
+    let value = result(&output);
+    assert_eq!(value["reply"], "The answer.");
+    assert!(value.get("type").is_none() && value.get("delta").is_none());
+    let _ = fs::remove_dir_all(&root);
+}
