@@ -334,3 +334,150 @@ fn help_says_resume_headless_retries_a_context_too_small_stop() {
         "{entry}"
     );
 }
+
+/// Issue #765: an explicit `--on-finish` / `--max-repairs` where it cannot apply is a usage
+/// error (exit 2) that names the flag and where it applies, and nothing runs.
+fn flag_run(args: &[&str], hook_env: Option<&str>) -> (std::process::Output, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!(
+        "alfredo-cli-refusal-{}-{}",
+        std::process::id(),
+        args.join("_").replace(['/', ' '], "")
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let marker = root.join("hook.out");
+    let hook = root.join("hook.sh");
+    std::fs::write(
+        &hook,
+        format!("#!/bin/sh\necho ran > {}\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"));
+    command
+        .env("ALFREDO_MODEL", "fixture")
+        .args(["--endpoint", "http://127.0.0.1:9"])
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .arg("--workspace")
+        .arg(&root);
+    for arg in args {
+        if *arg == "HOOK" {
+            command.arg(&hook);
+        } else {
+            command.arg(arg);
+        }
+    }
+    if hook_env.is_some() {
+        command.env("ALFREDO_ON_FINISH", &hook);
+    }
+    (
+        command.stdin(std::process::Stdio::null()).output().unwrap(),
+        marker,
+    )
+}
+
+fn assert_refused(args: &[&str], flag: &str) {
+    let (output, marker) = flag_run(args, None);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{args:?}: {err}");
+    assert!(output.stdout.is_empty(), "{args:?}");
+    assert!(
+        err.contains(&format!(
+            "{flag} applies only to --go, --resume or the terminal"
+        )),
+        "{args:?}: {err}"
+    );
+    assert!(!marker.exists(), "{args:?}: nothing runs");
+}
+
+#[test]
+fn explicit_on_finish_with_chat_or_doctor_exits_two_naming_the_flag() {
+    assert_refused(
+        &["--chat", "hi", "--headless", "--on-finish", "HOOK"],
+        "--on-finish",
+    );
+    assert_refused(&["--on-finish", "HOOK", "--doctor"], "--on-finish");
+    assert_refused(&["--doctor", "--on-finish", "HOOK"], "--on-finish");
+}
+
+#[test]
+fn explicit_max_repairs_with_chat_or_doctor_exits_two_naming_the_flag() {
+    assert_refused(
+        &["--chat", "hi", "--headless", "--max-repairs", "2"],
+        "--max-repairs",
+    );
+    assert_refused(&["--doctor", "--max-repairs", "0"], "--max-repairs");
+}
+
+#[test]
+fn both_flags_with_chat_refuse_and_the_first_named_is_on_finish() {
+    assert_refused(
+        &[
+            "--chat",
+            "hi",
+            "--headless",
+            "--max-repairs",
+            "2",
+            "--on-finish",
+            "HOOK",
+        ],
+        "--on-finish",
+    );
+}
+
+#[test]
+fn the_environment_hook_alone_never_refuses_chat_or_doctor() {
+    for args in [&["--doctor"][..], &["--chat", "hi", "--headless"]] {
+        let (output, marker) = flag_run(args, Some("env"));
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(!err.contains("applies only to --go"), "{args:?}: {err}");
+        assert!(!marker.exists());
+    }
+}
+
+#[test]
+fn on_finish_and_max_repairs_stay_accepted_with_go_resume_and_the_terminal() {
+    for args in [
+        &["--go", "x", "--headless", "--on-finish", "relative"][..],
+        &["--resume", "--headless", "--on-finish", "relative"],
+        &["--on-finish", "relative"],
+    ] {
+        let (output, _) = flag_run(args, None);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            err.contains("--on-finish needs an absolute path"),
+            "{args:?}: {err}"
+        );
+        assert!(!err.contains("applies only to"), "{args:?}: {err}");
+    }
+    for args in [
+        &["--go", "x", "--headless", "--max-repairs", "2"][..],
+        &["--go", "x", "--max-repairs", "2"],
+        &["--on-finish", "HOOK", "--go", "x", "--headless"],
+    ] {
+        let (output, marker) = flag_run(args, None);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(!err.contains("applies only to --go"), "{args:?}: {err}");
+        assert!(!marker.exists() || args.contains(&"HOOK"));
+    }
+}
+
+#[test]
+fn help_and_reference_say_which_modes_on_finish_and_max_repairs_apply_to() {
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        text.contains(
+            "--on-finish and --max-repairs apply only to --go, --resume and the terminal"
+        ),
+        "{text}"
+    );
+}

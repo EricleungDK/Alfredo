@@ -190,6 +190,14 @@ class FlagTests(unittest.TestCase):
         self.assertIn(f'Rust {toolchain}', readme)
 
 
+    def test_on_finish_and_max_repairs_name_their_modes(self):
+        # Issue #765: explicit flags with --chat/--doctor exit 2; help and reference say so.
+        source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        for text in (' '.join(source.split()), ' '.join(reference.split())):
+            self.assertIn('apply only to --go, --resume and the terminal', text.replace('`', ''))
+
+
 class StatusTests(unittest.TestCase):
     def test_status_is_not_stale_about_branches(self):
         status = (ROOT / '.agent/Tasks/STATUS.md').read_text(encoding='utf-8')

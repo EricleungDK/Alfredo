@@ -35,7 +35,9 @@ once with the validation error appended, then autopilot stops.
 an autopilot run ends `done`, `partial` or `failed`, so a long local run can notify you.
 It is a launch option only; Alfredo never reads a hook from the repository or the
 state directory. `PROGRAM` must be an absolute path to an existing executable regular
-file, or Alfredo exits with a usage error before starting.
+file, or Alfredo exits with a usage error before starting. `--on-finish` and
+`--max-repairs` apply only to `--go`, `--resume` and the terminal: an explicit one with
+`--chat` or `--doctor` exits 2 naming the flag, while `ALFREDO_ON_FINISH` is ignored there.
 
 - Started directly (no shell, no arguments), outside the sandbox, with your own
   permissions; standard input, output and error are discarded.
