@@ -415,6 +415,64 @@ fn only_filler_words_may_sit_between_the_creation_verb_and_new() {
     assert_eq!(entry_mode("build our brand new app"), Some(Mode::Chart));
 }
 
+/// Issue #763: indirect-object pronouns (`me`, `us`) and intensifiers (`whole`, `completely`,
+/// `entirely`, `totally`) are filler too, and up to three filler words may sit between the verb
+/// and "new" ("build me a brand new app"); the #752 negatives stay ordinary chat.
+#[test]
+fn pronoun_and_intensifier_filler_still_starts_wayfinder() {
+    use alfredo_tui::{
+        understanding::Mode,
+        wayfinder::{entry_mode, project_start_phrase},
+    };
+    for prompt in [
+        "build me a new app",
+        "create me a new service",
+        "make us a new app",
+        "build me a brand new app",
+        "build a whole new app",
+        "create a completely new app",
+        "build an entirely new app",
+        "create a totally new service",
+        "build me new app",
+        "build us new app",
+        "build whole new app",
+        "build completely new app",
+        "build entirely new app",
+        "build totally new app",
+        // Exactly three filler words reach the verb.
+        "build me a brand new app",
+        "create us another whole new service",
+        "set up me a brand new app",
+    ] {
+        assert_eq!(entry_mode(prompt), Some(Mode::Chart), "{prompt}");
+        assert_eq!(
+            project_start_phrase(prompt).as_deref(),
+            Some(prompt),
+            "{prompt}"
+        );
+    }
+    for prompt in [
+        "tell me the new app crashes",
+        "write me the new service tests",
+        "write tests for the new service",
+        "make sure the new app starts",
+        "fix the crash when I start the new app",
+        "please make the new app",
+        "build the new app",
+        // Four filler words are one too many.
+        "build me a my brand new app",
+        "create us a whole brand new service",
+        "build a my our brand new app",
+        // Filler without a creation verb before it.
+        "tell me a whole new app",
+        "show us a completely new service",
+        "me a new app",
+    ] {
+        assert_eq!(entry_mode(prompt), None, "{prompt}");
+        assert_eq!(project_start_phrase(prompt), None, "{prompt}");
+    }
+}
+
 /// Issue #741: main.rs hands entry_mode the whole draft, so a leading `/plan`, `/task` or
 /// `/after` must not hide a `new <kind>` that opens the request.
 #[test]
