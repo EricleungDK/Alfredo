@@ -106,6 +106,21 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertIn(GOAL, self.fixture.plan_prompts[0])
         self.assertNotIn('--go refused', err)
 
+    def test_a_goal_with_tabs_runs_as_one_line(self):
+        # Issue #751: a goal from a real file has tab-indented list items; tabs join like line breaks.
+        code, out, err = self.run_headless('--headless', goal='Make answer return 42:\n\t- and add app')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.result(out)['goal'], 'Make answer return 42: - and add app')
+        self.assertEqual(len(self.fixture.plan_prompts), 1)
+        self.assertIn('Make answer return 42: - and add app', self.fixture.plan_prompts[0])
+        self.assertNotIn('--go refused', err)
+
+    def test_a_goal_with_an_escape_character_is_still_refused(self):
+        code, out, err = self.run_headless('--headless', goal='Make answer\x1breturn 42')
+        self.assertEqual(code, 2, err)
+        self.assertIn('--go refused: Goal has a control character', err)
+        self.assertEqual(self.fixture.plan_prompts, [])
+
     def test_stream_json_prints_one_event_per_line_ending_with_the_result_object(self):
         code, out, err = self.run_headless('--headless', '--output-format', 'stream-json')
         self.assertEqual(code, 0, err)

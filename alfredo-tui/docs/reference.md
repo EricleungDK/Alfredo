@@ -81,9 +81,13 @@ plan`.
 
 A goal may be pasted over several lines (an issue, a spec) or passed to `--go` with line
 breaks (`--go "$(cat task.md)"`): each run of line breaks in a goal becomes one space, so a
-goal stays one line in commit subjects, `ALFREDO_GOAL` and panels. `/plan REQUEST`,
-`/task` and `/after` do the same. Other control characters (such as ESC or NUL) are
-still refused, and the refusal says so, as does a goal over 4096 bytes after joining.
+goal stays one line in commit subjects, `ALFREDO_GOAL` and panels. Tabs, vertical tabs,
+form feeds and U+0085 join the same way, so a goal from a file with tab-indented list items
+runs. `/plan REQUEST`, `/plan-revise REQUEST`, `/task` and `/after` do the same, and `/plan`
+may be followed directly by a line break (`/plan\nFix it` is `/plan Fix it`).
+Other control characters (such as ESC, NUL or DEL) are still refused, and the refusal says
+so, as does a goal over 4096 bytes after joining; a `/plan` or `/plan-revise` request over
+8192 bytes says `Request is N bytes; the limit is 8192 bytes`.
 
 In the interactive TUI, the denied-sandbox refusal of `/go` and `/run` is shown as chat rows with the whole sentence (bwrap's stderr without a trailing period, then the host-policy fix and the README Troubleshooting pointer) and a footer that leads with the fix: `/go refused: allow bubblewrap user namespaces · see README Troubleshooting`.
 
@@ -133,8 +137,8 @@ needed)` with a `Next` row to raise `--num-ctx`, then `/repair ID retry`, or app
 smaller files. The stop is re-entrant like the model-unreachable one above: after a restart
 with a larger `--num-ctx`, `/repair ID retry` resumes the stopped run (the repair is approved
 and run, held dependents follow, and the run ends on one `alfredo/go-*` branch); a retry at a
-window that is still too small stops again the same way, with no worker request and no further
-repair. Headless `--go` names the stopped task in the `failed` entry (`"id": ID`, not null) and
+window that is still too small stops again the same way, with no worker request; the retry
+itself counts as one repair beyond `--max-repairs`. Headless `--go` names the stopped task in the `failed` entry (`"id": ID`, not null) and
 prints `next: raise --num-ctx, then --resume --headless retries #ID without planning again`;
 `--resume --headless --num-ctx N` queues the same `/repair ID retry`. A manual `/repair ID` on
 that task still works.
@@ -326,7 +330,7 @@ paused run of the default mission, or of the one `--mission NAME` names, exactly
 checks; a finished plan is not replanned, but a run paused mid-planning plans again, as `/resume` does) and prints `resuming “GOAL” (1/2 accepted)` on stderr,
 then the usual progress lines, the same JSON object (`goal` is the paused run's goal)
 and the same exit codes. With no paused run (none, or one that already finished) it
-exits 2 with `--resume: nothing to resume` on stderr and nothing on stdout. The one exception is a run that stopped because the model server was unreachable (the `model-unreachable` stop): `--resume --headless` then queues the same owner retry as `/repair ID retry` for the stopped task, prints `retrying #ID of “GOAL” (0/2 accepted)` on stderr, and continues the loop without planning again; the family gets one repair beyond `--max-repairs`, and a retry that meets the unreachable server again stops with the same `next:` line naming the new task. Runs that failed for any other cause (repair budget, sandbox, file too large) still exit 2. `--resume`
+exits 2 with `--resume: nothing to resume` on stderr and nothing on stdout. The two exceptions are a run that stopped because the model server was unreachable (the `model-unreachable` stop) and one whose prompt was larger than `--num-ctx` (the `context-too-small` stop, after you raise `--num-ctx`): `--resume --headless` then queues the same owner retry as `/repair ID retry` for the stopped task, prints `retrying #ID of “GOAL” (0/2 accepted)` on stderr, and continues the loop without planning again; the family gets one repair beyond `--max-repairs`, and a retry that meets the same cause again stops with the same `next:` line naming the new task. Runs that failed for any other cause (repair budget, sandbox, file too large) still exit 2. `--resume`
 takes no `--go`, `--chat`, `--model` or `--max-repairs` (the run keeps its own model and repair budget) and needs `--headless`. A paused Wayfinder goal is refused (exit 2); `/resume` it in the terminal.
 
 `--go GOAL --headless` over a paused run no longer plans a second task family beside

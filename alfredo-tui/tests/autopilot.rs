@@ -2004,6 +2004,66 @@ fn unreachable_two_task_run(
 }
 
 #[test]
+fn resume_after_a_reentrant_stop_names_repair_retry() {
+    let fixture = Fixture::new();
+    let server = two_task_server();
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, control) = context_two_task_run(&fixture, &server, &runtime);
+    let err = autopilot.resume(&control).unwrap_err();
+    assert!(err.contains("/repair 1 retry"), "{err}");
+    assert!(
+        err.contains("raise --num-ctx, then /repair 1 retry"),
+        "{err}"
+    );
+    assert!(err.ends_with("or /go GOAL starts a new loop"), "{err}");
+}
+
+#[test]
+fn resume_after_an_unreachable_stop_names_the_model_server_and_repair_retry() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down, false);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, control) = unreachable_two_task_run(&fixture, &server, &runtime, 2);
+    let err = autopilot.resume(&control).unwrap_err();
+    assert!(
+        err.contains("start the model server, then /repair 1 retry"),
+        "{err}"
+    );
+    assert!(err.ends_with("or /go GOAL starts a new loop"), "{err}");
+}
+
+#[test]
+fn resume_after_a_too_large_stop_keeps_the_generic_finished_text() {
+    let fixture = Fixture::new();
+    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let runtime = Runtime::new().unwrap();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return files_plan(&["a.py", "b.py"]);
+        }
+        good_calc()
+    });
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "too-large",
+        finished,
+    );
+    assert!(autopilot.reentrant_run(&control).is_none());
+    assert_eq!(
+        autopilot.resume(&control).unwrap_err(),
+        "Autopilot already finished; /go GOAL starts a new loop"
+    );
+}
+
+#[test]
 fn repair_after_an_unreachable_stop_reenters_the_loop_runs_dependents_and_integrates() {
     let fixture = Fixture::new();
     let head = fixture.head();
@@ -2841,6 +2901,100 @@ fn plan_takes_a_pasted_multi_line_request_like_the_one_line_form() {
         "{:?}",
         server.prompts()
     );
+}
+
+/// Issue #751: the interactive path builds the planner request through `prepare_command`,
+/// so a pasted multi-line `/plan` must be joined there, not only in `command`.
+#[test]
+fn prepared_plan_takes_a_pasted_multi_line_request_and_sends_one_joined_prompt() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let intent = control
+        .prepare_command("/plan Fix the bug\r\rin calc.py", "fixture")
+        .unwrap()
+        .unwrap();
+    let Intent::Planner { request } = &intent else {
+        panic!("not a planner intent");
+    };
+    let alfredo_tui::planner_command::Operation::Generate { prompt, .. } = &request.operation
+    else {
+        panic!("not a generate operation");
+    };
+    assert_eq!(prompt, "Fix the bug in calc.py");
+    control.dispatch_prepared(&runtime, &intent).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(server.count(), 1);
+    assert!(
+        server.prompts()[0].contains("Fix the bug in calc.py"),
+        "{:?}",
+        server.prompts()
+    );
+}
+
+#[test]
+fn plan_followed_directly_by_a_newline_behaves_like_plan_with_a_space() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    control
+        .command(&runtime, "/plan\nFix the bug", "fixture")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(server.count(), 1);
+    assert!(
+        server.prompts()[0].contains("Fix the bug"),
+        "{:?}",
+        server.prompts()
+    );
+}
+
+#[test]
+fn prepared_plan_followed_directly_by_a_newline_is_a_planner_request() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let intent = control
+        .prepare_command("/plan\nFix the bug", "fixture")
+        .unwrap();
+    assert!(matches!(intent, Some(Intent::Planner { .. })), "{intent:?}");
+}
+
+/// Issue #751: the capacity refusal comes before any request, whatever whitespace follows
+/// the verb, and a longer word is not the verb.
+#[test]
+fn prepared_plan_at_task_capacity_is_refused_for_any_whitespace_after_the_verb() {
+    let fixture = Fixture::new();
+    pad_tasks(&fixture.store, 256);
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let expected = alfredo_tui::tasks::capacity_refusal(256, 1);
+    for text in [
+        "/plan\nMake answer return 42",
+        "/plan-revise\nMake it smaller",
+        "/plan\tMake answer return 42",
+    ] {
+        assert_eq!(
+            control.prepare_command(text, "fixture").unwrap_err(),
+            expected,
+            "{text:?}"
+        );
+    }
+    assert_eq!(server.count(), 0);
 }
 
 #[test]

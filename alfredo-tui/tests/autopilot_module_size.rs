@@ -33,3 +33,41 @@ fn refusal_helpers_live_in_their_own_module() {
         );
     }
 }
+
+/// #742: clippy pedantic `must_use_candidate` flagged these public helpers;
+/// each must carry `#[must_use]` directly above its signature.
+#[test]
+fn public_helpers_are_must_use() {
+    let text = source("autopilot.rs");
+    let lines: Vec<&str> = text.lines().collect();
+    for name in [
+        "from_numstat",
+        "row",
+        "json",
+        "cancels_chat_turn",
+        "queue_held",
+        "settles_draft_after_command",
+        "finish_notice",
+        "stop_notice",
+    ] {
+        let needle = format!("pub fn {name}(");
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with(&needle))
+            .unwrap_or_else(|| panic!("autopilot.rs lacks {needle}"));
+        let mut i = at;
+        let mut found = false;
+        while i > 0 {
+            i -= 1;
+            let prev = lines[i].trim();
+            if prev == "#[must_use]" {
+                found = true;
+                break;
+            }
+            if !prev.starts_with("#[") && !prev.starts_with("///") {
+                break;
+            }
+        }
+        assert!(found, "pub fn {name} in autopilot.rs lacks #[must_use]");
+    }
+}
