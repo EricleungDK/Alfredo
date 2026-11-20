@@ -80,6 +80,14 @@ class FlagTests(unittest.TestCase):
         for text in ('`/plan-revise`', 'tabs', 'vertical tabs', 'form feeds'):
             self.assertIn(text, section)
 
+    def test_reference_states_the_combined_bound_for_plan_revise(self):
+        text = " ".join((ROOT / "alfredo-tui/docs/reference.md").read_text(encoding="utf-8").split())
+        for phrase in (
+            "the draft's prompt, then ` | Revision request: ` (21 bytes), then your request, stay within 8192 bytes",
+            "Revision would make the plan prompt N bytes; the limit is 8192. Use a shorter request, or /plan a fresh one",
+        ):
+            self.assertIn(phrase, text)
+
     def test_headless_chat_stdin_prompt_is_documented(self):
         # Issue #549: `--chat -` reads the prompt from stdin (256 KiB, UTF-8, nonempty).
         reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')

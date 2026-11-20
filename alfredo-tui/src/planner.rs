@@ -283,6 +283,19 @@ const GOAL_MARKERS: [&str; 3] = [
     " | Revision request: ",
 ];
 
+/// The plan prompt a `/plan-revise` request produces: the draft's prompt plus the
+/// revision marker and request, or the refusal when that exceeds the 8192-byte bound.
+fn revision_prompt(plan_prompt: &str, request: &str) -> Result<String, String> {
+    let prompt = format!("{plan_prompt} | Revision request: {}", request.trim());
+    if prompt.len() > 8192 {
+        return Err(format!(
+            "Revision would make the plan prompt {} bytes; the limit is 8192. Use a shorter request, or /plan a fresh one",
+            prompt.len()
+        ));
+    }
+    Ok(prompt)
+}
+
 /// The user's original goal from a plan request, without planner retry text.
 pub fn goal(prompt: &str) -> &str {
     let end = GOAL_MARKERS
@@ -342,10 +355,15 @@ impl Planner {
             if self.active() {
                 return Err("Wait for the current plan before revising it".into());
             }
+            let prompt = crate::planner_command::request_text(prompt)?;
+            let base = base.ok_or("No complete draft to revise")?;
+            if let Some(plan) = &self.draft {
+                revision_prompt(&plan.prompt, &prompt)?;
+            }
             Operation::Revise {
-                prompt: crate::planner_command::request_text(prompt)?,
+                prompt,
                 revision: snapshot.revision,
-                base_sha256: base.ok_or("No complete draft to revise")?,
+                base_sha256: base,
             }
         } else if let Some(id) = text.strip_prefix("/architect-revise ") {
             if self.active() || self.draft.is_some() {
@@ -627,6 +645,7 @@ impl Planner {
             .clone()
             .ok_or("No complete draft to revise; use /plan REQUEST first")?;
         plan.validate()?;
+        let prompt = revision_prompt(&plan.prompt, request)?;
         let reference = serde_json::to_string(&plan.tasks).map_err(|e| e.to_string())?;
         if reference.len() > 64 * 1024 {
             return Err(
@@ -643,7 +662,7 @@ impl Planner {
             runtime,
             provider,
             GenerationRequest {
-                prompt: format!("{} | Revision request: {}", plan.prompt, request.trim()),
+                prompt,
                 model: plan.planner,
                 revision,
                 reference: Some(reference),

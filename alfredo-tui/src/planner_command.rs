@@ -103,6 +103,10 @@ pub fn verb_argument<'a>(text: &'a str, verb: &str) -> Option<&'a str> {
     rest.starts_with(char::is_whitespace).then_some(rest)
 }
 /// A `/plan` or `/plan-revise` request as one line, or the refusal that names why not.
+///
+/// # Errors
+/// Returns the [`goal_refusal`] message when the request is empty, has a control
+/// character, or is over 8192 bytes.
 pub fn request_text(raw: &str) -> Result<String, String> {
     let request = normalise_goal(raw);
     match goal_refusal("Request", &request, 8192) {
