@@ -91,6 +91,11 @@ Other control characters (such as ESC, NUL or DEL) are still refused, and the re
 so, as does a goal over 4096 bytes after joining; a `/plan` or `/plan-revise` request over
 8192 bytes says `Request is N bytes; the limit is 8192 bytes`.
 
+A `/plan-revise` request also has to fit the whole plan prompt: the draft's prompt, then ` | Revision request: `
+(21 bytes), then your request, stay within 8192 bytes. When they would not, it refuses before asking
+the planner, keeps the draft, and says `Revision would make the plan prompt N bytes; the limit is 8192.
+Use a shorter request, or /plan a fresh one`.
+
 In the interactive TUI, the denied-sandbox refusal of `/go` and `/run` is shown as chat rows with the whole sentence (bwrap's stderr without a trailing period, then the host-policy fix and the README Troubleshooting pointer) and a footer that leads with the fix: `/go refused: allow bubblewrap user namespaces · see README Troubleshooting`.
 
 In the interactive TUI, a bare `/go` that the unattended plan lint refuses is shown the same way: the chat rows carry the whole finding (without a doubled period) and `Fix it with /plan-revise (draft) or run it by hand with /approve`, and the footer reads `/go refused: the plan fails the unattended lint (see the chat rows above)`. From the task view (F2) `/go` returns to the chat view so the rows are visible.
