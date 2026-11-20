@@ -1393,7 +1393,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 completion.set_query(query);
                                 continue;
                             }
-                            // F1 picker: page and jump through the catalog instead of closing.
                             _ => work.app.completion = None,
                         }
                     }
