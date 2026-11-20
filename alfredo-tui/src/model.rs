@@ -995,7 +995,7 @@ impl Session {
         if text.is_empty() {
             return Err("Enter a prompt");
         }
-        if text.starts_with('/') {
+        if crate::commands::is_command_token(&text) {
             return Err("Commands cannot be queued; press Enter again when the reply ends");
         }
         let held: usize = self.queue.iter().map(String::len).sum();

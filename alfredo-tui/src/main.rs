@@ -820,7 +820,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         } else if eligible {
                             if turn.messages.last().is_some_and(|message| {
-                                message.content.trim_start().starts_with('/')
+                                alfredo_tui::commands::is_command_token(&message.content)
                             }) {
                                 work.app.sessions[turn.session].wayfinder_reply(turn.attempt, "Wayfinder scope is already active. Inspect /scope, then resubmit the command explicitly. No task action taken.".into(), None);
                                 continue;
@@ -2132,7 +2132,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         KeyCode::Enter
-                            if work.app.sessions[index].draft.trim_start().starts_with('/') =>
+                            if alfredo_tui::commands::is_command_token(
+                                &work.app.sessions[index].draft,
+                            ) =>
                         {
                             work.app.models_visible = false;
                             let session = &mut work.app.sessions[index];

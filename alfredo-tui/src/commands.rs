@@ -151,6 +151,14 @@ pub const CAPABILITIES: &[(&str, &str)] = &[(
     "request — discuss project scope; confirmation stays explicit",
 )];
 
+/// Whether `text` (leading whitespace ignored) is a slash command rather than chat: its first
+/// token starts with `/` and has no second `/`. A path-first prompt such as `/etc/hosts what
+/// is this` or `//go` is chat text (issue #744); no command name contains a second `/`.
+pub fn is_command_token(text: &str) -> bool {
+    let first = text.split_whitespace().next().unwrap_or("");
+    first.starts_with('/') && !first[1..].contains('/')
+}
+
 /// Only actual native capability routes are admitted; unknown names never go to inference.
 pub fn capability_prompt(text: &str) -> Result<Option<&str>, String> {
     let text = text.trim_start();
@@ -290,7 +298,7 @@ impl Completion {
     /// Live type-ahead for a draft that is one token starting with `/`: prefix matches
     /// first, then substring matches, each with its usage hint.
     pub fn typeahead(draft: &str) -> Option<Self> {
-        if !draft.starts_with('/') || draft.chars().any(char::is_whitespace) {
+        if !is_command_token(draft) || draft.chars().any(char::is_whitespace) {
             return None;
         }
         let mut ranked: Vec<_> = COMMANDS
@@ -382,7 +390,7 @@ impl Completion {
         self.query = query;
     }
     pub fn open(draft: &str) -> Option<Self> {
-        if !(draft.starts_with('/') || draft.starts_with('@'))
+        if !(is_command_token(draft) || draft.starts_with('@'))
             || draft.chars().any(char::is_whitespace)
         {
             return None;
@@ -420,7 +428,7 @@ impl Completion {
         Some((&draft[..draft.len() - prefix.len()], prefix))
     }
     pub fn accepts(draft: &str) -> bool {
-        ((draft.starts_with('/') || draft.starts_with('@'))
+        ((is_command_token(draft) || draft.starts_with('@'))
             && !draft.chars().any(char::is_whitespace))
             || Self::model_argument(draft).is_some()
     }

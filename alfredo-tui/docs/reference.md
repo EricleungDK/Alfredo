@@ -1490,6 +1490,9 @@ submitting it; Esc closes the list and keeps the text; backspacing past `/` clos
 A fully typed command name still submits on Enter, and a message that is a path
 (`/path/in/chat ...`, with a space) or plain text and `@` mentions are unaffected.
 In the F1 picker, typing filters the list the same way (Backspace edits the filter).
+A first word with a second `/` (`/etc/hosts what is this`, `//go`) is a file path, not a
+command (issue #744): Enter sends it to the model as chat text, a running turn queues it
+like any chat text, and no completions are offered. A mistyped `/gp` is still `Unknown command`.
 
 ## Installed-model completion
 
