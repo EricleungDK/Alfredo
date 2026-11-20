@@ -90,6 +90,31 @@ class FlagTests(unittest.TestCase):
         self.assertIn('| `text` | `--chat` |', section)
         self.assertIn('`delta`', section)
 
+    def test_root_readme_flag_rows_match_reference_event_stream_and_scope(self):
+        # Issue #771: README --output-format row names every stream-json event;
+        # --max-repairs / --on-finish rows state the --chat/--doctor exit 2 scope.
+        import re
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        start = reference.index('### Event stream: `--output-format stream-json`')
+        section = reference[start:reference.index('\n### ', start + 10)]
+        events = [e for e in re.findall(r'^\| `([a-z_]+)` \|', section, re.M) if e != 'type']
+        self.assertIn('text', events)
+        self.assertIn('result', events)
+        rows = {}
+        for line in (ROOT / 'README.md').read_text(encoding='utf-8').splitlines():
+            for flag in ('--output-format', '--max-repairs', '--on-finish'):
+                if line.startswith('| `' + flag):
+                    rows[flag] = ' '.join(line.split()).split(' | ', 2)[2]  # description cell
+        self.assertEqual(sorted(rows), ['--max-repairs', '--on-finish', '--output-format'])
+        for event in events:
+            self.assertIn('`' + event + '`', rows['--output-format'],
+                          'README --output-format row lacks event ' + event)
+        for flag in ('--max-repairs', '--on-finish'):
+            row = rows[flag]
+            self.assertIn('only', row, flag)
+            for word in ('`--go`', '`--resume`', 'terminal', '`--chat`', '`--doctor`', 'exits 2'):
+                self.assertIn(word, row, flag + ' row lacks ' + word)
+
     def test_reference_states_the_combined_bound_for_plan_revise(self):
         text = " ".join((ROOT / "alfredo-tui/docs/reference.md").read_text(encoding="utf-8").split())
         for phrase in (
