@@ -136,10 +136,11 @@ class FlagTests(unittest.TestCase):
         reference = ' '.join((ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8').split())
         self.assertIn('counts only directly after a creation verb', reference)
         self.assertIn('names the matched phrase', reference)
-        self.assertIn('with at most two of `a`, `an`, `another`, `brand`, `my`, `our` between them', reference)
+        self.assertIn('with at most three of `a`, `an`, `another`, `brand`, `my`, `our`, `me`, `us`, `whole`, `completely`, `entirely`, `totally` between them', reference)
         self.assertNotIn('within four words', reference)
         main = ' '.join((ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8').split())
         self.assertIn('starts Wayfinder only right after a creation verb and articles', main)
+        self.assertIn('me, us, whole, completely, entirely, totally', main)
 
     def test_masked_secret_files_are_documented_as_permission_denied(self):
         # Issue #582: /dev/null is bound nodev, so a masked file fails to open.
