@@ -372,6 +372,17 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.fixture.release_app.set()
         self.quit(terminal)
 
+    def test_a_pasted_multi_line_plan_request_sends_one_planner_request_with_the_lines_joined(self):
+        # Issue #751: /plan goes through Planner::prepare_command, which used to refuse any line break.
+        self.fixture.release_app.set()
+        terminal = self.terminal(resume=False)
+        terminal.send(b'\x1b[200~/plan Fix the bug\rin calc.py\x1b[201~\r')
+        self.wait_until('planner asked', lambda: 'PLAN' in self.fixture.markers(), 60)
+        self.assertEqual(len(self.fixture.plan_prompts), 1)
+        self.assertIn('Fix the bug in calc.py', self.fixture.plan_prompts[0])
+        self.assertNotIn('Invalid planner command', terminal.screen())
+        self.quit(terminal)
+
     def test_stop_then_resume_runs_the_cancelled_task_again_without_a_repair(self):
         terminal = self.terminal(resume=False)
         terminal.send('/go Make answer return 42 and add app\r')

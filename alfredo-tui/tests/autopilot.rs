@@ -2903,6 +2903,100 @@ fn plan_takes_a_pasted_multi_line_request_like_the_one_line_form() {
     );
 }
 
+/// Issue #751: the interactive path builds the planner request through `prepare_command`,
+/// so a pasted multi-line `/plan` must be joined there, not only in `command`.
+#[test]
+fn prepared_plan_takes_a_pasted_multi_line_request_and_sends_one_joined_prompt() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let intent = control
+        .prepare_command("/plan Fix the bug\r\rin calc.py", "fixture")
+        .unwrap()
+        .unwrap();
+    let Intent::Planner { request } = &intent else {
+        panic!("not a planner intent");
+    };
+    let alfredo_tui::planner_command::Operation::Generate { prompt, .. } = &request.operation
+    else {
+        panic!("not a generate operation");
+    };
+    assert_eq!(prompt, "Fix the bug in calc.py");
+    control.dispatch_prepared(&runtime, &intent).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(server.count(), 1);
+    assert!(
+        server.prompts()[0].contains("Fix the bug in calc.py"),
+        "{:?}",
+        server.prompts()
+    );
+}
+
+#[test]
+fn plan_followed_directly_by_a_newline_behaves_like_plan_with_a_space() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    control
+        .command(&runtime, "/plan\nFix the bug", "fixture")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(server.count(), 1);
+    assert!(
+        server.prompts()[0].contains("Fix the bug"),
+        "{:?}",
+        server.prompts()
+    );
+}
+
+#[test]
+fn prepared_plan_followed_directly_by_a_newline_is_a_planner_request() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let intent = control
+        .prepare_command("/plan\nFix the bug", "fixture")
+        .unwrap();
+    assert!(matches!(intent, Some(Intent::Planner { .. })), "{intent:?}");
+}
+
+/// Issue #751: the capacity refusal comes before any request, whatever whitespace follows
+/// the verb, and a longer word is not the verb.
+#[test]
+fn prepared_plan_at_task_capacity_is_refused_for_any_whitespace_after_the_verb() {
+    let fixture = Fixture::new();
+    pad_tasks(&fixture.store, 256);
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let expected = alfredo_tui::tasks::capacity_refusal(256, 1);
+    for text in [
+        "/plan\nMake answer return 42",
+        "/plan-revise\nMake it smaller",
+        "/plan\tMake answer return 42",
+    ] {
+        assert_eq!(
+            control.prepare_command(text, "fixture").unwrap_err(),
+            expected,
+            "{text:?}"
+        );
+    }
+    assert_eq!(server.count(), 0);
+}
+
 #[test]
 fn plan_refuses_other_control_characters_and_says_line_breaks_are_fine() {
     let fixture = Fixture::new();

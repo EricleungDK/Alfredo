@@ -317,9 +317,9 @@ impl Planner {
         use crate::planner_command::{Operation, Request};
         let text = text.trim();
         // Before any planner request: with no free slot nothing generated could be saved.
-        if ["/plan ", "/plan-revise ", "/architect-revise "]
+        if ["/plan", "/plan-revise", "/architect-revise"]
             .iter()
-            .any(|verb| text.starts_with(verb))
+            .any(|verb| crate::planner_command::verb_argument(text, verb).is_some())
             && snapshot.free_task_slots() == 0
         {
             return Err(crate::tasks::capacity_refusal(snapshot.tasks.len(), 1));
@@ -338,12 +338,12 @@ impl Planner {
                 generation: self.generation.clone(),
                 draft_sha256: base,
             }
-        } else if let Some(prompt) = text.strip_prefix("/plan-revise ") {
+        } else if let Some(prompt) = crate::planner_command::verb_argument(text, "/plan-revise") {
             if self.active() {
                 return Err("Wait for the current plan before revising it".into());
             }
             Operation::Revise {
-                prompt: prompt.trim().into(),
+                prompt: crate::planner_command::request_text(prompt)?,
                 revision: snapshot.revision,
                 base_sha256: base.ok_or("No complete draft to revise")?,
             }
@@ -356,12 +356,12 @@ impl Planner {
                 origin: snapshot.architecture_origin(task)?,
                 revision: snapshot.revision,
             }
-        } else if let Some(prompt) = text.strip_prefix("/plan ") {
+        } else if let Some(prompt) = crate::planner_command::verb_argument(text, "/plan") {
             if self.active() {
                 return Err("Wait for the current plan or explicitly cancel it first".into());
             }
             Operation::Generate {
-                prompt: prompt.trim().into(),
+                prompt: crate::planner_command::request_text(prompt)?,
                 model: model.into(),
                 revision: snapshot.revision,
                 base_sha256: base,

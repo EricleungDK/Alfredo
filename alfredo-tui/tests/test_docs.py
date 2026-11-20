@@ -76,6 +76,9 @@ class FlagTests(unittest.TestCase):
         section = reference[start:end]
         for text in ('each run of line breaks in a goal becomes one space', '--go "$(cat task.md)"', '4096 bytes'):
             self.assertIn(text, section)
+        # Issue #751: /plan-revise and tabs join too.
+        for text in ('`/plan-revise`', 'tabs', 'vertical tabs', 'form feeds'):
+            self.assertIn(text, section)
 
     def test_headless_chat_stdin_prompt_is_documented(self):
         # Issue #549: `--chat -` reads the prompt from stdin (256 KiB, UTF-8, nonempty).

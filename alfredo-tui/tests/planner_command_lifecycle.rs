@@ -202,6 +202,179 @@ fn planner_command_normalise_goal_joins_each_run_of_line_breaks_with_one_space()
     }
 }
 
+/// Issue #751: tab, vertical tab, form feed and NEL join like line breaks.
+#[test]
+fn planner_command_normalise_goal_joins_tabs_and_other_separators_like_line_breaks() {
+    use alfredo_tui::planner_command::normalise_goal;
+    for (pasted, one_line) in [
+        ("a\tb\n\t- c", "a b - c"),
+        ("a\tb", "a b"),
+        ("a\x0bb", "a b"),
+        ("a\x0cb", "a b"),
+        ("a\u{85}b", "a b"),
+        ("Fix:\n\t- x", "Fix: - x"),
+        ("a\t\t\x0b\x0cb", "a b"),
+    ] {
+        assert_eq!(normalise_goal(pasted), one_line, "{pasted:?}");
+    }
+    // ESC, NUL and DEL are not separators: they stay, to be refused.
+    for kept in ["a\x1bb", "a\0b", "a\x7fb"] {
+        assert_eq!(normalise_goal(kept), kept);
+    }
+}
+
+fn prompt_of(request: &alfredo_tui::planner_command::Request) -> &str {
+    use alfredo_tui::planner_command::Operation;
+    match &request.operation {
+        Operation::Generate { prompt, .. } | Operation::Revise { prompt, .. } => prompt,
+        other => panic!("not a prompt operation: {other:?}"),
+    }
+}
+
+/// A planner holding one finished draft, so `/plan-revise` has a base.
+fn drafted(fixture: &Fixture, runtime: &tokio::runtime::Runtime) -> alfredo_tui::planner::Planner {
+    let mut planner = alfredo_tui::planner::Planner::default();
+    let snapshot = fixture.store.snapshot().unwrap();
+    let request = planner
+        .prepare_command("first", "/plan Implement calculation", "fixture", &snapshot)
+        .unwrap()
+        .unwrap();
+    let (provider, job, _) = server_capture(
+        serde_json::json!({"tasks": plan().tasks}).to_string(),
+        true,
+        Duration::ZERO,
+    );
+    planner
+        .dispatch_command(runtime, provider, &request, fixture.store.clone())
+        .unwrap();
+    wait(&mut planner);
+    job.join().unwrap();
+    assert!(planner.checkpoint().is_some());
+    planner
+}
+
+#[test]
+fn prepare_command_joins_a_pasted_multi_line_plan_request_with_single_spaces() {
+    let fixture = Fixture::new();
+    let planner = alfredo_tui::planner::Planner::default();
+    let snapshot = fixture.store.snapshot().unwrap();
+    for (pasted, joined) in [
+        ("/plan first line\rsecond line", "first line second line"),
+        ("/plan first line\nsecond line", "first line second line"),
+        ("/plan first line\r\nsecond line", "first line second line"),
+        ("/plan Fix:\n\t- x\n\t- y", "Fix: - x - y"),
+        ("/plan a\tb", "a b"),
+        ("/plan  \n lead\n\n", "lead"),
+    ] {
+        let request = planner
+            .prepare_command("c", pasted, "fixture", &snapshot)
+            .unwrap()
+            .unwrap();
+        assert_eq!(prompt_of(&request), joined, "{pasted:?}");
+    }
+}
+
+#[test]
+fn prepare_command_takes_plan_followed_directly_by_any_whitespace() {
+    let fixture = Fixture::new();
+    let planner = alfredo_tui::planner::Planner::default();
+    let snapshot = fixture.store.snapshot().unwrap();
+    for text in [
+        "/plan\nFix the bug",
+        "/plan\r\nFix the bug",
+        "/plan\tFix the bug",
+        "/plan Fix the bug",
+    ] {
+        let request = planner
+            .prepare_command("c", text, "fixture", &snapshot)
+            .unwrap()
+            .unwrap();
+        assert_eq!(prompt_of(&request), "Fix the bug", "{text:?}");
+    }
+    // A longer command word is not the /plan prefix.
+    assert!(planner
+        .prepare_command("c", "/planet Fix", "fixture", &snapshot)
+        .unwrap()
+        .is_none());
+    assert!(planner
+        .prepare_command("c", "/plan", "fixture", &snapshot)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn prepare_command_refuses_a_plan_request_with_the_goal_refusal_wording() {
+    let fixture = Fixture::new();
+    let planner = alfredo_tui::planner::Planner::default();
+    let snapshot = fixture.store.snapshot().unwrap();
+    let long = format!("/plan {}", "y".repeat(9000));
+    assert_eq!(
+        planner.prepare_command("c", &long, "fixture", &snapshot),
+        Err("Request is 9000 bytes; the limit is 8192 bytes".to_string())
+    );
+    let multi = format!("/plan {}\n{}", "y".repeat(4100), "z".repeat(4100));
+    assert_eq!(
+        planner.prepare_command("c", &multi, "fixture", &snapshot),
+        Err("Request is 8201 bytes; the limit is 8192 bytes".to_string())
+    );
+    let at_limit = format!("/plan {}", "y".repeat(8192));
+    assert!(planner
+        .prepare_command("c", &at_limit, "fixture", &snapshot)
+        .unwrap()
+        .is_some());
+    for control in ["\x1b", "\0", "\x7f"] {
+        let error = planner
+            .prepare_command(
+                "c",
+                &format!("/plan Fix\n{control}bug"),
+                "fixture",
+                &snapshot,
+            )
+            .unwrap_err();
+        assert!(
+            error.starts_with("Request has a control character")
+                && error.contains("line breaks are fine but other control characters are not"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn prepare_command_joins_a_pasted_multi_line_plan_revise_request() {
+    let fixture = Fixture::new();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let planner = drafted(&fixture, &runtime);
+    let snapshot = fixture.store.snapshot().unwrap();
+    for (pasted, joined) in [
+        ("/plan-revise a\nb", "a b"),
+        ("/plan-revise a\r\n\tb", "a b"),
+        ("/plan-revise\nMake it smaller", "Make it smaller"),
+        ("/plan-revise\tMake it smaller", "Make it smaller"),
+    ] {
+        let request = planner
+            .prepare_command("r", pasted, "fixture", &snapshot)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            request.operation,
+            alfredo_tui::planner_command::Operation::Revise { .. }
+        ));
+        assert_eq!(prompt_of(&request), joined, "{pasted:?}");
+    }
+    let long = format!("/plan-revise {}", "y".repeat(9000));
+    assert_eq!(
+        planner.prepare_command("r", &long, "fixture", &snapshot),
+        Err("Request is 9000 bytes; the limit is 8192 bytes".to_string())
+    );
+    let error = planner
+        .prepare_command("r", "/plan-revise a\x1bb", "fixture", &snapshot)
+        .unwrap_err();
+    assert!(
+        error.starts_with("Request has a control character"),
+        "{error}"
+    );
+}
+
 #[test]
 fn planner_command_goal_refusal_names_the_rule_that_failed() {
     use alfredo_tui::planner_command::goal_refusal;
