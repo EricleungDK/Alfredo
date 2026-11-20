@@ -97,6 +97,30 @@ pub fn context_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
         .then(|| clean(&evidence.detail, 300))
 }
 
+/// What the owner fixes before retrying re-entrant stop `id` (issues #706, #722): the
+/// `--num-ctx` for a context stop, otherwise the model server.
+pub fn reentry_fix(tasks: &TaskControl, id: u64) -> &'static str {
+    let context = tasks
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.tasks.iter().find(|task| task.id == id))
+        .is_some_and(|head| context_failure(tasks, head).is_some());
+    if context {
+        "raise --num-ctx"
+    } else {
+        "start the model server"
+    }
+}
+
+/// The `/resume` refusal for a re-entrant stop of task `id` (#722): the cause's fix, then
+/// the `/repair` that retries it.
+pub fn reentry_resume_refusal(tasks: &TaskControl, id: u64) -> String {
+    format!(
+        "Autopilot already finished; {}, then /repair {id} retry, or /go GOAL starts a new loop",
+        reentry_fix(tasks, id)
+    )
+}
+
 pub const INTERRUPTED: &str = "run interrupted";
 
 /// Why an interrupted run cannot be recovered automatically.

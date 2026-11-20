@@ -316,3 +316,21 @@ fn help_headless_entry_says_it_opens_the_default_or_named_mission() {
         "{entry}"
     );
 }
+
+#[test]
+fn help_says_resume_headless_retries_a_context_too_small_stop() {
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    let entry = help
+        .lines()
+        .find(|line| line.starts_with("--resume --headless"))
+        .expect("the --resume --headless entry");
+    assert!(entry.contains("model-unreachable"), "{entry}");
+    assert!(
+        entry.contains("context-too-small") && entry.contains("--num-ctx"),
+        "{entry}"
+    );
+}

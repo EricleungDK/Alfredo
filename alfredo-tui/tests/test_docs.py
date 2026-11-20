@@ -116,6 +116,21 @@ class FlagTests(unittest.TestCase):
             self.assertNotIn("the default mission's paused run", section, heading)
             self.assertNotIn('on the repository\'s default mission,', section, heading)
 
+    def test_both_reentrant_stops_are_named_as_resume_headless_exceptions(self):
+        # Issue #722: a context-too-small stop retries like a model-unreachable one.
+        readme = (ROOT / 'README.md').read_text(encoding='utf-8')
+        line = next(l for l in readme.splitlines() if '`--resume --headless` continues' in l)
+        self.assertIn('--num-ctx', line)
+        reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
+        begin = reference.index('### Paused runs: `--resume --headless`')
+        section = ' '.join(reference[begin:reference.index('\n#', begin + 4)].split())
+        self.assertIn('`model-unreachable` stop', section)
+        self.assertIn('`context-too-small` stop', section)
+        self.assertIn('(repair budget, sandbox, file too large) still exit 2', section)
+        flat = ' '.join(reference.split())
+        self.assertIn('the retry itself counts as one repair beyond `--max-repairs`', flat)
+        self.assertNotIn('with no worker request and no further repair', flat)
+
     def test_new_app_wayfinder_rule_is_documented_as_a_verb_rule(self):
         # Issue #741: "the new app" alone is ordinary chat; a creation verb starts Wayfinder.
         reference = ' '.join((ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8').split())
