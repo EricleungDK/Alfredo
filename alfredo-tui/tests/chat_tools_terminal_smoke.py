@@ -577,6 +577,15 @@ class ChatTools(unittest.TestCase):
         users = [m['content'] for m in chats[0]['messages'] if m['role'] == 'user']
         self.assertEqual(users[-1], '/etc/hosts what is this')
 
+    def test_a_fix_prompt_that_mentions_a_new_app_reaches_the_model_with_tools(self):
+        # Issue #741: "the new app" without a creation verb is not a project start.
+        self.terminal.write(b'the new app crashes on startup, please fix it\r')
+        self.terminal.wait_for('SUMMARY_FROM_TOOL')
+        chats = self.fixture.chats()
+        self.assertGreaterEqual(len(chats), 1)
+        self.assertIn('read_file', self.tool_names(chats[0]))
+        self.assertNotIn('Wayfinder', self.terminal.screen())
+
     def test_a_tool_call_written_as_text_shows_the_notice_and_runs_nothing(self):
         # Issue #660: the reply stays as written, the footer says nothing ran, and Ctrl+R
         # asks again.

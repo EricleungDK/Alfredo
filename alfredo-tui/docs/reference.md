@@ -266,7 +266,8 @@ reason is autopilot's notice, so `/autopilot` and the saved state show it too. A
 an `--on-finish` hook is awaited (see Completion hook). SIGINT and SIGTERM stop the run as `/stop` does: workers are cancelled,
 the state is kept paused and `/resume` in the TUI or `--resume --headless` continues it. A second signal during the drain reports at once; a runtime error after launch
 stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
-refused (exit 2) because headless has no scope flow. Not covered yet: a
+refused (exit 2) because headless has no scope flow; a "build a new app" goal's refusal names the
+matched phrase and says to rephrase it as a coding goal or use the terminal. Not covered yet: a
 goal from stdin and streaming output.
 
 Each conversation keeps at most 512 saved commands and 512 KiB of command history
@@ -496,8 +497,12 @@ In a reply a zero-width joiner in an emoji sequence shows as `<U+200D>` and a va
 ## Establish scope in conversation
 
 Describe a new project or a planned architectural change (for example "plan a
-migration", "redesign the architecture", "new app") to enter Wayfinder Chart mode.
-The bare words "migration" or "architecture" in an ordinary request do not enter it. A reference such as “Wayfinder ticket #42” enters Work-through. Ordinary
+migration", "redesign the architecture", "build a new app") to enter Wayfinder Chart mode.
+The bare words "migration" or "architecture" in an ordinary request do not enter it. A "new
+app", "new application", "new service", "new project", "new repository" or "new product" counts only
+after a creation verb within four words (build, create, make, start, scaffold, bootstrap,
+develop, generate, set up, spin up, write, init) or at the start of the text ("new app: todo list");
+"fix the new app crash" is an ordinary request. A reference such as “Wayfinder ticket #42” enters Work-through. Ordinary
 read-only questions stay outside automatic entry. A saved flow continues across
 missions and restarts. New-project `/plan`, `/task` and `/after` requests also enter
 this flow before creating work.

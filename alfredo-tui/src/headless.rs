@@ -350,7 +350,10 @@ pub fn run(options: Options) -> Result<i32, String> {
         mission,
     } = options;
     if !resume && alfredo_tui::wayfinder::entry_mode(&goal).is_some() {
-        return Err("Wayfinder goals need the interactive terminal; state a coding goal".into());
+        return Err(match alfredo_tui::wayfinder::project_start_phrase(&goal) {
+            Some(phrase) => format!("Wayfinder goals need the interactive terminal; \"{phrase}\" reads as a project start. Rephrase it as a coding goal, or use the terminal"),
+            None => "Wayfinder goals need the interactive terminal; state a coding goal".into(),
+        });
     }
     let choice = runtime
         .block_on(alfredo_tui::selection::headless_choice(

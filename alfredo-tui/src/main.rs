@@ -2624,7 +2624,7 @@ const HELP_LINES: &[&str] = &[
     "/go GOAL · /go (runs the open or saved /plan, no re-planning) · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)",
     "/task description · /after 1,2 description · /approve ID · /cancel-task ID",
     "/permit ID JSON · /run ID · /evidence ID · /recover ID [requeue] · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /requeue ID · /resolve-repair ID · /branch ID",
-    "@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry · /scope-clear",
+    "@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry · /scope-clear · \"new app/service/project\" starts Wayfinder only after a creation verb (\"build a new app\")",
     "/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel (Esc too, while a request generates) · /assign ID MODEL · /dispatch on|off",
     "/watch ID|architect · /tell ID|architect TEXT",
     "@path in a chat prompt attaches that file's working-tree text (8 mentions, 32 KiB per prompt; no spaces or quotes in the path; secrets, symlinks, ignored, binary and files over 256 KiB are refused); each refusal is listed in the transcript",
