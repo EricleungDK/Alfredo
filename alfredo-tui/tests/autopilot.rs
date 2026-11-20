@@ -2004,6 +2004,66 @@ fn unreachable_two_task_run(
 }
 
 #[test]
+fn resume_after_a_reentrant_stop_names_repair_retry() {
+    let fixture = Fixture::new();
+    let server = two_task_server();
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, control) = context_two_task_run(&fixture, &server, &runtime);
+    let err = autopilot.resume(&control).unwrap_err();
+    assert!(err.contains("/repair 1 retry"), "{err}");
+    assert!(
+        err.contains("raise --num-ctx, then /repair 1 retry"),
+        "{err}"
+    );
+    assert!(err.ends_with("or /go GOAL starts a new loop"), "{err}");
+}
+
+#[test]
+fn resume_after_an_unreachable_stop_names_the_model_server_and_repair_retry() {
+    let fixture = Fixture::new();
+    let down = Arc::new(AtomicBool::new(true));
+    let server = flaky_server(down, false);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, control) = unreachable_two_task_run(&fixture, &server, &runtime, 2);
+    let err = autopilot.resume(&control).unwrap_err();
+    assert!(
+        err.contains("start the model server, then /repair 1 retry"),
+        "{err}"
+    );
+    assert!(err.ends_with("or /go GOAL starts a new loop"), "{err}");
+}
+
+#[test]
+fn resume_after_a_too_large_stop_keeps_the_generic_finished_text() {
+    let fixture = Fixture::new();
+    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let runtime = Runtime::new().unwrap();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return files_plan(&["a.py", "b.py"]);
+        }
+        good_calc()
+    });
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "too-large",
+        finished,
+    );
+    assert!(autopilot.reentrant_run(&control).is_none());
+    assert_eq!(
+        autopilot.resume(&control).unwrap_err(),
+        "Autopilot already finished; /go GOAL starts a new loop"
+    );
+}
+
+#[test]
 fn repair_after_an_unreachable_stop_reenters_the_loop_runs_dependents_and_integrates() {
     let fixture = Fixture::new();
     let head = fixture.head();
