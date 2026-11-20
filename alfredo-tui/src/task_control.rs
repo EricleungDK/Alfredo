@@ -2725,6 +2725,19 @@ mod refusal_notice_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn an_unacknowledged_architect_source_is_refused_and_kept() {
+        let (mut control, root) = control();
+        control.snapshot = Some(control.store.snapshot().unwrap());
+        control.architecture_launch = control.retry.clone();
+        assert_eq!(
+            control.prepare_architect().unwrap_err(),
+            "Architect source review has not been acknowledged"
+        );
+        assert!(control.architecture_launch.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn dispatching() -> (TaskControl, std::path::PathBuf) {
         let (mut control, root) = control();
         control.dispatch.enabled = true;
