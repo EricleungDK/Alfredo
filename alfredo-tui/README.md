@@ -39,7 +39,8 @@ Opens straight into the repository root, mission `default`. Then either:
 /branch 1
 ```
 
-F1 on an empty prompt lists every command. Most used:
+F1 on an empty prompt lists every command (PgUp/PgDn page the list, Home/End jump; with a
+draft F1 keeps it and says `Ctrl+U` clears it). Most used:
 
 | Command | Purpose |
 | --- | --- |
