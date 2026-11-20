@@ -363,8 +363,8 @@ fn a_new_app_pair_starts_wayfinder_only_after_a_creation_verb_or_at_the_start() 
     assert_eq!(entry_mode("build an old app"), None);
 }
 
-/// Issue #752: only article/filler words (`a`, `an`, `another`, `brand`, `my`, `our`; at most
-/// two) may sit between the creation verb and "new", so everyday coding prompts that contain
+/// Issue #752: only article/filler words (`a`, `an`, `another`, `brand`, `my`, `our`, plus #763's
+/// `me`, `us` and intensifiers; at most three) may sit between the creation verb and "new", so everyday coding prompts that contain
 /// `write`, `make` or `start` near "the new app" stay ordinary chat.
 #[test]
 fn only_filler_words_may_sit_between_the_creation_verb_and_new() {
@@ -401,8 +401,8 @@ fn only_filler_words_may_sit_between_the_creation_verb_and_new() {
         assert_eq!(project_start_phrase(prompt).as_deref(), Some(phrase));
     }
     assert_eq!(entry_mode("new app: todo"), Some(Mode::Chart));
-    // Three filler words, or filler before a non-verb, do not reach a verb.
-    assert_eq!(entry_mode("build a my our new app"), None);
+    // Four filler words, or filler before a non-verb, do not reach a verb (issue #763: cap 3).
+    assert_eq!(entry_mode("build a my our brand new app"), None);
     assert_eq!(entry_mode("tests a brand new app"), None);
     // "up" bridges only after "set"/"spin", and "set" alone is no verb; a bare leading "up" is safe.
     assert_eq!(entry_mode("give up a new app"), None);
@@ -410,7 +410,7 @@ fn only_filler_words_may_sit_between_the_creation_verb_and_new() {
     assert_eq!(entry_mode("set a new app"), None);
     assert_eq!(entry_mode("spin a new app"), None);
     assert_eq!(entry_mode("a new app"), None);
-    // Exactly two filler words still reach the verb (at-3); the verb itself is not filler.
+    // Exactly two filler words still reach the verb; the verb itself is not filler.
     assert_eq!(entry_mode("make my own new app"), None);
     assert_eq!(entry_mode("build our brand new app"), Some(Mode::Chart));
 }

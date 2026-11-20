@@ -13,16 +13,31 @@ use tokio::{runtime::Runtime, task::JoinHandle};
 static IDS: AtomicU64 = AtomicU64::new(0);
 
 /// Words that may sit between a creation verb and `new` ("create a brand new service").
-/// `the` is not one: "write tests for the new service" is ordinary chat (issue #752).
+/// `the` is not one: "write tests for the new service" is ordinary chat (issue #752). The
+/// indirect-object pronouns `me`/`us` and the intensifiers `whole`, `completely`, `entirely`,
+/// `totally` are ("build me a new app", "build a whole new app"; issue #763).
 fn is_filler(word: &str) -> bool {
-    matches!(word, "a" | "an" | "another" | "brand" | "my" | "our")
+    matches!(
+        word,
+        "a" | "an"
+            | "another"
+            | "brand"
+            | "my"
+            | "our"
+            | "me"
+            | "us"
+            | "whole"
+            | "completely"
+            | "entirely"
+            | "totally"
+    )
 }
 
 /// Index of the creation verb that starts the phrase ending at `new` (`at`): walk back over
-/// at most two filler words, then require the verb (`set up`/`spin up` count from `set`).
+/// at most three filler words, then require the verb (`set up`/`spin up` count from `set`).
 fn creation_verb_before(words: &[&str], at: usize) -> Option<usize> {
     let mut i = at;
-    for _ in 0..=2 {
+    for _ in 0..=3 {
         i = i.checked_sub(1)?;
         if matches!(
             words[i],
@@ -51,7 +66,7 @@ fn creation_verb_before(words: &[&str], at: usize) -> Option<usize> {
 }
 
 /// The phrase of a "new app/service/project/…" start: a creation verb directly before `new`
-/// with only article/filler words between (at most two), or `new <kind>` opening the text
+/// with only article/filler words between (at most three), or `new <kind>` opening the text
 /// (issues #741, #752). "fix the new app crash" and "write tests for the new service" are
 /// ordinary chat.
 fn new_project_phrase(words: &[&str]) -> Option<String> {
