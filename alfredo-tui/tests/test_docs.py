@@ -111,7 +111,7 @@ class FlagTests(unittest.TestCase):
                           'README --output-format row lacks event ' + event)
         for flag in ('--max-repairs', '--on-finish'):
             row = rows[flag]
-            self.assertIn('only', row, flag)
+            self.assertIn('only for', row.lower(), flag)
             for word in ('`--go`', '`--resume`', 'terminal', '`--chat`', '`--doctor`', 'exits 2'):
                 self.assertIn(word, row, flag + ' row lacks ' + word)
 
