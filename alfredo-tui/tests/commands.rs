@@ -207,6 +207,30 @@ fn quit_aliases_match_only_the_bare_commands_and_share_the_ctrl_q_steps() {
 }
 
 #[test]
+fn f1_picker_pages_and_jumps_without_wrapping() {
+    // Issue #758: PgUp/PgDn move by the visible page, Home/End jump to the ends.
+    let mut help = Completion::all();
+    let last = help.choices.len() - 1;
+    help.page(true, 5);
+    assert_eq!(help.selected, 5);
+    help.page(true, 5);
+    assert_eq!(help.selected, 10);
+    help.page(false, 5);
+    assert_eq!(help.selected, 5);
+    help.page(false, 50);
+    assert_eq!(help.selected, 0, "PgUp stops at the first choice");
+    help.page(true, 10_000);
+    assert_eq!(help.selected, last, "PgDn stops at the last choice");
+    help.page(true, 0);
+    assert_eq!(help.selected, last, "an empty page height still clamps");
+    help.first();
+    assert_eq!(help.selected, 0);
+    help.last();
+    assert_eq!(help.selected, last);
+    assert!(help.help, "paging keeps the picker open");
+}
+
+#[test]
 fn f1_picker_filters_by_typed_text() {
     let mut help = Completion::all();
     let total = help.choices.len();
