@@ -111,18 +111,17 @@ fn read_stdin_prompt(reader: impl std::io::Read) -> Result<String, String> {
 /// Issue #765: `--on-finish` and `--max-repairs` configure autopilot runs, so naming either
 /// with `--chat` or `--doctor` is refused rather than silently ignored. The environment
 /// variable is never explicit and never refuses.
-fn explicit_flag_refusal(
-    chat: bool,
-    doctor: bool,
-    on_finish_explicit: bool,
-    max_repairs_explicit: bool,
-) -> Option<&'static str> {
-    if !(chat || doctor) {
-        return None;
-    }
-    if on_finish_explicit {
+struct ExplicitFlags {
+    on_finish: bool,
+    max_repairs: bool,
+}
+
+fn explicit_flag_refusal(autopilot_free: bool, explicit: &ExplicitFlags) -> Option<&'static str> {
+    if !autopilot_free {
+        None
+    } else if explicit.on_finish {
         Some("--on-finish applies only to --go, --resume or the terminal")
-    } else if max_repairs_explicit {
+    } else if explicit.max_repairs {
         Some("--max-repairs applies only to --go, --resume or the terminal")
     } else {
         None
@@ -351,10 +350,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--approve applies only to --chat PROMPT --headless".into());
     }
     if let Some(message) = explicit_flag_refusal(
-        chat_prompt.is_some(),
-        doctor,
-        on_finish_explicit,
-        max_repairs_explicit,
+        chat_prompt.is_some() || doctor,
+        &ExplicitFlags {
+            on_finish: on_finish_explicit,
+            max_repairs: max_repairs_explicit,
+        },
     ) {
         eprintln!("Error: {message}");
         std::process::exit(2);
