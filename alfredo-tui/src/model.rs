@@ -1403,14 +1403,12 @@ impl Session {
     /// backstop: cut results and arguments keep ordinary rounds far below it, and a dropped
     /// round leaves the retry note (issue #783).
     fn trim_earlier(&mut self) {
-        let mut total = self.earlier_bytes();
-        while let Some(mut oldest) = self.earlier_attempts.first_entry() {
-            if total <= MAX_EARLIER_BYTES {
-                break;
-            }
-            total -= oldest.get_mut().remove(0).bytes();
-            if oldest.get().is_empty() {
-                oldest.remove();
+        while self.earlier_bytes() > MAX_EARLIER_BYTES {
+            if let Some(mut oldest) = self.earlier_attempts.first_entry() {
+                oldest.get_mut().remove(0);
+                if oldest.get().is_empty() {
+                    oldest.remove();
+                }
             }
         }
     }
@@ -2013,10 +2011,7 @@ pub(crate) const EARLIER_RESULT_LINES: usize = 200;
 /// `result` cut to [`EARLIER_RESULT_LINES`] lines and [`EARLIER_RESULT_BYTES`] bytes (on a
 /// character boundary), with a closing row when something was dropped.
 pub(crate) fn cut_earlier_result(result: &str) -> String {
-    let mut limit = result.len().min(EARLIER_RESULT_BYTES);
-    while !result.is_char_boundary(limit) {
-        limit -= 1;
-    }
+    let limit = result.floor_char_boundary(EARLIER_RESULT_BYTES);
     let head = &result[..limit];
     let end = head
         .match_indices('\n')
@@ -2043,10 +2038,7 @@ pub(crate) fn cut_earlier_arguments(arguments: &mut serde_json::Value) {
         }
         if let serde_json::Value::String(text) = value {
             if text.len() > EARLIER_RESULT_BYTES {
-                let mut limit = EARLIER_RESULT_BYTES;
-                while !text.is_char_boundary(limit) {
-                    limit -= 1;
-                }
+                let limit = text.floor_char_boundary(EARLIER_RESULT_BYTES);
                 text.truncate(limit);
                 text.push_str("… (cut)");
             }

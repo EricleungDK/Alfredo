@@ -655,6 +655,9 @@ fn retry_cuts_a_moved_result_to_what_is_drawn_and_keeps_short_ones() {
         read(&"é".repeat(1025)),
         format!("{}\n… (cut)", "é".repeat(1024))
     );
+    // A character straddling byte 2048 is dropped whole: "a" then 1023 whole "é" fit.
+    let straddle = format!("a{}", "é".repeat(1100));
+    assert_eq!(read(&straddle), format!("a{}\n… (cut)", "é".repeat(1023)));
     // Bytes win over lines when the lines are long: 100 lines of 31 bytes.
     let long = format!("{}\n", "a".repeat(30)).repeat(100);
     assert_eq!(read(&long), format!("{}\n… (cut)", &long[..2048]));
@@ -800,6 +803,11 @@ fn retry_cuts_long_call_arguments_but_keeps_path_and_command() {
     assert_eq!(
         cut(serde_json::json!({"content": "é".repeat(1025)}))["content"],
         format!("{}{marker}", "é".repeat(1024))
+    );
+    let straddle = format!("a{}", "é".repeat(1100));
+    assert_eq!(
+        cut(serde_json::json!({"content": straddle}))["content"],
+        format!("a{}{marker}", "é".repeat(1023))
     );
     // Every long string is cut, not only `content`; short ones stay.
     let both = cut(serde_json::json!({"old": text(5000), "new": "short", "n": 7, "ok": true}));
