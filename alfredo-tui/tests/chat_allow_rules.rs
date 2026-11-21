@@ -1029,3 +1029,74 @@ fn a_sandboxed_prefix_card_says_any_arguments_are_allowed() {
     assert!(text.contains("ANY arguments"), "{text}");
     assert!(text.contains("sandboxed only"), "{text}");
 }
+
+fn dirs_card(tool: &str) -> Card {
+    Card {
+        tool: tool.into(),
+        arguments: json!({"path": "new/c.md", "content": "x\n"}),
+        kind: CardKind::Edit,
+        summary: format!("{tool} new/c.md (creates new directories)"),
+        preview: String::new(),
+        fingerprint: "/x/new/c.md:absent+dirs:new".into(),
+    }
+}
+
+/// Issue #780: a write_file card that creates directories says why `a` is missing, and
+/// pressing `a` on it names the same reason instead of "a always allows".
+#[test]
+fn a_directory_creating_write_card_says_why_a_is_not_offered() {
+    let reason = "creating directories always asks";
+    let dirs = dirs_card("write_file");
+    assert_eq!(allow::unavailable_reason(&dirs).as_deref(), Some(reason));
+    let text = screen(dirs.clone());
+    assert!(
+        text.contains(&format!(
+            "n deny · Esc cancels the turn (deny) · a not offered: {reason}"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("a always allow"), "{text}");
+    // The same call without new directories, and other tools, keep their offer.
+    let mut plain_write = dirs_card("write_file");
+    plain_write.fingerprint = "/x/new/c.md:absent".into();
+    assert_eq!(allow::unavailable_reason(&plain_write), None);
+    assert!(screen(plain_write.clone()).contains("a always allow"));
+    assert_eq!(allow::dirs_refusal(&plain_write), None);
+    let mut edit = dirs_card("edit_file");
+    edit.fingerprint = "/x/new/c.md:absent+dirs:new".into();
+    assert_eq!(allow::unavailable_reason(&edit), None);
+    assert_eq!(allow::dirs_refusal(&edit), None);
+    // A HOST reason wins over the directory reason.
+    let mut host = dirs_card("write_file");
+    host.kind = CardKind::Shell { escalated: true };
+    assert_eq!(
+        allow::unavailable_reason(&host).as_deref(),
+        Some("HOST runs always ask")
+    );
+    assert_eq!(allow::dirs_refusal(&host), None);
+    // Push and over-long commands keep their own key lines and notices.
+    let push = plain("git_push", CardKind::Push);
+    assert_eq!(allow::unavailable_reason(&push), None);
+    assert_eq!(allow::dirs_refusal(&push), None);
+    assert_eq!(allow::dirs_refusal(&shell(&"x".repeat(200), false)), None);
+    assert_eq!(allow::dirs_refusal(&shell("npm install", true)), None);
+    // The notice for `a` names the reason and never promises an always-allow.
+    let notice = allow::dirs_refusal(&dirs).unwrap();
+    assert_eq!(notice, format!("a not offered: {reason}; press y or n"));
+    assert!(!notice.contains("always allows"));
+}
+
+/// Issue #780: `a` on an armed, fully shown directory-creating card decides nothing: the
+/// card stays pending, no rule is added, and `y` still approves.
+#[test]
+fn a_on_a_directory_creating_card_decides_nothing_and_adds_no_rule() {
+    let mut session = pending(dirs_card("write_file"));
+    let armed = Instant::now() + approval::ARM + Duration::from_millis(1);
+    assert!(session.approval_key_answers(armed));
+    assert_eq!(session.answer_approval('a', armed), None);
+    assert!(session.pending_approval().is_some(), "card still pending");
+    let rules = rules_for_test();
+    assert!(rules.add_for(&dirs_card("write_file")).is_err());
+    assert!(rules.matching(&dirs_card("write_file")).is_none());
+    assert_eq!(session.answer_approval('y', armed), Some(Decision::Approve));
+}
