@@ -523,6 +523,27 @@ pub fn state_path(directory: &Path, conversation: &str) -> PathBuf {
     ))
 }
 
+/// Name the state file and the ways out of a refused one; the file is never touched.
+fn unreadable(path: &Path, problem: &str) -> String {
+    let path = path.display();
+    format!(
+        "{problem} ({path}); original preserved. Move it aside (mv \"{path}\" \"{path}.bad\") or start with --new-mission NAME"
+    )
+}
+
+/// Parse and validate saved state bytes; every refusal names `path` and the way out.
+fn parse(path: &Path, bytes: &[u8]) -> Result<Saved, String> {
+    if bytes.len() > MAX_STATE {
+        return Err(unreadable(path, "Autopilot state exceeds its size bound"));
+    }
+    let saved: Saved = serde_json::from_slice(bytes)
+        .map_err(|error| unreadable(path, &format!("Autopilot state is invalid ({error})")))?;
+    saved
+        .validate()
+        .map_err(|problem| unreadable(path, &problem))?;
+    Ok(saved)
+}
+
 /// Another mission's saved loop state as read by `peek`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Peek {
@@ -542,11 +563,7 @@ pub fn peek(path: &Path) -> Result<Option<Peek>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    if bytes.len() > MAX_STATE {
-        return Err("Autopilot state exceeds its size bound".into());
-    }
-    let saved: Saved = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    saved.validate()?;
+    let saved = parse(path, &bytes)?;
     let counts = (saved.total > 0).then_some((saved.done, saved.total));
     let word = match saved.phase {
         // A finished loop's saved report names its outcome.
@@ -611,13 +628,7 @@ impl Autopilot {
         let path = state_path(directory, conversation);
         let saved = match fs::read(&path) {
             Ok(bytes) => {
-                if bytes.len() > MAX_STATE {
-                    return Err("Autopilot state exceeds its size bound; file preserved".into());
-                }
-                let mut saved: Saved = serde_json::from_slice(&bytes).map_err(|error| {
-                    format!("Autopilot state is invalid ({error}); file preserved")
-                })?;
-                saved.validate()?;
+                let mut saved = parse(&path, &bytes)?;
                 if saved.active() {
                     saved.paused = true;
                     if saved.phase == Phase::Finishing {
