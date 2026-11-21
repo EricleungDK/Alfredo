@@ -2970,6 +2970,14 @@ out: `move it aside (mv "<path>" "<path>.bad")` and start again, or start with
 `--conversation NAME` to use another conversation. The same text appears on the
 `--doctor` `FAIL storage` line. Alfredo never modifies, moves or deletes the file itself.
 
+### Unreadable autopilot state
+
+A truncated, oversized or unsupported `autopilot-<hash>.json` (in the mission's
+`<state-dir>/rust-tasks-v1/<workspace-hash>/` directory) stops opening that mission
+with `--mission NAME` or headless `--resume`. The error names the absolute file path and
+one way out: `move it aside (mv "<path>" "<path>.bad")` and start again, or start with
+`--new-mission NAME`. Alfredo never modifies, moves or deletes the file itself.
+
 ### Selection history and recovery
 
 Workspace and mission choices save before creation or handoff. An in-process

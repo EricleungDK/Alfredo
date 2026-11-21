@@ -1,5 +1,6 @@
-use super::{clean, text};
+use super::{clean, text, Saved, MAX_STATE};
 use crate::{task_control::TaskControl, understanding};
+use std::path::Path;
 
 /// Autopilot approves without a human reading each policy, so it also refuses
 /// plans a reader would reject: checks that can only fail and unordered writers.
@@ -108,4 +109,25 @@ pub(super) fn scope_blocker(scope: &understanding::Snapshot, goal: &str) -> Resu
         "Scope draft {} awaits your review; inspect /scope and /scope-confirm {} (or revise it) before /go",
         scope.draft_revision, scope.draft_revision
     ))
+}
+
+/// Name the state file and the ways out of a refused one; the file is never touched.
+pub(super) fn unreadable(path: &Path, problem: &str) -> String {
+    let path = path.display();
+    format!(
+        "{problem} ({path}); original preserved. Move it aside (mv \"{path}\" \"{path}.bad\") or start with --new-mission NAME"
+    )
+}
+
+/// Parse and validate saved state bytes; every refusal names `path` and the way out.
+pub(super) fn parse(path: &Path, bytes: &[u8]) -> Result<Saved, String> {
+    if bytes.len() > MAX_STATE {
+        return Err(unreadable(path, "Autopilot state exceeds its size bound"));
+    }
+    let saved: Saved = serde_json::from_slice(bytes)
+        .map_err(|error| unreadable(path, &format!("Autopilot state is invalid ({error})")))?;
+    saved
+        .validate()
+        .map_err(|problem| unreadable(path, &problem))?;
+    Ok(saved)
 }
