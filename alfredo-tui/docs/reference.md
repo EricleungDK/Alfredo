@@ -2349,7 +2349,13 @@ rule `a` would add.
   `.pre-commit-config.yaml`, `.gitattributes` and `.gitmodules` at any depth, matched
   case-insensitively with `./` ignored (`./.GitHub/x.yml`, `sub/.husky/pre-commit`,
   `a/.gitattributes`). Other files (`docs/github.md`, `src/x.rs`) keep running by the rule.
-  Paths that reach these through a symlinked directory are not detected by this check.
+  The model's spelling and where the write lands both count: a symlinked directory alias
+  (`ci -> .github`, so `ci/workflows/ci.yml`) is protected, a workspace that itself lives
+  under a directory named `.idea` or `.cargo` is not (only the path below the workspace root
+  is judged), and so is whatever a protected name directly at the workspace root links to
+  (`.pre-commit-config.yaml -> tools/pc.yaml` protects `tools/pc.yaml`; `.husky -> hooks`
+  protects `hooks/`). Not detected: such a link below the root (`sub/.husky -> x`), and a
+  hard link to a protected file.
 - **Never push.** `git_push` cards (Push tier, `Tier::allowlistable` false) offer no `a`,
   and no rule matches them, including rules added by hand to the file. A `run_command`
   whose plain words invoke `git … push` (`git -C x push`, `git -c k=v push`, any path to

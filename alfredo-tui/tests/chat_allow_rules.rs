@@ -918,7 +918,7 @@ fn alias_root(tag: &str) -> PathBuf {
         fs::create_dir_all(root.join(sub)).unwrap();
     }
     fs::write(root.join(".github/workflows/ci.yml"), "name: ci\n").unwrap();
-    fs::write(root.join("docs/a.md"), "a\n").unwrap();
+    fs::write(root.join("docs/a.md"), "name: ci\n").unwrap();
     fs::write(root.join("tools/pc.yaml"), "repos: []\n").unwrap();
     fs::write(root.join("tools/other.yaml"), "x: 1\n").unwrap();
     fs::write(root.join("hooks/pre-commit"), "#!/bin/sh\n").unwrap();
@@ -1018,14 +1018,14 @@ fn a_root_protected_name_that_links_elsewhere_protects_its_target() {
     assert!(rules.matching(&ordinary).is_some());
     // y still writes it: the fingerprint re-check agrees with the card.
     let card = real_card(&root, "write_file", "tools/pc.yaml");
+    assert!(
+        chat_tools::undo::before(&root, &card).is_some(),
+        "undo keeps working"
+    );
     approval::apply(&root, &card).unwrap();
     assert_eq!(
         fs::read_to_string(root.join("tools/pc.yaml")).unwrap(),
         "z\n"
-    );
-    assert!(
-        chat_tools::undo::before(&root, &card).is_some(),
-        "undo keeps working"
     );
     let _ = fs::remove_dir_all(root);
 }

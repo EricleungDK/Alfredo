@@ -72,7 +72,7 @@ pub fn offered(card: &Card) -> bool {
 
 /// Directories whose files can run code or change git (issue #791), matched in any path
 /// component, case-insensitively.
-const PROTECTED_DIRS: [&str; 6] = [
+pub(super) const PROTECTED_DIRS: [&str; 6] = [
     ".github",
     ".husky",
     ".vscode",
@@ -81,7 +81,7 @@ const PROTECTED_DIRS: [&str; 6] = [
     ".cargo",
 ];
 /// Config files with the same reach, matched as the last path component.
-const PROTECTED_FILES: [&str; 4] = [
+pub(super) const PROTECTED_FILES: [&str; 4] = [
     ".gitlab-ci.yml",
     ".pre-commit-config.yaml",
     ".gitattributes",
@@ -103,14 +103,25 @@ pub fn protected(path: &str) -> bool {
             .is_some_and(|name| PROTECTED_FILES.contains(name))
 }
 
-/// Whether `card` is a write_file/edit_file on a [`protected`] path.
+/// Whether `card` is a write_file/edit_file on a [`protected`] path: by the name the model
+/// gave, by where the write lands (the card fingerprint starts with the resolved path below
+/// the workspace root, so a symlinked directory alias is seen), or because that target is what
+/// a protected name at the root links to ([`super::edit::ALIASED`]).
 fn protects(card: &Card) -> bool {
+    let resolved = card
+        .fingerprint
+        .split("+dirs:")
+        .next()
+        .and_then(|state| state.rsplit_once(':'))
+        .map(|(path, _)| path);
     matches!(card.tool.as_str(), "write_file" | "edit_file")
-        && card
+        && (card
             .arguments
             .get("path")
             .and_then(|path| path.as_str())
             .is_some_and(protected)
+            || resolved.is_some_and(protected)
+            || card.fingerprint.ends_with(super::edit::ALIASED))
 }
 
 /// Whether a shell command may run `git push`: a `git` word (any path) followed later

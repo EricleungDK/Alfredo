@@ -203,7 +203,8 @@ pub fn before(root: &Path, card: &Card) -> Option<Capture> {
         Ok(_) => {
             let bytes = read_nofollow(&target, MAX_PREIMAGE).ok()?;
             // Only the state the card showed; anything else is refused by `apply` anyway.
-            if card.fingerprint != format!("{path}:{}", sha(&bytes))
+            if card.fingerprint.trim_end_matches(super::edit::ALIASED)
+                != format!("{path}:{}", sha(&bytes))
                 || std::str::from_utf8(&bytes).is_err()
             {
                 return None;
