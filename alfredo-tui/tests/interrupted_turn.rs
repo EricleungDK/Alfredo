@@ -598,6 +598,26 @@ fn write_result(path: &str) -> Update {
     )
 }
 
+/// Issue #783: rows of an earlier attempt are display material, so they must not count
+/// against the live conversation cap a retry runs under.
+#[test]
+fn retry_budget_is_not_halved_by_earlier_attempt_rows() {
+    let big = "x".repeat(70_000);
+    let read = || tool_result("read_file", serde_json::json!({"path": "a"}), &big, true);
+    let mut s = Session::new("m".into());
+    s.insert("read it");
+    s.begin().unwrap();
+    s.apply(1, read());
+    s.apply(1, Update::Failed("connection lost".into()));
+    s.retry().unwrap();
+    s.apply(2, read());
+    assert_ne!(
+        s.status,
+        Status::Failed(alfredo_tui::model::OUTPUT_LIMIT.into())
+    );
+    assert_eq!(s.tool_steps(1).len(), 1);
+}
+
 #[test]
 fn an_empty_retry_reply_still_shows_the_earlier_attempts_rows() {
     let mut app = App::new("m".into());
