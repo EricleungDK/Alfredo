@@ -60,14 +60,14 @@ pub struct Rule {
 /// directories; the card fingerprint carries `+dirs:` exactly then), and not a file edit
 /// on a [`protected`] path (issue #791).
 pub fn offered(card: &Card) -> bool {
-    card.kind != CardKind::Push
-        && !card.escalated()
-        && !protects(card)
-        && !(card.tool == "write_file" && card.fingerprint.contains("+dirs:"))
-        && TOOLS
+    !(card.kind == CardKind::Push
+        || card.escalated()
+        || protects(card)
+        || card.tool == "write_file" && card.fingerprint.contains("+dirs:")
+        || !TOOLS
             .iter()
             .any(|tool| tool.name == card.tool && tool.tier.allowlistable())
-        && !command_of(card).is_some_and(pushes)
+        || command_of(card).is_some_and(pushes))
 }
 
 /// Directories whose files can run code or change git (issue #791), matched in any path
