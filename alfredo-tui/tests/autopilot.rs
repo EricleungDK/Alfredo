@@ -721,38 +721,51 @@ fn saved_state_with_an_out_of_range_repair_limit_is_not_loaded() {
     assert!(opened.map_or(true, |autopilot| autopilot.status(&control).is_none()));
 }
 
-/// Write a saved state that differs from a valid running one only in `extra`, then
-/// return what `open` and `peek` make of it plus whether the file is byte-identical.
-fn garbled_state(extra: &Value) -> (Result<(), String>, Result<(), String>, bool) {
+/// The refusal a garbled state file must produce: the absolute path and both ways out.
+fn way_out(problem: &str, path: &Path) -> String {
+    let path = path.display();
+    format!(
+        "{problem} ({path}); original preserved. Move it aside (mv \"{path}\" \"{path}.bad\") or start with --new-mission NAME"
+    )
+}
+
+/// Write `bytes` as the saved state, then return what `open` and `peek` make of it, the
+/// state-file path, and whether the file is byte-identical afterwards.
+fn garbled_bytes(bytes: &str) -> (Result<(), String>, Result<(), String>, PathBuf, bool) {
     let fixture = Fixture::new();
     let directory = fixture.directory();
     fs::create_dir_all(&directory).unwrap();
-    let mut state = json!({"version": 1, "id": "0123456789abcdef", "goal": "G",
-        "model": "m", "max_repairs": 2, "phase": "running", "paused": true, "started": 100});
-    for (key, value) in extra.as_object().unwrap() {
-        state[key] = value.clone();
-    }
     let path = autopilot::state_path(&directory, "default");
-    let bytes = state.to_string();
-    fs::write(&path, &bytes).unwrap();
+    fs::write(&path, bytes).unwrap();
     let control = TaskControl::new(fixture.store.clone());
     let opened = Autopilot::open(&directory, "default").map(|autopilot| {
         let _ = autopilot.status(&control);
     });
     let peeked = autopilot::peek(&path).map(|_| ());
-    (opened, peeked, fs::read_to_string(&path).unwrap() == bytes)
+    let unchanged = fs::read_to_string(&path).unwrap() == bytes;
+    (opened, peeked, path, unchanged)
+}
+
+/// A valid running state that differs only in `extra`.
+fn garbled_state(extra: &Value) -> (Result<(), String>, Result<(), String>, PathBuf, bool) {
+    let mut state = json!({"version": 1, "id": "0123456789abcdef", "goal": "G",
+        "model": "m", "max_repairs": 2, "phase": "running", "paused": true, "started": 100});
+    for (key, value) in extra.as_object().unwrap() {
+        state[key] = value.clone();
+    }
+    garbled_bytes(&state.to_string())
 }
 
 fn assert_refused(extra: &Value) {
-    let (opened, peeked, unchanged) = garbled_state(extra);
-    let refusal = Err("Unsupported or invalid autopilot state".to_string());
+    let (opened, peeked, path, unchanged) = garbled_state(extra);
+    let refusal = Err(way_out("Unsupported or invalid autopilot state", &path));
     assert_eq!(opened, refusal, "open {extra}");
     assert_eq!(peeked, refusal, "peek {extra}");
     assert!(unchanged, "file preserved {extra}");
 }
 
 fn assert_loads(extra: &Value) {
-    let (opened, peeked, unchanged) = garbled_state(extra);
+    let (opened, peeked, _, unchanged) = garbled_state(extra);
     assert_eq!(opened, Ok(()), "open {extra}");
     assert_eq!(peeked, Ok(()), "peek {extra}");
     assert!(unchanged, "peek and open do not rewrite {extra}");
@@ -763,6 +776,29 @@ fn saved_state_with_an_oversized_task_count_is_refused_and_preserved() {
     assert_refused(&json!({"first": 1, "count": 4_000_000_000_u64}));
     assert_refused(&json!({"first": 1, "count": 257}));
     assert_loads(&json!({"first": 1, "count": 256}));
+}
+
+#[test]
+fn a_truncated_state_file_names_its_path_and_both_ways_out() {
+    let valid = json!({"version": 1, "id": "0123456789abcdef", "goal": "G",
+        "model": "m", "max_repairs": 2, "phase": "running", "paused": true, "started": 100})
+    .to_string();
+    let truncated = &valid[..valid.len() - 20];
+    let (opened, peeked, path, unchanged) = garbled_bytes(truncated);
+    let error = serde_json::from_str::<Value>(truncated).unwrap_err();
+    let problem = format!("Autopilot state is invalid ({error})");
+    assert_eq!(opened.unwrap_err(), way_out(&problem, &path));
+    assert_eq!(peeked.unwrap_err(), way_out(&problem, &path));
+    assert!(unchanged);
+}
+
+#[test]
+fn an_oversized_state_file_names_its_path_and_both_ways_out() {
+    let (opened, peeked, path, unchanged) = garbled_bytes(&" ".repeat(256 * 1024 + 1));
+    let problem = "Autopilot state exceeds its size bound";
+    assert_eq!(opened.unwrap_err(), way_out(problem, &path));
+    assert_eq!(peeked.unwrap_err(), way_out(problem, &path));
+    assert!(unchanged);
 }
 
 #[test]
