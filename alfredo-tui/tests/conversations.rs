@@ -674,6 +674,366 @@ fn a_reading_point_left_by_home_or_end_saves_and_restores_cleanly() {
     }
 }
 
+/// One interrupted-and-retried turn: each of `rounds` lists the results of one tool
+/// round the failed attempt applied, then the retry's reply completes.
+fn retried_turn(
+    session: &mut alfredo_tui::model::Session,
+    prompt: &str,
+    rounds: &[&[&str]],
+    reply: &str,
+) {
+    use alfredo_tui::model::ToolCall;
+    session.insert(prompt);
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    for results in rounds {
+        for (position, result) in results.iter().enumerate() {
+            session.apply(
+                attempt,
+                Update::ToolResult {
+                    call: ToolCall {
+                        name: "write_file".into(),
+                        arguments: serde_json::json!({"path": "a.txt", "content": position}),
+                    },
+                    result: (*result).into(),
+                    new_round: position == 0,
+                },
+            );
+        }
+    }
+    session.apply(attempt, Update::Failed("lost".into()));
+    session.retry().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Token(reply.into()));
+    session.apply(attempt, Update::Done);
+}
+
+fn answered(session: &mut alfredo_tui::model::Session, prompt: &str, reply: &str) {
+    session.insert(prompt);
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Token(reply.into()));
+    session.apply(attempt, Update::Done);
+}
+
+#[test]
+fn saved_earlier_attempts_are_accepted_and_refused_exactly_at_their_limits() {
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("m".into());
+    retried_turn(&mut app.sessions[0], "one", &[&["a"]], "r1");
+    let base = serde_json::to_value(Snapshot::capture(&app, "default")).unwrap();
+    // Edits the saved conversation, then reports the save error (None when accepted).
+    let with = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = base.clone();
+        edit(&mut value);
+        let snapshot = serde_json::from_value::<Snapshot>(value).unwrap();
+        store.save(&snapshot).err().map(|error| error.to_string())
+    };
+    let refused = |outcome: Option<String>| {
+        let error = outcome.expect("must be refused");
+        assert!(error.contains("earlier attempts"), "{error}");
+    };
+    let step = |v: &serde_json::Value| v["sessions"][0]["earlier_attempts"]["0"][0].clone();
+    // The earlier rounds filed under `key` in a conversation of `len` messages.
+    let sized = |len: usize, key: &'static str| {
+        move |v: &mut serde_json::Value| {
+            let one = v["sessions"][0]["earlier_attempts"]["0"].clone();
+            v["sessions"][0]["earlier_attempts"] = serde_json::json!({ key: one });
+            let messages = v["sessions"][0]["messages"].as_array_mut().unwrap();
+            messages.truncate(len.min(2));
+            while messages.len() < len {
+                let role = if messages.len() % 2 == 0 {
+                    "user"
+                } else {
+                    "assistant"
+                };
+                messages.push(serde_json::json!({"role": role, "content": "m"}));
+            }
+        }
+    };
+    assert_eq!(with(&|_| {}), None);
+    assert_eq!(with(&sized(2, "0")), None, "user 0 with its reply");
+    refused(with(&sized(1, "0"))); // 0 + 1 == len: no reply follows the prompt
+    assert_eq!(with(&sized(4, "2")), None, "user 2 with its reply");
+    refused(with(&sized(3, "2"))); // 2 + 1 == len
+    refused(with(&sized(2, "2"))); // past the end
+    refused(with(&sized(3, "1"))); // odd index: a reply, not a prompt
+    refused(with(&sized(4, "3")));
+    assert_eq!(with(&sized(4, "0")), None, "an earlier prompt, later turns");
+    // Rounds per turn: exactly 64 fit, 65 do not; one round fits, none do not.
+    let rounds = |count: usize| {
+        move |v: &mut serde_json::Value| {
+            let one = step(v);
+            v["sessions"][0]["earlier_attempts"]["0"] = serde_json::json!(vec![one; count]);
+        }
+    };
+    assert_eq!(with(&rounds(1)), None);
+    assert_eq!(with(&rounds(63)), None);
+    assert_eq!(with(&rounds(64)), None);
+    refused(with(&rounds(65)));
+    refused(with(&rounds(0)));
+    // Schema: v20 holds them, older schemas cannot.
+    refused(with(&|v| v["schema_version"] = 19.into()));
+    refused(with(&|v| v["schema_version"] = 1.into()));
+    // One malformed round among valid ones refuses the turn.
+    refused(with(&|v| {
+        let mut bad = step(v);
+        bad["calls"] = serde_json::json!([]);
+        bad["results"] = serde_json::json!([]);
+        let good = step(v);
+        v["sessions"][0]["earlier_attempts"]["0"] = serde_json::json!([good, bad]);
+    }));
+}
+
+/// The tallest transcript whose reading anchor survives saving (taller ones are
+/// dropped as unaccounted for), so each row the session accounts for shifts it by one.
+fn kept_rows(prepare: &dyn Fn(&mut alfredo_tui::model::Session)) -> usize {
+    let mut kept = None;
+    for rows in 1..2000 {
+        let mut app = App::new("m".into());
+        prepare(&mut app.sessions[0]);
+        app.sessions[0].scroll.set(20);
+        app.sessions[0].reading_position(&vec![1; rows], 10);
+        let saved = serde_json::to_value(Snapshot::capture(&app, "default")).unwrap();
+        if saved["sessions"][0]["reading"]["anchor"].is_null() {
+            if let Some(last) = kept {
+                return last;
+            }
+        } else {
+            kept = Some(rows);
+        }
+    }
+    panic!("the anchor was never kept, then dropped");
+}
+
+#[test]
+fn the_reading_bound_counts_every_row_the_conversation_can_render() {
+    use alfredo_tui::{
+        command_intent::Intent,
+        model::{TaskReceiptRef, ToolCall},
+    };
+    let empty = kept_rows(&|_| {});
+    let text_only = |s: &mut alfredo_tui::model::Session| answered(s, "q1\nq2\nq3", "r1\nr2");
+    // Messages: (2 newlines + 3) + (1 newline + 3), then the refusal and closing rows.
+    let base = kept_rows(&text_only);
+    assert_eq!(base - empty, 5 + 4 + 1 + 1 - 3);
+    // Tool rounds: a 2-call round (call rows 4, a marker, results 3+1 and 1+1), then a
+    // 1-call round whose 250-line result is cut at 200 (2 + 1 + 200 + 1).
+    let tools = |s: &mut alfredo_tui::model::Session| {
+        s.insert("q1\nq2\nq3");
+        s.begin().unwrap();
+        let attempt = s.attempt;
+        for (name, result, new_round) in [
+            ("a", "x\ny\nz".to_string(), true),
+            ("b", "w".to_string(), false),
+            ("c", "l\n".repeat(250), true),
+        ] {
+            s.apply(
+                attempt,
+                Update::ToolResult {
+                    call: ToolCall {
+                        name: name.into(),
+                        arguments: serde_json::json!({}),
+                    },
+                    result,
+                    new_round,
+                },
+            );
+        }
+        s.apply(attempt, Update::Token("r1\nr2".into()));
+        s.apply(attempt, Update::Done);
+    };
+    assert_eq!(
+        kept_rows(&tools) - base,
+        (2 * 2 + 1 + 4 + 2) + (2 + 1 + 200 + 1)
+    );
+    // Earlier attempts: one label row per retried turn plus the rows of each round.
+    // Turn one: a 1-call round (2 + 1 + 4 + 1) and a 2-call round (4 + 1 + 2 + 3).
+    // Turn two: one 1-call round (2 + 1 + 2).
+    let retried = |s: &mut alfredo_tui::model::Session| {
+        retried_turn(s, "q", &[&["a\nb\nc\nd"], &["x", "y\nz"]], "r");
+        retried_turn(s, "q", &[&["w"]], "r");
+    };
+    // Four one-line messages of three rows, the two rounds' rows, then closing rows.
+    assert_eq!(
+        kept_rows(&retried) - empty,
+        4 * 3 + (1 + 8 + 10) + (1 + 5) + 2 - 3
+    );
+    // Display-only rows above and below the transcript.
+    let notes = |s: &mut alfredo_tui::model::Session| {
+        text_only(s);
+        assert!(s.show_project_notes(1, "first".into()));
+        assert!(s.show_project_notes(2, "second".into()));
+    };
+    assert_eq!(kept_rows(&notes) - base, 2);
+    let refusals = |s: &mut alfredo_tui::model::Session| {
+        text_only(s);
+        s.show_mention_refusals(0, vec!["a".into(), "b".into(), "c".into()]);
+    };
+    assert_eq!(kept_rows(&refusals) - base, 3);
+    let dispatch_off = |s: &mut alfredo_tui::model::Session| {
+        text_only(s);
+        s.show_dispatch_off("one".into());
+        s.show_dispatch_off("two".into());
+    };
+    assert_eq!(kept_rows(&dispatch_off) - base, 2 * 3);
+    // Task receipts take three rows each.
+    let receipts = |s: &mut alfredo_tui::model::Session| {
+        text_only(s);
+        for revision in 1..=2 {
+            assert!(s.observe_task_receipt(TaskReceiptRef {
+                sequence: 0,
+                after_messages: 2,
+                revision,
+                task: 1,
+                correlation: format!("receipt-{revision}"),
+            }));
+        }
+    };
+    assert_eq!(kept_rows(&receipts) - base, 2 * 3);
+    // Commands take their text lines plus four, and one more for a worker result.
+    let commands = |s: &mut alfredo_tui::model::Session| {
+        text_only(s);
+        for (text, correlation) in [("/run 1\n2", "reading-run-a"), ("/run 1", "reading-run-b")] {
+            s.submit_command(
+                text.into(),
+                Intent::Run {
+                    correlation: correlation.into(),
+                    expected_revision: 3,
+                    task: 1,
+                },
+            )
+            .unwrap();
+        }
+    };
+    assert_eq!(kept_rows(&commands) - base, (1 + 4 + 1) + (4 + 1));
+    // Automatic runs and worker cancellations also wait on a worker result; other
+    // commands do not.
+    let worker_commands = |s: &mut alfredo_tui::model::Session| {
+        text_only(s);
+        let parent = s
+            .submit_command(
+                "/dispatch on".into(),
+                Intent::Control {
+                    request: dispatch_source(),
+                },
+            )
+            .unwrap();
+        s.set_command_state(
+            &parent,
+            alfredo_tui::console_command::CommandState::Control {
+                outcome: alfredo_tui::control_command::Outcome::DispatchChanged { enabled: true },
+            },
+        );
+        s.submit_automatic_command("Dispatch selected task #1".into(), dispatch_run())
+            .unwrap();
+        s.submit_command(
+            "/cancel 1".into(),
+            Intent::Control {
+                request: alfredo_tui::control_command::Request {
+                    correlation: "reading-cancel".into(),
+                    controller: "local-controller".into(),
+                    operation: alfredo_tui::control_command::Operation::CancelWorker {
+                        task: 1,
+                        start_correlation: "claim-one".into(),
+                        expected_start_revision: 2,
+                    },
+                },
+            },
+        )
+        .unwrap();
+        s.submit_command("/task New".into(), command_intent("reading-plain"))
+            .unwrap();
+    };
+    assert_eq!(
+        kept_rows(&worker_commands) - base,
+        4 + (4 + 1) + (4 + 1) + 4
+    );
+    // A compaction note takes its summary lines plus a marker and a blank row; the
+    // turns it replaced no longer count.
+    let compacted = |s: &mut alfredo_tui::model::Session| {
+        for number in 1..=7 {
+            answered(s, &format!("turn{number} {}", "x".repeat(15_000)), "reply");
+        }
+        let plan = s.start_compaction(None, true).unwrap();
+        let attempt = s.attempt;
+        s.finish_compaction(attempt, &plan, Ok("one\ntwo\nthree".into()))
+            .unwrap();
+    };
+    let mut app = App::new("m".into());
+    compacted(&mut app.sessions[0]);
+    let session = &app.sessions[0];
+    let summary_lines = session.compaction().unwrap().summary.matches('\n').count();
+    assert_eq!(summary_lines, 2);
+    let remaining = session.messages.len();
+    assert!(remaining > 0 && remaining < 14);
+    assert_eq!(
+        kept_rows(&compacted) - empty,
+        3 * remaining + (summary_lines + 3) + 2 - 3
+    );
+}
+
+#[test]
+fn a_saved_reading_anchor_is_accepted_and_refused_exactly_at_the_transcript_bounds() {
+    use alfredo_tui::{
+        command_intent::Intent,
+        model::{TaskReceiptRef, MAX_TEXT},
+    };
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("m".into());
+    {
+        let s = &mut app.sessions[0];
+        s.submit_command(
+            "/run 1\n2".into(),
+            Intent::Run {
+                correlation: "bounds-run".into(),
+                expected_revision: 3,
+                task: 1,
+            },
+        )
+        .unwrap();
+        answered(s, "q1\nq2\nq3", "r1\nr2");
+        assert!(s.observe_task_receipt(TaskReceiptRef {
+            sequence: 0,
+            after_messages: 2,
+            revision: 7,
+            task: 1,
+            correlation: "bounds-receipt".into(),
+        }));
+    }
+    let sequence = app.sessions[0].commands()[0].sequence;
+    let base = serde_json::to_value(Snapshot::capture(&app, "default")).unwrap();
+    let accepted = |reading: serde_json::Value| {
+        let mut value = base.clone();
+        value["sessions"][0]["scroll"] = 20.into();
+        value["sessions"][0]["reading"] = reading;
+        let snapshot = serde_json::from_value::<Snapshot>(value).unwrap();
+        store.save(&snapshot).is_ok()
+    };
+    let anchor = |line: usize, row: usize| serde_json::json!({"anchor": {"line": line, "row": row}, "last_offset": 20});
+    // Rows: messages (5 + 4), receipt 3, command (1 + 4 + 1), refusal and closing 2.
+    let total = 9 + 3 + 6 + 2;
+    assert!(accepted(anchor(total - 1, 0)));
+    assert!(!accepted(anchor(total, 0)));
+    assert!(accepted(anchor(0, MAX_TEXT + 200)));
+    assert!(!accepted(anchor(0, MAX_TEXT + 201)));
+    // Block anchors are bounded by the rows of the block they name.
+    let block = |key: serde_json::Value, line: usize| {
+        let mut reading = anchor(0, 0);
+        reading["block_anchor"] = serde_json::json!({"key": key, "line": line, "row": 0});
+        accepted(reading)
+    };
+    let message = |id: usize| serde_json::json!({"kind": "message", "id": id});
+    assert!(block(message(0), 4) && !block(message(0), 5));
+    assert!(block(message(1), 3) && !block(message(1), 4));
+    let command = serde_json::json!({"kind": "command", "id": sequence});
+    assert!(block(command.clone(), 5) && !block(command, 6));
+    let receipt = serde_json::json!({"kind": "task-receipt", "id": 7});
+    assert!(block(receipt.clone(), 2) && !block(receipt, 3));
+}
+
 #[test]
 fn saving_drops_a_reading_anchor_the_data_cannot_account_for_but_load_still_refuses_one() {
     let fixture = Fixture::new();
