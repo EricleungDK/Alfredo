@@ -655,3 +655,31 @@ fn repeated_retries_keep_only_the_last_64_earlier_rounds() {
         request[0].content
     );
 }
+
+/// mech R3-76694151: the note rides on a retried turn that is not the first one.
+#[test]
+fn retry_of_a_later_turn_carries_the_applied_note() {
+    let mut s = Session::new("m".into());
+    s.insert("first");
+    s.begin().unwrap();
+    s.apply(1, Update::Token("done".into()));
+    s.apply(1, Update::Done);
+    s.insert("add a.txt");
+    s.begin().unwrap();
+    let attempt = s.attempt;
+    s.apply(attempt, write_result("a.txt"));
+    s.apply(attempt, Update::Failed("lost".into()));
+    let request = s.retry().unwrap();
+    assert_eq!(request.len(), 3, "{request:?}");
+    assert_eq!(request[0].content, "first");
+    let last = &request[2].content;
+    assert!(last.starts_with("add a.txt"), "{last}");
+    assert!(
+        last.contains("Already applied") && last.contains("a.txt: wrote"),
+        "{last}"
+    );
+    // The completed first turn's user message never gets a note.
+    assert_eq!(request[0].content, "first");
+    // An assistant reply (odd index) is never given one either.
+    assert_eq!(request[1].content, "done");
+}

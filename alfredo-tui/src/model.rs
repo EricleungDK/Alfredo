@@ -1296,7 +1296,6 @@ impl Session {
     pub(crate) fn valid_earlier_attempts(&self, schema: u32) -> bool {
         self.earlier_attempts.is_empty()
             || (schema >= 20
-                && self.earlier_attempts.len() <= MAX_MESSAGES / 2
                 && self.earlier_attempts.iter().all(|(index, steps)| {
                     index % 2 == 0
                         && *index + 1 < self.messages.len()
