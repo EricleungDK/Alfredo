@@ -1030,6 +1030,96 @@ fn a_root_protected_name_that_links_elsewhere_protects_its_target() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #791 review: a protected root name that links to a file or directory that does
+/// not exist yet still protects it, through chained links, and a link loop fails closed.
+#[test]
+fn dangling_and_chained_root_links_protect_their_targets() {
+    use std::os::unix::fs::symlink;
+    let root = dir("dangling");
+    let rules = both_tools_rules("dangling-state");
+    fs::create_dir_all(root.join("tools")).unwrap();
+    fs::create_dir_all(root.join("hk")).unwrap();
+    fs::write(root.join("calc.py"), "name: ci\n").unwrap();
+    symlink("tools/pc.yaml", root.join(".pre-commit-config.yaml")).unwrap();
+    symlink("hk/real", root.join(".husky")).unwrap();
+    symlink("hop", root.join(".gitattributes")).unwrap();
+    symlink("tools/ga", root.join("hop")).unwrap();
+    for path in ["tools/pc.yaml", "./tools/pc.yaml", "hk/real", "tools/ga"] {
+        let card = real_card(&root, "write_file", path);
+        assert!(!allow::offered(&card), "{path}");
+        assert!(rules.matching(&card).is_none(), "{path}");
+        assert_eq!(
+            allow::unavailable_reason(&card).as_deref(),
+            Some(PROTECTED_REASON),
+            "{path}"
+        );
+    }
+    let ordinary = real_card(&root, "write_file", "tools/other.yaml");
+    assert!(rules.matching(&ordinary).is_some(), "an unrelated file");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: a link loop at the root never hangs and fails closed: every
+/// write_file/edit_file asks.
+#[test]
+fn a_root_link_loop_fails_closed() {
+    use std::os::unix::fs::symlink;
+    let root = dir("loop-links");
+    let rules = both_tools_rules("loop-links-state");
+    fs::write(root.join("calc.py"), "name: ci\n").unwrap();
+    symlink(".gitmodules", root.join(".gitmodules")).unwrap();
+    symlink("b", root.join("a")).unwrap();
+    symlink("a", root.join("b")).unwrap();
+    symlink("a", root.join(".husky")).unwrap();
+    for tool in ["write_file", "edit_file"] {
+        let card = real_card(&root, tool, "calc.py");
+        assert!(!allow::offered(&card), "{tool}");
+        assert!(rules.matching(&card).is_none(), "{tool}");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: a regular file under a protected name, and no protected names at
+/// all, behave as before.
+#[test]
+fn regular_root_config_files_and_no_links_change_nothing() {
+    let root = dir("regular");
+    let rules = both_tools_rules("regular-state");
+    fs::write(root.join(".pre-commit-config.yaml"), "name: ci\n").unwrap();
+    fs::write(root.join("calc.py"), "name: ci\n").unwrap();
+    let own = real_card(&root, "edit_file", ".pre-commit-config.yaml");
+    assert!(rules.matching(&own).is_none());
+    let calc = real_card(&root, "edit_file", "calc.py");
+    assert!(rules.matching(&calc).is_some());
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: the resolved path is read back from the card without being fooled by
+/// `+dirs:`, `:` or the alias marker inside a file name.
+#[test]
+fn odd_file_names_cannot_hide_a_protected_directory() {
+    use std::os::unix::fs::symlink;
+    let root = dir("odd-names");
+    let rules = both_tools_rules("odd-names-state");
+    fs::create_dir_all(root.join("sub/.cargo")).unwrap();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    for name in ["x+dirs:y.toml", "z+aliases-protected", "a:b+dirs:c:d"] {
+        fs::write(root.join("sub/.cargo").join(name), "name: ci\n").unwrap();
+        fs::write(root.join("docs").join(name), "name: ci\n").unwrap();
+    }
+    symlink("sub/.cargo", root.join("cfg")).unwrap();
+    symlink("docs", root.join("d")).unwrap();
+    for name in ["x+dirs:y.toml", "z+aliases-protected", "a:b+dirs:c:d"] {
+        for tool in ["edit_file", "write_file"] {
+            let card = real_card(&root, tool, &format!("cfg/{name}"));
+            assert!(rules.matching(&card).is_none(), "{tool} cfg/{name}");
+            let card = real_card(&root, tool, &format!("d/{name}"));
+            assert!(rules.matching(&card).is_some(), "{tool} d/{name}");
+        }
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #791 review: only the path below the workspace root counts, so a workspace that
 /// itself lives under `.idea` or `.cargo` keeps its rules for ordinary files.
 #[test]
