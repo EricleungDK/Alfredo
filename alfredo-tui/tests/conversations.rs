@@ -4204,3 +4204,47 @@ fn only_a_submitted_command_with_a_receipt_and_nothing_running_is_acknowledged()
         assert!(!is_acknowledged(&refused, running, awaiting));
     }
 }
+
+#[test]
+fn restart_between_a_failure_and_ctrl_r_keeps_the_applied_note() {
+    use alfredo_tui::model::ToolCall;
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("m".into());
+    app.sessions[0].insert("add a.txt");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(
+        1,
+        Update::ToolResult {
+            call: ToolCall {
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path": "a.txt", "content": "x"}),
+            },
+            result: "wrote a.txt (1 bytes)".into(),
+            new_round: true,
+        },
+    );
+    app.sessions[0].apply(1, Update::Failed("connection lost".into()));
+    let before = app.sessions[0].clone().retry().unwrap();
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    drop(store);
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut restored = store.load().unwrap().unwrap().restore();
+    let request = restored.sessions[0].retry().unwrap();
+    assert!(
+        request[0].content.contains("Already applied"),
+        "{request:?}"
+    );
+    assert!(request[0].content.contains("a.txt"), "{request:?}");
+    assert_eq!(request, before);
+    // The first attempt's rows survive a second save and load after the retry.
+    restored.sessions[0].apply(2, Update::Failed("lost again".into()));
+    store
+        .save(&Snapshot::capture(&restored, "default"))
+        .unwrap();
+    drop(store);
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut again = store.load().unwrap().unwrap().restore();
+    let request = again.sessions[0].retry().unwrap();
+    assert!(request[0].content.contains("a.txt"), "{request:?}");
+}
