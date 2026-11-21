@@ -749,7 +749,10 @@ fn the_protected_classifier_matches_names_in_any_spelling() {
     for path in PROTECTED {
         assert!(allow::protected(path), "{path}");
         assert!(allow::protected(&format!("./{path}")), "./{path}");
-        assert!(allow::protected(&format!("sub/dir/{path}")), "sub/dir/{path}");
+        assert!(
+            allow::protected(&format!("sub/dir/{path}")),
+            "sub/dir/{path}"
+        );
         assert!(allow::protected(&path.to_uppercase()), "{path} upper");
         assert!(allow::protected(&format!("  {path}  ")), "{path} padded");
     }
@@ -920,7 +923,11 @@ async fn a_rule_never_skips_the_card_for_a_protected_file() {
     assert_eq!(log.records().last().unwrap().rule, None, "answered by y");
     let (ordinary, asked) = gate(Decision::Deny, &log, &rules);
     turn(&root, ordinary).await;
-    assert_eq!(*asked.lock().unwrap(), 0, "README.md still runs by the rule");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        0,
+        "README.md still runs by the rule"
+    );
     assert!(fs::read_to_string(root.join("README.md"))
         .unwrap()
         .contains("New intro line."));

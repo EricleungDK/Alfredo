@@ -560,13 +560,14 @@ class ChatTools(unittest.TestCase):
         self.terminal.wait_for('y approve')
         time.sleep(0.8)
 
-    def check_protected_card(self, prompt, marker, tool, path):
+    def check_protected_card(self, prompt, marker, tool):
         # Issue #791: the card has no `a`, says why, `a` repeats the reason and decides nothing.
         self.ask(prompt, marker)
         screen = self.terminal.screen()
         self.assertIn(f'Approve {tool}', screen)
         self.assertNotIn('a always allow', screen)
-        self.assertIn('a not offered: CI and tool', screen)
+        self.assertIn('a not offered:', screen)
+        self.assertIn('CI and tool config can run code or change git; always asks', screen)
         self.terminal.write(b'a')
         self.terminal.wait_for('a not offered: CI and tool config can run code or change git; always asks; press y or n')
         self.assertIn(f'Approve {tool}', self.terminal.screen())
@@ -582,14 +583,14 @@ class ChatTools(unittest.TestCase):
         self.assertEqual(len(self.allow_rules()), 1)
         # A protected path asks even though the rule exists, and stays unchanged until y.
         ci = root.joinpath('.github/workflows/ci.yml')
-        self.check_protected_card('tweak workflow', 'WORKFLOW_EDITED', 'edit_file', '.github')
+        self.check_protected_card('tweak workflow', 'WORKFLOW_EDITED', 'edit_file')
         self.assertEqual(ci.read_text(), 'name: ci\n')
         self.terminal.write(b'n')
         self.terminal.wait_for('WORKFLOW_DENIED')
         self.assertEqual(ci.read_text(), 'name: ci\n')
         # .gitattributes asks too; y writes it.
         attributes = root.joinpath('.gitattributes')
-        self.check_protected_card('tweak attributes', 'ATTR_EDITED', 'edit_file', '.gitattributes')
+        self.check_protected_card('tweak attributes', 'ATTR_EDITED', 'edit_file')
         self.assertEqual(attributes.read_text(), '* text\n')
         self.terminal.write(b'y')
         self.terminal.wait_for('ATTR_DONE')
@@ -607,7 +608,7 @@ class ChatTools(unittest.TestCase):
         self.terminal.wait_for('NOTES_DONE')
         self.assertEqual(root.joinpath('notes.txt').read_text(), 'NOTES_ONE\n')
         ci = root.joinpath('.github/workflows/ci.yml')
-        self.check_protected_card('save workflow', 'WRITTEN_WORKFLOW', 'write_file', '.github')
+        self.check_protected_card('save workflow', 'WRITTEN_WORKFLOW', 'write_file')
         self.assertEqual(ci.read_text(), 'name: ci\n')
         self.terminal.write(b'y')
         self.terminal.wait_for('WRITEFLOW_DONE')

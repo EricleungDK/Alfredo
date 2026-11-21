@@ -2339,6 +2339,17 @@ rule `a` would add.
   reach is bounded only by the Sandbox; the card says so. Rules ignore `cwd`.
   A command containing any of `; & | ` `` ` `` `$ > < ( ) \` or a newline matches only a
   rule that is exactly that command (`cargo test; rm -rf ~` never matches `cargo test`).
+- **Protected config paths (issue #791).** A `write_file` or `edit_file` on CI and tool
+  config always shows a normal card, even when a rule for the tool exists: the card offers
+  no `a`, its key line says `a not offered: CI and tool config can run code or change git;
+  always asks`, pressing `a` repeats that and decides nothing, and no rule matches the path,
+  a rule typed into `chat-allow.json` by hand included. `y` still writes it. Protected:
+  the directories `.github/`, `.husky/`, `.vscode/`, `.idea/`, `.devcontainer/` and
+  `.cargo/` in any path component at any depth, and the files `.gitlab-ci.yml`,
+  `.pre-commit-config.yaml`, `.gitattributes` and `.gitmodules` at any depth, matched
+  case-insensitively with `./` ignored (`./.GitHub/x.yml`, `sub/.husky/pre-commit`,
+  `a/.gitattributes`). Other files (`docs/github.md`, `src/x.rs`) keep running by the rule.
+  Paths that reach these through a symlinked directory are not detected by this check.
 - **Never push.** `git_push` cards (Push tier, `Tier::allowlistable` false) offer no `a`,
   and no rule matches them, including rules added by hand to the file. A `run_command`
   whose plain words invoke `git … push` (`git -C x push`, `git -c k=v push`, any path to
