@@ -721,6 +721,74 @@ fn saved_state_with_an_out_of_range_repair_limit_is_not_loaded() {
     assert!(opened.map_or(true, |autopilot| autopilot.status(&control).is_none()));
 }
 
+/// Write a saved state that differs from a valid running one only in `extra`, then
+/// return what `open` and `peek` make of it plus whether the file is byte-identical.
+fn garbled_state(extra: &Value) -> (Result<(), String>, Result<(), String>, bool) {
+    let fixture = Fixture::new();
+    let directory = fixture.directory();
+    fs::create_dir_all(&directory).unwrap();
+    let mut state = json!({"version": 1, "id": "0123456789abcdef", "goal": "G",
+        "model": "m", "max_repairs": 2, "phase": "running", "paused": true, "started": 100});
+    for (key, value) in extra.as_object().unwrap() {
+        state[key] = value.clone();
+    }
+    let path = autopilot::state_path(&directory, "default");
+    let bytes = state.to_string();
+    fs::write(&path, &bytes).unwrap();
+    let control = TaskControl::new(fixture.store.clone());
+    let opened = Autopilot::open(&directory, "default").map(|autopilot| {
+        let _ = autopilot.status(&control);
+    });
+    let peeked = autopilot::peek(&path).map(|_| ());
+    (opened, peeked, fs::read_to_string(&path).unwrap() == bytes)
+}
+
+fn assert_refused(extra: &Value) {
+    let (opened, peeked, unchanged) = garbled_state(extra);
+    let refusal = Err("Unsupported or invalid autopilot state".to_string());
+    assert_eq!(opened, refusal, "open {extra}");
+    assert_eq!(peeked, refusal, "peek {extra}");
+    assert!(unchanged, "file preserved {extra}");
+}
+
+fn assert_loads(extra: &Value) {
+    let (opened, peeked, unchanged) = garbled_state(extra);
+    assert_eq!(opened, Ok(()), "open {extra}");
+    assert_eq!(peeked, Ok(()), "peek {extra}");
+    assert!(unchanged, "peek and open do not rewrite {extra}");
+}
+
+#[test]
+fn saved_state_with_an_oversized_task_count_is_refused_and_preserved() {
+    assert_refused(&json!({"first": 1, "count": 4_000_000_000_u64}));
+    assert_refused(&json!({"first": 1, "count": 257}));
+    assert_loads(&json!({"first": 1, "count": 256}));
+}
+
+#[test]
+fn saved_state_whose_first_plus_count_overflows_is_refused_without_panicking() {
+    assert_refused(&json!({"first": u64::MAX, "count": 5}));
+    assert_refused(&json!({"first": u64::MAX - 4, "count": 5}));
+    assert_loads(&json!({"first": u64::MAX - 4, "count": 4}));
+    assert_loads(&json!({"first": u64::MAX, "count": 0}));
+}
+
+#[test]
+fn saved_state_with_a_zero_first_task_or_too_many_adopted_tasks_is_refused() {
+    assert_refused(&json!({"first": 0, "count": 1}));
+    assert_refused(&json!({"first": 0, "count": 0}));
+    assert_loads(&json!({"first": 1, "count": 1}));
+    let adopted = |n: u64| json!({"first": 1, "adopted": (1..=n).collect::<Vec<u64>>()});
+    assert_loads(&adopted(256));
+    assert_refused(&adopted(257));
+}
+
+#[test]
+fn saved_state_without_first_or_count_still_loads() {
+    assert_loads(&json!({}));
+    assert_loads(&json!({"count": 0}));
+}
+
 #[test]
 fn finished_state_saved_by_an_older_build_still_loads_with_an_honest_state() {
     use sha2::{Digest, Sha256};

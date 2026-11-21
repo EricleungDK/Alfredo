@@ -190,8 +190,9 @@ impl Saved {
     }
     fn roots(&self) -> Vec<u64> {
         let first = self.first.unwrap_or(0);
-        let mut roots: Vec<u64> = (first..first + self.count).collect();
-        roots.extend(self.adopted.iter().filter(|id| **id >= first + self.count));
+        let end = first.saturating_add(self.count);
+        let mut roots: Vec<u64> = (first..end).take(TASK_BOUND as usize).collect();
+        roots.extend(self.adopted.iter().filter(|id| **id >= end));
         roots
     }
     fn active(&self) -> bool {
@@ -208,6 +209,10 @@ impl Saved {
             || self.id.len() != 16
             || !self.id.bytes().all(|b| b.is_ascii_hexdigit())
             || self.max_repairs > MAX_REPAIRS
+            || self.count > u64::from(TASK_BOUND)
+            || self.first == Some(0)
+            || self.first.unwrap_or(0).checked_add(self.count).is_none()
+            || self.adopted.len() > TASK_BOUND as usize
             || self.limits.len() > TASK_BOUND as usize
             || self
                 .limits
