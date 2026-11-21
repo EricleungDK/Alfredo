@@ -588,3 +588,70 @@ fn retry_after_only_unapplied_calls_resends_the_bare_prompt() {
     let request = s.retry().unwrap();
     assert_eq!(roles(&request), [("user", "look around")]);
 }
+
+fn write_result(path: &str) -> Update {
+    tool_result(
+        "write_file",
+        serde_json::json!({"path": path, "content": "x"}),
+        &format!("wrote {path} (1 bytes)"),
+        true,
+    )
+}
+
+#[test]
+fn an_empty_retry_reply_still_shows_the_earlier_attempts_rows() {
+    let mut app = App::new("m".into());
+    let s = &mut app.sessions[0];
+    s.insert("add a.txt");
+    s.begin().unwrap();
+    s.apply(1, write_result("a.txt"));
+    s.apply(1, Update::Failed("connection lost".into()));
+    s.retry().unwrap();
+    s.apply(2, Update::Done);
+    assert_eq!(s.status, Status::Failed(NO_TEXT.into()));
+    let screen = screen_text(&app);
+    assert!(screen.contains("earlier attempt"), "{screen}");
+    assert!(screen.contains("⚙ write_file"), "{screen}");
+}
+
+#[test]
+fn an_abandoned_retried_turn_keeps_every_attempts_effects() {
+    let mut s = Session::new("m".into());
+    s.insert("add files");
+    s.begin().unwrap();
+    s.apply(1, write_result("a.txt"));
+    s.apply(1, Update::Failed("connection lost".into()));
+    s.retry().unwrap();
+    s.apply(2, write_result("c.txt"));
+    s.apply(2, Update::Failed("lost again".into()));
+    s.insert("next");
+    let request = s.begin().unwrap();
+    assert_eq!(request.len(), 3, "{request:?}");
+    assert_eq!(request[0].content, "add files");
+    assert_eq!(request[1].role, "assistant");
+    assert!(
+        request[1].content.contains("a.txt") && request[1].content.contains("c.txt"),
+        "{request:?}"
+    );
+    assert_eq!(request[2].content, "next");
+}
+
+#[test]
+fn repeated_retries_keep_only_the_last_64_earlier_rounds() {
+    let mut s = Session::new("m".into());
+    s.insert("add files");
+    s.begin().unwrap();
+    for n in 0..70 {
+        let attempt = s.attempt;
+        s.apply(attempt, write_result(&format!("f{n}.txt")));
+        s.apply(attempt, Update::Failed("lost".into()));
+        s.retry().unwrap();
+    }
+    assert_eq!(s.earlier_steps(0).len(), 64);
+    let request = s.request_through(0);
+    assert!(
+        request[0].content.contains("f69.txt") && !request[0].content.contains("f0.txt"),
+        "{}",
+        request[0].content
+    );
+}

@@ -126,7 +126,7 @@ fn steps_survive_save_and_restore_and_bound_their_size() {
         "A demo.",
     );
     let snapshot = Snapshot::capture(&app, "default");
-    assert_eq!(snapshot.schema_version, 19);
+    assert_eq!(snapshot.schema_version, 20);
     let text = serde_json::to_string(&snapshot).unwrap();
 
     let mut old: serde_json::Value = serde_json::from_str(&text).unwrap();

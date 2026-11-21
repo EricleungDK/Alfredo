@@ -471,7 +471,7 @@ fn source_migration_preserves_v1_and_v2_bytes_without_inventing_legacy_authorshi
         store.save(&current).unwrap();
         assert_eq!(fs::read(&backup).unwrap(), original);
         let saved = store.load().unwrap().unwrap();
-        assert_eq!(saved.schema_version, 19);
+        assert_eq!(saved.schema_version, 20);
         assert!(saved.sessions[0].source(1).is_none());
         assert_eq!(saved.sessions[0].source(3), restored.sessions[0].source(3));
         assert!(store
@@ -945,7 +945,7 @@ fn observed_task_references_survive_restart_without_entering_model_requests() {
     drop(store);
     let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
     let loaded = store.load().unwrap().unwrap();
-    assert_eq!(loaded.schema_version, 19);
+    assert_eq!(loaded.schema_version, 20);
     let mut restored = loaded.restore();
     assert_eq!(restored.sessions[0].task_receipts(), refs);
     assert_eq!(restored.sessions[0].messages.len(), 4);
@@ -2669,7 +2669,7 @@ fn worker_result_reading_line_requires_schema11_and_preserves_exact_v10_backup()
     );
     assert_eq!(position.line, 4);
     let current = Snapshot::capture(&app, "default");
-    assert_eq!(current.schema_version, 19);
+    assert_eq!(current.schema_version, 20);
     let value = serde_json::to_value(&current).unwrap();
     assert_eq!(value["sessions"][0]["reading"]["block_anchor"]["line"], 4);
     let backup = path.with_extension("v10-backup");
@@ -2736,7 +2736,7 @@ fn planner_schema12_preserves_v11_and_restores_only_exact_saved_draft_origin() {
     draft.origin = Some(request.clone());
     let mut snapshot = Snapshot::capture(&app, "default");
     snapshot.plan_draft = Some(draft.clone());
-    assert_eq!(snapshot.schema_version, 19);
+    assert_eq!(snapshot.schema_version, 20);
     let backup = path.with_extension("v11-backup");
     fs::write(&backup, b"conflict").unwrap();
     assert!(store.save(&snapshot).is_err());
@@ -3106,7 +3106,7 @@ fn controller_schema13_preserves_v12_and_never_reactivates_restored_control() {
         app.sessions[1].set_command_state(&id, state);
     }
     let snapshot = Snapshot::capture(&app, "default");
-    assert_eq!(snapshot.schema_version, 19);
+    assert_eq!(snapshot.schema_version, 20);
     let backup = path.with_extension("v12-backup");
     fs::write(&backup, b"conflict").unwrap();
     assert!(store.save(&snapshot).is_err());
@@ -3331,7 +3331,7 @@ fn automatic_run_schema14_requires_its_exact_earlier_enabled_parent_and_preserve
     );
     app.open_chat();
     let snapshot = Snapshot::capture(&app, "default");
-    assert_eq!(snapshot.schema_version, 19);
+    assert_eq!(snapshot.schema_version, 20);
     let backup = path.with_extension("v13-backup");
     fs::write(&backup, b"conflicting backup").unwrap();
     assert!(store.save(&snapshot).is_err());
@@ -3901,7 +3901,7 @@ fn selection_schema17_preserves_v16_and_requires_exact_source_identity_without_r
     app.sessions[0].set_command_state(&id, CommandState::Submitted);
     app.open_chat();
     let snapshot = Snapshot::capture(&app, "default");
-    assert_eq!(snapshot.schema_version, 19);
+    assert_eq!(snapshot.schema_version, 20);
     let backup = path.with_extension("v16-backup");
     fs::write(&backup, b"conflicting backup").unwrap();
     assert!(store.save(&snapshot).is_err());
@@ -4007,7 +4007,7 @@ fn compaction_notes_need_schema_18_and_older_files_still_upgrade() {
         .finish_compaction(attempt, &plan, Ok("a note".into()))
         .unwrap();
     let compacted = Snapshot::capture(&app, "default");
-    assert_eq!(compacted.schema_version, 19);
+    assert_eq!(compacted.schema_version, 20);
     let path = {
         store.save(&compacted).unwrap();
         fixture.file()
@@ -4034,7 +4034,7 @@ fn compaction_notes_need_schema_18_and_older_files_still_upgrade() {
         original
     );
     let saved = store.load().unwrap().unwrap();
-    assert_eq!(saved.schema_version, 19);
+    assert_eq!(saved.schema_version, 20);
     assert!(saved.sessions[0].compaction().is_some());
 }
 
@@ -4247,4 +4247,56 @@ fn restart_between_a_failure_and_ctrl_r_keeps_the_applied_note() {
     let mut again = store.load().unwrap().unwrap().restore();
     let request = again.sessions[0].retry().unwrap();
     assert!(request[0].content.contains("a.txt"), "{request:?}");
+}
+
+#[test]
+fn saved_earlier_attempts_need_schema_20_and_a_user_turn_and_sane_size() {
+    use alfredo_tui::model::ToolCall;
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("m".into());
+    app.sessions[0].insert("add a.txt");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(
+        1,
+        Update::ToolResult {
+            call: ToolCall {
+                name: "write_file".into(),
+                arguments: serde_json::json!({"path": "a.txt", "content": "x"}),
+            },
+            result: "wrote a.txt (1 bytes)".into(),
+            new_round: true,
+        },
+    );
+    app.sessions[0].apply(1, Update::Failed("lost".into()));
+    app.sessions[0].retry().unwrap();
+    let text = serde_json::to_string(&Snapshot::capture(&app, "default")).unwrap();
+    let load = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        edit(&mut value);
+        serde_json::from_value::<Snapshot>(value).unwrap()
+    };
+    assert_eq!(load(&|_| {}).schema_version, 20);
+    let step = |v: &serde_json::Value| v["sessions"][0]["earlier_attempts"]["0"][0].clone();
+    let old = load(&|v| v["schema_version"] = 19.into());
+    assert!(
+        store.save(&old).is_err(),
+        "v19 cannot hold earlier attempts"
+    );
+    let reply = load(&|v| {
+        let one = step(v);
+        v["sessions"][0]["earlier_attempts"] = serde_json::json!({ "1": [one] });
+    });
+    assert!(
+        store.save(&reply).is_err(),
+        "earlier attempts belong to prompts"
+    );
+    let empty = load(&|v| v["sessions"][0]["earlier_attempts"]["0"] = serde_json::json!([]));
+    assert!(store.save(&empty).is_err(), "no empty lists");
+    let big = load(&|v| {
+        let one = step(v);
+        v["sessions"][0]["earlier_attempts"]["0"] = serde_json::json!(vec![one; 65]);
+    });
+    assert!(store.save(&big).is_err(), "at most 64 rounds");
+    store.save(&load(&|_| {})).unwrap();
 }
