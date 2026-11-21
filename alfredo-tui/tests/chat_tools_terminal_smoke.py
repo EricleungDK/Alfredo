@@ -34,6 +34,19 @@ BIG_NEW = BIG_OLD.replace('row 100\nrow 101\nrow 102\n', 'ROW 100 new\nROW 101 n
 README = '# Demo project\nREADME_BODY_MARKER: a tiny repository used by the smoke.\n'
 
 
+# Issue #791: prompt -> (tool, arguments, marker word in the reply) for the protected-path journeys.
+CONFIG_CALLS = {
+    'tweak calc': ('edit_file', {'path': 'calc.py', 'old_text': 'ONE', 'new_text': 'TWO'}, 'CALC'),
+    'adjust calc': ('edit_file', {'path': 'calc.py', 'old_text': 'TWO', 'new_text': 'THREE'}, 'CALC'),
+    'tweak workflow': ('edit_file', {'path': '.github/workflows/ci.yml', 'old_text': 'name: ci',
+                                     'new_text': 'name: WORKFLOW_EDITED'}, 'WORKFLOW'),
+    'tweak attributes': ('edit_file', {'path': '.gitattributes', 'old_text': '* text',
+                                       'new_text': '* ATTR_EDITED'}, 'ATTR'),
+    'save notes': ('write_file', {'path': 'notes.txt', 'content': 'NOTES_ONE\n'}, 'NOTES'),
+    'save workflow': ('write_file', {'path': '.github/workflows/ci.yml',
+                                     'content': 'name: WRITTEN_WORKFLOW\n'}, 'WRITEFLOW'),
+}
+
 TEXT_CALL = '{"name": "write_file", "arguments": {"path": "pwned.txt", "content": "x"}}'
 TEXT_CALL_NOTICE = 'The model wrote a tool call as text; nothing ran. Ctrl+R retries.'
 
@@ -82,6 +95,15 @@ class Fixture:
                     seen = 'src/app.py:1:def handle_request' in tool_results[-1]['content']
                     chunks = [{'message': {'content': 'GREP_FOUND_APP' if seen else 'GREP_VENV_NOISE'},
                                'done': False}]
+                elif any(key in prompt for key in CONFIG_CALLS):
+                    name, arguments, tag = next(v for k, v in CONFIG_CALLS.items() if k in prompt)
+                    if not tool_results:
+                        chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                            {'function': {'name': name, 'arguments': arguments}}]}, 'done': False}]
+                    else:
+                        denied = 'denied' in tool_results[-1]['content']
+                        chunks = [{'message': {'content': tag + ('_DENIED' if denied else '_DONE')},
+                                   'done': False}]
                 elif 'redraft' in prompt and not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'edit_file', 'arguments': {
@@ -519,6 +541,77 @@ class ChatTools(unittest.TestCase):
         self.terminal.wait_for('NESTED_DENIED')
         self.assertFalse(root.joinpath('new').exists())
         self.assertEqual(self.approval_outcomes(), ['denied'])
+
+    def protected_setup(self):
+        root = Path(os.path.realpath(self.repo.name))
+        root.joinpath('calc.py').write_text('ONE\n')
+        root.joinpath('.github/workflows').mkdir(parents=True)
+        root.joinpath('.github/workflows/ci.yml').write_text('name: ci\n')
+        root.joinpath('.gitattributes').write_text('* text\n')
+        return root
+
+    def allow_rules(self):
+        files = list(Path(self.state.name).rglob('chat-allow.json'))
+        return json.loads(files[0].read_text()) if files else []
+
+    def ask(self, prompt, wait_for_card):
+        self.terminal.write(prompt.encode() + b'\r')
+        self.terminal.wait_for(wait_for_card)
+        self.terminal.wait_for('y approve')
+        time.sleep(0.8)
+
+    def check_protected_card(self, prompt, marker, tool, path):
+        # Issue #791: the card has no `a`, says why, `a` repeats the reason and decides nothing.
+        self.ask(prompt, marker)
+        screen = self.terminal.screen()
+        self.assertIn(f'Approve {tool}', screen)
+        self.assertNotIn('a always allow', screen)
+        self.assertIn('a not offered: CI and tool', screen)
+        self.terminal.write(b'a')
+        self.terminal.wait_for('a not offered: CI and tool config can run code or change git; always asks; press y or n')
+        self.assertIn(f'Approve {tool}', self.terminal.screen())
+        self.assertEqual(len(self.allow_rules()), 1, 'a added no rule')
+        time.sleep(0.8)
+
+    def test_a_rule_for_edit_file_never_covers_ci_or_git_config(self):
+        root = self.protected_setup()
+        self.ask('tweak calc', 'a always allow edit_file')
+        self.terminal.write(b'a')
+        self.terminal.wait_for('CALC_DONE')
+        self.assertEqual(root.joinpath('calc.py').read_text(), 'TWO\n')
+        self.assertEqual(len(self.allow_rules()), 1)
+        # A protected path asks even though the rule exists, and stays unchanged until y.
+        ci = root.joinpath('.github/workflows/ci.yml')
+        self.check_protected_card('tweak workflow', 'WORKFLOW_EDITED', 'edit_file', '.github')
+        self.assertEqual(ci.read_text(), 'name: ci\n')
+        self.terminal.write(b'n')
+        self.terminal.wait_for('WORKFLOW_DENIED')
+        self.assertEqual(ci.read_text(), 'name: ci\n')
+        # .gitattributes asks too; y writes it.
+        attributes = root.joinpath('.gitattributes')
+        self.check_protected_card('tweak attributes', 'ATTR_EDITED', 'edit_file', '.gitattributes')
+        self.assertEqual(attributes.read_text(), '* text\n')
+        self.terminal.write(b'y')
+        self.terminal.wait_for('ATTR_DONE')
+        self.assertEqual(attributes.read_text(), '* ATTR_EDITED\n')
+        # An ordinary file still runs by the rule, with no card.
+        self.terminal.write(b'adjust calc\r')
+        self.terminal.wait_for('CALC_DONE')
+        self.assertEqual(root.joinpath('calc.py').read_text(), 'THREE\n')
+        self.assertEqual(len(self.allow_rules()), 1)
+
+    def test_a_rule_for_write_file_never_covers_ci_config(self):
+        root = self.protected_setup()
+        self.ask('save notes', 'a always allow write_file')
+        self.terminal.write(b'a')
+        self.terminal.wait_for('NOTES_DONE')
+        self.assertEqual(root.joinpath('notes.txt').read_text(), 'NOTES_ONE\n')
+        ci = root.joinpath('.github/workflows/ci.yml')
+        self.check_protected_card('save workflow', 'WRITTEN_WORKFLOW', 'write_file', '.github')
+        self.assertEqual(ci.read_text(), 'name: ci\n')
+        self.terminal.write(b'y')
+        self.terminal.wait_for('WRITEFLOW_DONE')
+        self.assertEqual(ci.read_text(), 'name: WRITTEN_WORKFLOW\n')
 
     def test_a_denied_edit_never_touches_the_file(self):
         self.terminal.write(b'redraft README\r')

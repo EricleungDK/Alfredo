@@ -336,8 +336,12 @@ fn a_waits_for_the_arm_delay_and_never_answers_a_push_card() {
 }
 
 fn edit_call() -> Reply {
-    let arguments =
-        json!({"path": "README.md", "old_text": "Old intro line.", "new_text": "New intro line."});
+    edit_call_with(
+        json!({"path": "README.md", "old_text": "Old intro line.", "new_text": "New intro line."}),
+    )
+}
+
+fn edit_call_with(arguments: serde_json::Value) -> Reply {
     Reply::Stream(
         vec![
             format!(
@@ -352,8 +356,12 @@ fn edit_call() -> Reply {
 }
 
 async fn turn(root: &Path, gate: Gate) -> Vec<Event> {
+    turn_with(root, gate, edit_call()).await
+}
+
+async fn turn_with(root: &Path, gate: Gate, call: Reply) -> Vec<Event> {
     let addr = ollama_fixture::reserve();
-    let first = Mutex::new(Some(edit_call()));
+    let first = Mutex::new(Some(call));
     let fixture = ollama_fixture::serve(addr, move |_, index| {
         if index == 0 {
             first.lock().unwrap().take().unwrap()
@@ -707,6 +715,218 @@ fn a_write_file_rule_does_not_cover_directory_creating_writes() {
         "a missing dir still asks"
     );
     let _ = fs::remove_dir_all(root);
+}
+
+const PROTECTED_REASON: &str = "CI and tool config can run code or change git; always asks";
+
+fn path_card(tool: &str, path: &str) -> Card {
+    Card {
+        tool: tool.into(),
+        arguments: json!({"path": path, "content": "x\n", "old_text": "a", "new_text": "b"}),
+        kind: CardKind::Edit,
+        summary: format!("{tool} {path}"),
+        preview: String::new(),
+        fingerprint: format!("/w/{path}:present"),
+    }
+}
+
+const PROTECTED: &[&str] = &[
+    ".github/workflows/ci.yml",
+    ".husky/pre-commit",
+    ".vscode/tasks.json",
+    ".idea/workspace.xml",
+    ".devcontainer/devcontainer.json",
+    ".cargo/config.toml",
+    ".gitlab-ci.yml",
+    ".pre-commit-config.yaml",
+    ".gitattributes",
+    ".gitmodules",
+];
+
+/// Issue #791: the classifier. Every directory and file name, each spelling.
+#[test]
+fn the_protected_classifier_matches_names_in_any_spelling() {
+    for path in PROTECTED {
+        assert!(allow::protected(path), "{path}");
+        assert!(allow::protected(&format!("./{path}")), "./{path}");
+        assert!(allow::protected(&format!("sub/dir/{path}")), "sub/dir/{path}");
+        assert!(allow::protected(&path.to_uppercase()), "{path} upper");
+        assert!(allow::protected(&format!("  {path}  ")), "{path} padded");
+    }
+    for path in [
+        "./.github/x.yml",
+        ".GitHub/x.yml",
+        "sub/.husky/pre-commit",
+        "a/.gitattributes",
+        "a//.github///x",
+        "./a/./.vscode/x",
+        "a/.GITMODULES",
+        ".github",
+        "src/.vscode",
+        "/w/.github/x.yml",
+        "a/.Gitlab-CI.yml",
+    ] {
+        assert!(allow::protected(path), "{path}");
+    }
+}
+
+/// Issue #791: names that look close but are not in the set stay ordinary.
+#[test]
+fn the_protected_classifier_leaves_ordinary_paths_alone() {
+    for path in [
+        "calc.py",
+        "src/x.rs",
+        "docs/github.md",
+        "github/x.yml",
+        ".githubx/a",
+        "x.github/a",
+        ".gith/a",
+        ".gitignore",
+        ".gitattributes.bak",
+        "a.gitmodules",
+        "src/.gitattributes/x",
+        ".gitlab-ci.yml/x",
+        "husky/pre-commit",
+        "cargo/config.toml",
+        "vscode/tasks.json",
+        ".env.example",
+        "",
+        ".",
+        "./",
+    ] {
+        assert!(!allow::protected(path), "{path:?}");
+    }
+}
+
+/// Issue #791: a protected path never gets `a` and no rule matches it, even a rule typed
+/// into chat-allow.json by hand; the card says why and `a` decides nothing.
+#[test]
+fn protected_paths_are_never_offered_or_matched() {
+    let state = dir("protected-state");
+    fs::write(
+        state.join(allow::FILE),
+        r#"[{"id":1,"tool":"write_file"},{"id":2,"tool":"edit_file"}]"#,
+    )
+    .unwrap();
+    let rules = Rules::new(&state);
+    assert_eq!(rules.list().unwrap().len(), 2, "an old file still loads");
+    for tool in ["write_file", "edit_file"] {
+        for path in PROTECTED {
+            let card = path_card(tool, path);
+            assert!(!allow::offered(&card), "{tool} {path}");
+            assert!(allow::offer(&card).is_none(), "{tool} {path}");
+            assert!(!allow::available(&card), "{tool} {path}");
+            assert!(allow::rule_for(&card).is_err(), "{tool} {path}");
+            assert!(rules.add_for(&card).is_err(), "{tool} {path}");
+            assert!(rules.matching(&card).is_none(), "{tool} {path}");
+            assert_eq!(
+                allow::unavailable_reason(&card).as_deref(),
+                Some(PROTECTED_REASON)
+            );
+            assert_eq!(
+                allow::undecided_notice('a', Some(&card)),
+                format!("a not offered: {PROTECTED_REASON}; press y or n")
+            );
+        }
+    }
+    assert_eq!(rules.list().unwrap().len(), 2, "no rule was added");
+    let _ = fs::remove_dir_all(state);
+}
+
+/// Issue #791: the card's key line and the `a` key on a protected path.
+#[test]
+fn a_protected_card_says_why_and_a_decides_nothing() {
+    let card = path_card("edit_file", ".github/workflows/ci.yml");
+    let text = screen(card.clone());
+    assert!(!text.contains("a always allow"), "{text}");
+    assert!(
+        text.contains("n deny · Esc cancels the turn (deny) · a not offered: CI and tool"),
+        "{text}"
+    );
+    assert!(text.contains("always asks"), "{text}");
+    let generic =
+        "Read the approval card first; press y or n again (a always allows, not for push)";
+    for key in ['y', 'n', 'x'] {
+        assert_eq!(allow::undecided_notice(key, Some(&card)), generic, "{key}");
+    }
+    let mut session = pending(card.clone());
+    let armed = Instant::now() + approval::ARM + Duration::from_millis(1);
+    assert!(session.approval_key_answers(armed));
+    assert_eq!(session.answer_approval('a', armed), None);
+    assert!(session.pending_approval().is_some(), "card still pending");
+    assert_eq!(session.answer_approval('y', armed), Some(Decision::Approve));
+    // A protected path inside a new directory names the protected reason, not the
+    // directory one.
+    let mut nested = path_card("write_file", ".github/new/ci.yml");
+    nested.fingerprint = "/w/.github/new/ci.yml:absent+dirs:new".into();
+    assert_eq!(
+        allow::unavailable_reason(&nested).as_deref(),
+        Some(PROTECTED_REASON)
+    );
+}
+
+/// Issue #791: with a rule present, ordinary files still match and keep their offer.
+#[test]
+fn ordinary_paths_still_match_rules() {
+    let state = dir("ordinary-state");
+    let rules = Rules::new(&state);
+    rules.add_for(&path_card("write_file", "calc.py")).unwrap();
+    rules.add_for(&path_card("edit_file", "calc.py")).unwrap();
+    for tool in ["write_file", "edit_file"] {
+        for path in ["calc.py", "src/x.rs", "docs/github.md", "./README.md"] {
+            let card = path_card(tool, path);
+            assert!(allow::offered(&card), "{tool} {path}");
+            assert!(allow::offer(&card).is_some(), "{tool} {path}");
+            assert_eq!(allow::unavailable_reason(&card), None, "{tool} {path}");
+            assert!(rules.matching(&card).is_some(), "{tool} {path}");
+            assert_eq!(
+                allow::undecided_notice('a', Some(&card)),
+                "Read the approval card first; press y or n again (a always allows, not for push)"
+            );
+        }
+    }
+    assert!(screen(path_card("edit_file", "docs/github.md")).contains("a always allow"));
+    // The path rule is for the file tools only: another tool's card is untouched.
+    let commit = path_card("git_commit", ".github/x");
+    assert!(allow::offered(&commit));
+    let _ = fs::remove_dir_all(state);
+}
+
+/// Issue #791 through the tool loop: with a rule for the tool, a protected edit is asked
+/// (unchanged on `n`, written on `y` with no rule id); an ordinary edit is not asked.
+#[tokio::test]
+async fn a_rule_never_skips_the_card_for_a_protected_file() {
+    let root = dir("protected-loop");
+    fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    let ci = root.join(".github/workflows/ci.yml");
+    fs::write(&ci, "name: ci\n").unwrap();
+    let state = dir("protected-loop-state");
+    let log = Log::new(&state);
+    fs::write(state.join(allow::FILE), r#"[{"id":1,"tool":"edit_file"}]"#).unwrap();
+    let rules = Rules::new(&state);
+    let call = || {
+        edit_call_with(
+            json!({"path": ".github/workflows/ci.yml", "old_text": "ci", "new_text": "pwned"}),
+        )
+    };
+    let (denied, asked) = gate(Decision::Deny, &log, &rules);
+    turn_with(&root, denied, call()).await;
+    assert_eq!(*asked.lock().unwrap(), 1, "the card was shown");
+    assert_eq!(fs::read_to_string(&ci).unwrap(), "name: ci\n", "unchanged");
+    let (approved, asked) = gate(Decision::Approve, &log, &rules);
+    turn_with(&root, approved, call()).await;
+    assert_eq!(*asked.lock().unwrap(), 1);
+    assert_eq!(fs::read_to_string(&ci).unwrap(), "name: pwned\n");
+    assert_eq!(log.records().last().unwrap().rule, None, "answered by y");
+    let (ordinary, asked) = gate(Decision::Deny, &log, &rules);
+    turn(&root, ordinary).await;
+    assert_eq!(*asked.lock().unwrap(), 0, "README.md still runs by the rule");
+    assert!(fs::read_to_string(root.join("README.md"))
+        .unwrap()
+        .contains("New intro line."));
+    assert_eq!(log.records().last().unwrap().rule, Some(1));
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(state);
 }
 
 /// Issue #311: a HOST rule written before the fix matches neither its exact command nor a
