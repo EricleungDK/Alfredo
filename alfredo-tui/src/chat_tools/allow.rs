@@ -237,11 +237,12 @@ pub fn unavailable_reason(card: &Card) -> Option<String> {
     rule_for(card).err()
 }
 
-/// Why a write_file that creates directories is never always-allowed (issue #272).
+/// Why a `write_file` that creates directories is never always-allowed (issue #272).
 const DIRS_REASON: &str = "creating directories always asks";
 
 /// The notice for `a` pressed on a card that creates directories (issue #780); `None` for
 /// every other card, whose notice is unchanged.
+#[must_use]
 pub fn dirs_refusal(card: &Card) -> Option<String> {
     unavailable_reason(card)
         .filter(|why| why == DIRS_REASON)
