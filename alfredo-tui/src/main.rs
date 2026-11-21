@@ -1590,7 +1590,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 None => {
                                     work.app.notice =
-                                        "Read the approval card first; press y or n again (a always allows, not for push)".into();
+                                        alfredo_tui::chat_tools::allow::undecided_notice(
+                                            answer,
+                                            work.app.sessions[index].pending_approval(),
+                                        );
                                 }
                             }
                         }

@@ -2331,7 +2331,9 @@ the same 0.5 s arm delay and empty-draft rule as `y`/`n`. The card's key line na
 rule `a` would add.
 
 - **What a rule covers.** `write_file`, `edit_file`, `git_commit`, `git_switch`,
-  `git_merge`: every call of that tool. `run_command`: one command prefix, matched on whole
+  `git_merge`: every call of that tool, except that a `write_file` that creates missing
+  directories (issue #272) is never covered: its card offers no `a`, says `a not offered:
+  creating directories always asks`, and pressing `a` there names the same reason. `run_command`: one command prefix, matched on whole
   whitespace-separated words (`cargo test` covers `cargo test --lib`, not `cargo testx`).
   A sandboxed rule allows ANY arguments after its words (`cargo test --config …`), so its
   reach is bounded only by the Sandbox; the card says so. Rules ignore `cwd`.
