@@ -774,6 +774,59 @@ fn retries_keep_earlier_rows_within_their_own_byte_cap() {
     assert!(total(&s) <= MAX_EARLIER_BYTES);
 }
 
+/// Earlier-row bytes and rounds after each attempt of uncut `write_file` calls (content
+/// sizes in bytes) fails and is retried. An attempt alone stays under the live output cap,
+/// so reaching the earlier cap exactly takes two.
+fn retried_writes(attempts: &[&[usize]]) -> (usize, usize) {
+    let mut s = Session::new("m".into());
+    s.insert("write big files");
+    s.begin().unwrap();
+    for sizes in attempts {
+        let attempt = s.attempt;
+        for (k, content) in sizes.iter().enumerate() {
+            s.apply(
+                attempt,
+                tool_result(
+                    "write_file",
+                    serde_json::json!({"path": format!("f_{k}.txt"), "content": "c".repeat(*content)}),
+                    "ok",
+                    k == 0,
+                ),
+            );
+        }
+        s.apply(attempt, Update::Failed("lost".into()));
+        s.retry().unwrap();
+    }
+    let steps = s.earlier_steps(0);
+    (steps.iter().map(|step| step.bytes()).sum(), steps.len())
+}
+
+#[test]
+fn retry_keeps_earlier_rows_of_exactly_the_cap_and_drops_the_oldest_one_byte_over() {
+    use alfredo_tui::model::MAX_EARLIER_BYTES;
+    let first = [2048; 40];
+    let (first_bytes, _) = retried_writes(&[&first]);
+    // Fill the second attempt with full 2 KB writes, then size its last write so both
+    // rounds together are the cap to the byte.
+    let mut second = vec![2048; 1];
+    let last = loop {
+        let base = retried_writes(&[&first, &[second.clone(), vec![0]].concat()]).0;
+        assert!(base > first_bytes);
+        if base + 2048 >= MAX_EARLIER_BYTES {
+            break MAX_EARLIER_BYTES - base;
+        }
+        second.push(2048);
+    };
+    second.push(last);
+    // Exactly the cap: nothing is dropped.
+    assert_eq!(retried_writes(&[&first, &second]), (MAX_EARLIER_BYTES, 2));
+    // One byte over: the oldest round goes, the newest stays.
+    *second.last_mut().unwrap() += 1;
+    let (bytes, rounds) = retried_writes(&[&first, &second]);
+    assert_eq!(rounds, 1);
+    assert_eq!(bytes, MAX_EARLIER_BYTES - first_bytes + 1);
+}
+
 #[test]
 fn retry_cuts_long_call_arguments_but_keeps_path_and_command() {
     let cut = |arguments: serde_json::Value| {
