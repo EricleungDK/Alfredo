@@ -24,7 +24,7 @@ pub(crate) use failure::{failure_detail, title_failure_line};
 mod refusal;
 pub use refusal::{active_refusal_view, lint_refusal_view};
 use refusal::{
-    draft_matches, goal_brief, lint_refusal, plan_goal, scope_blocker, unattended_lint,
+    draft_matches, goal_brief, lint_refusal, parse, plan_goal, scope_blocker, unattended_lint,
     ACTIVE_REFUSAL_FIX, ACTIVE_REFUSAL_PREFIX,
 };
 #[path = "autopilot_integration.rs"]
@@ -521,27 +521,6 @@ pub fn state_path(directory: &Path, conversation: &str) -> PathBuf {
         "autopilot-{:x}.json",
         Sha256::digest(conversation.as_bytes())
     ))
-}
-
-/// Name the state file and the ways out of a refused one; the file is never touched.
-fn unreadable(path: &Path, problem: &str) -> String {
-    let path = path.display();
-    format!(
-        "{problem} ({path}); original preserved. Move it aside (mv \"{path}\" \"{path}.bad\") or start with --new-mission NAME"
-    )
-}
-
-/// Parse and validate saved state bytes; every refusal names `path` and the way out.
-fn parse(path: &Path, bytes: &[u8]) -> Result<Saved, String> {
-    if bytes.len() > MAX_STATE {
-        return Err(unreadable(path, "Autopilot state exceeds its size bound"));
-    }
-    let saved: Saved = serde_json::from_slice(bytes)
-        .map_err(|error| unreadable(path, &format!("Autopilot state is invalid ({error})")))?;
-    saved
-        .validate()
-        .map_err(|problem| unreadable(path, &problem))?;
-    Ok(saved)
 }
 
 /// Another mission's saved loop state as read by `peek`.
