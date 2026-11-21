@@ -108,11 +108,20 @@ pub fn protected(path: &str) -> bool {
 /// the workspace root, so a symlinked directory alias is seen), or because that target is what
 /// a protected name at the root links to ([`super::edit::ALIASED`]).
 fn protects(card: &Card) -> bool {
-    let resolved = card
+    let state = card
         .fingerprint
-        .split("+dirs:")
-        .next()
-        .and_then(|state| state.rsplit_once(':'))
+        .strip_suffix(super::edit::ALIASED)
+        .unwrap_or(&card.fingerprint);
+    // `{path}:{sha256 hex | absent}`; with new directories `{path}:absent+dirs:{list}`, which is
+    // never offered anyway. The state token is checked, so a file name holding `:` or
+    // `+dirs:` cannot move the split.
+    let resolved = state
+        .rsplit_once(':')
+        .filter(|(_, token)| {
+            *token == "absent"
+                || (token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()))
+        })
+        .or_else(|| state.split_once(":absent+dirs:"))
         .map(|(path, _)| path);
     matches!(card.tool.as_str(), "write_file" | "edit_file")
         && (card

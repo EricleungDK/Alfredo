@@ -1113,8 +1113,15 @@ fn odd_file_names_cannot_hide_a_protected_directory() {
         for tool in ["edit_file", "write_file"] {
             let card = real_card(&root, tool, &format!("cfg/{name}"));
             assert!(rules.matching(&card).is_none(), "{tool} cfg/{name}");
+            // (A write_file whose name holds `+dirs:` is asked anyway: the old directory
+            // check reads the fingerprint text.)
             let card = real_card(&root, tool, &format!("d/{name}"));
-            assert!(rules.matching(&card).is_some(), "{tool} d/{name}");
+            let asked_anyway = tool == "write_file" && name.contains("+dirs:");
+            assert_eq!(
+                rules.matching(&card).is_some(),
+                !asked_anyway,
+                "{tool} d/{name}"
+            );
         }
     }
     let _ = fs::remove_dir_all(root);

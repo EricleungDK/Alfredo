@@ -2354,7 +2354,9 @@ rule `a` would add.
   under a directory named `.idea` or `.cargo` is not (only the path below the workspace root
   is judged), and so is whatever a protected name directly at the workspace root links to
   (`.pre-commit-config.yaml -> tools/pc.yaml` protects `tools/pc.yaml`; `.husky -> hooks`
-  protects `hooks/`). Not detected: such a link below the root (`sub/.husky -> x`), and a
+  protects `hooks/`), even when the link's target does not exist yet (a `write_file` that
+  would create it asks) and through chains of up to 8 links; a longer chain or a link loop
+  there makes every `write_file`/`edit_file` ask. Not detected: such a link below the root (`sub/.husky -> x`), and a
   hard link to a protected file.
 - **Never push.** `git_push` cards (Push tier, `Tier::allowlistable` false) offer no `a`,
   and no rule matches them, including rules added by hand to the file. A `run_command`
