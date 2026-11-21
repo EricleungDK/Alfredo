@@ -743,7 +743,7 @@ fn saved_earlier_attempts_are_accepted_and_refused_exactly_at_their_limits() {
             let messages = v["sessions"][0]["messages"].as_array_mut().unwrap();
             messages.truncate(len.min(2));
             while messages.len() < len {
-                let role = if messages.len() % 2 == 0 {
+                let role = if messages.len().is_multiple_of(2) {
                     "user"
                 } else {
                     "assistant"
