@@ -2071,10 +2071,10 @@ pub(crate) fn cut_earlier_arguments(arguments: &mut serde_json::Value) {
     }
 }
 
-/// Whether `result` is that of a `run_command` killed mid-run (issue #333).
 /// Result prefix of an edit that `/undo` restored (issue #784).
 const UNDONE: &str = "undone: ";
 
+/// Whether `result` is that of a `run_command` killed mid-run (issue #333).
 fn killed_run(call: &ToolCall, result: &str) -> bool {
     call.name == "run_command" && result.starts_with(crate::chat_tools::CANCELLED_RESULT)
 }
