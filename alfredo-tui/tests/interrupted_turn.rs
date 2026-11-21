@@ -407,3 +407,279 @@ fn snapshot_validation_rejects_invalid_interrupted_indices() {
     store.save(&snapshot).unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
+
+fn tool_result(name: &str, arguments: serde_json::Value, result: &str, new_round: bool) -> Update {
+    Update::ToolResult {
+        call: alfredo_tui::model::ToolCall {
+            name: name.into(),
+            arguments,
+        },
+        result: result.into(),
+        new_round,
+    }
+}
+
+fn screen_text(app: &App) -> String {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| alfredo_tui::ui::draw(frame, app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Issue #775: a retried turn must not redo what the interrupted attempt applied.
+#[test]
+fn retry_after_applied_calls_keeps_the_applied_note() {
+    let mut s = Session::new("m".into());
+    s.insert("add a.txt");
+    s.begin().unwrap();
+    s.apply(
+        1,
+        tool_result(
+            "write_file",
+            serde_json::json!({"path": "a.txt", "content": "x"}),
+            "wrote a.txt (1 bytes)",
+            true,
+        ),
+    );
+    s.apply(
+        1,
+        tool_result(
+            "edit_file",
+            serde_json::json!({"path": "b.txt", "old_text": "1", "new_text": "2"}),
+            "edited b.txt",
+            false,
+        ),
+    );
+    s.apply(1, Update::Failed("connection lost".into()));
+    let request = s.retry().unwrap();
+    assert_eq!(request.len(), 1, "{request:?}");
+    let prompt = &request[0].content;
+    assert!(prompt.starts_with("add a.txt"), "{prompt}");
+    assert!(
+        prompt.contains("Earlier attempt of this turn was interrupted"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Already applied"), "{prompt}");
+    assert!(
+        prompt.contains("- write_file a.txt: wrote a.txt (1 bytes)"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("- edit_file b.txt: edited b.txt"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Do not repeat these; continue from there."),
+        "{prompt}"
+    );
+    assert_eq!(request.last().unwrap().role, "user");
+    // A second failure keeps both attempts' effects in the next retry.
+    s.apply(
+        2,
+        tool_result(
+            "write_file",
+            serde_json::json!({"path": "c.txt", "content": "y"}),
+            "wrote c.txt (1 bytes)",
+            true,
+        ),
+    );
+    s.cancel();
+    let again = s.retry().unwrap();
+    let prompt = &again[0].content;
+    assert!(
+        prompt.contains("a.txt") && prompt.contains("b.txt") && prompt.contains("c.txt"),
+        "{prompt}"
+    );
+    assert_eq!(prompt.matches("Already applied").count(), 1, "{prompt}");
+}
+
+#[test]
+fn retry_after_a_killed_run_command_says_effects_may_be_partial() {
+    let mut s = Session::new("m".into());
+    s.insert("build it");
+    s.begin().unwrap();
+    s.apply(
+        1,
+        tool_result(
+            "run_command",
+            serde_json::json!({"command": "touch marker"}),
+            &format!(
+                "{}1.0s · killed; it may have partly run",
+                alfredo_tui::chat_tools::CANCELLED_RESULT
+            ),
+            true,
+        ),
+    );
+    s.apply(1, Update::Failed("connection lost".into()));
+    let request = s.retry().unwrap();
+    let prompt = &request[0].content;
+    assert!(
+        prompt.contains("- run_command touch marker: cancelled mid-run, effects may be partial"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn retry_keeps_the_first_attempts_rows_in_the_transcript_marked_earlier() {
+    let mut app = App::new("m".into());
+    let s = &mut app.sessions[0];
+    s.insert("add a.txt");
+    s.begin().unwrap();
+    s.apply(
+        1,
+        tool_result(
+            "write_file",
+            serde_json::json!({"path": "a.txt", "content": "x"}),
+            "wrote a.txt (1 bytes)",
+            true,
+        ),
+    );
+    s.apply(1, Update::Failed("connection lost".into()));
+    s.retry().unwrap();
+    let screen = screen_text(&app);
+    assert!(screen.contains("earlier attempt"), "{screen}");
+    assert!(screen.contains("⚙ write_file"), "{screen}");
+    assert!(screen.contains("wrote a.txt"), "{screen}");
+}
+
+#[test]
+fn retry_after_only_unapplied_calls_resends_the_bare_prompt() {
+    let mut s = Session::new("m".into());
+    s.insert("look around");
+    s.begin().unwrap();
+    s.apply(
+        1,
+        tool_result(
+            "read_file",
+            serde_json::json!({"path": "a.txt"}),
+            "hello",
+            true,
+        ),
+    );
+    s.apply(
+        1,
+        tool_result(
+            "write_file",
+            serde_json::json!({"path": "b.txt", "content": "x"}),
+            "error: denied by the owner",
+            true,
+        ),
+    );
+    s.apply(
+        1,
+        tool_result(
+            "edit_file",
+            serde_json::json!({"path": "c.txt", "old_text": "1", "new_text": "2"}),
+            "error: old_text not found",
+            true,
+        ),
+    );
+    s.apply(1, Update::Failed("connection lost".into()));
+    let request = s.retry().unwrap();
+    assert_eq!(roles(&request), [("user", "look around")]);
+}
+
+fn write_result(path: &str) -> Update {
+    tool_result(
+        "write_file",
+        serde_json::json!({"path": path, "content": "x"}),
+        &format!("wrote {path} (1 bytes)"),
+        true,
+    )
+}
+
+#[test]
+fn an_empty_retry_reply_still_shows_the_earlier_attempts_rows() {
+    let mut app = App::new("m".into());
+    let s = &mut app.sessions[0];
+    s.insert("add a.txt");
+    s.begin().unwrap();
+    s.apply(1, write_result("a.txt"));
+    s.apply(1, Update::Failed("connection lost".into()));
+    s.retry().unwrap();
+    s.apply(2, Update::Done);
+    assert_eq!(s.status, Status::Failed(NO_TEXT.into()));
+    let screen = screen_text(&app);
+    assert!(screen.contains("earlier attempt"), "{screen}");
+    assert!(screen.contains("⚙ write_file"), "{screen}");
+}
+
+#[test]
+fn an_abandoned_retried_turn_keeps_every_attempts_effects() {
+    let mut s = Session::new("m".into());
+    s.insert("add files");
+    s.begin().unwrap();
+    s.apply(1, write_result("a.txt"));
+    s.apply(1, Update::Failed("connection lost".into()));
+    s.retry().unwrap();
+    s.apply(2, write_result("c.txt"));
+    s.apply(2, Update::Failed("lost again".into()));
+    s.insert("next");
+    let request = s.begin().unwrap();
+    assert_eq!(request.len(), 3, "{request:?}");
+    assert_eq!(request[0].content, "add files");
+    assert_eq!(request[1].role, "assistant");
+    assert!(
+        request[1].content.contains("a.txt") && request[1].content.contains("c.txt"),
+        "{request:?}"
+    );
+    assert_eq!(request[2].content, "next");
+}
+
+#[test]
+fn repeated_retries_keep_only_the_last_64_earlier_rounds() {
+    let mut s = Session::new("m".into());
+    s.insert("add files");
+    s.begin().unwrap();
+    for n in 0..70 {
+        let attempt = s.attempt;
+        s.apply(attempt, write_result(&format!("f{n}.txt")));
+        s.apply(attempt, Update::Failed("lost".into()));
+        s.retry().unwrap();
+    }
+    assert_eq!(s.earlier_steps(0).len(), 64);
+    let request = s.request_through(0);
+    assert!(
+        request[0].content.contains("f69.txt") && !request[0].content.contains("f0.txt"),
+        "{}",
+        request[0].content
+    );
+}
+
+/// mech R3-76694151: the note rides on a retried turn that is not the first one.
+#[test]
+fn retry_of_a_later_turn_carries_the_applied_note() {
+    let mut s = Session::new("m".into());
+    s.insert("first");
+    s.begin().unwrap();
+    s.apply(1, Update::Token("done".into()));
+    s.apply(1, Update::Done);
+    s.insert("add a.txt");
+    s.begin().unwrap();
+    let attempt = s.attempt;
+    s.apply(attempt, write_result("a.txt"));
+    s.apply(attempt, Update::Failed("lost".into()));
+    let request = s.retry().unwrap();
+    assert_eq!(request.len(), 3, "{request:?}");
+    assert_eq!(request[0].content, "first");
+    let last = &request[2].content;
+    assert!(last.starts_with("add a.txt"), "{last}");
+    assert!(
+        last.contains("Already applied") && last.contains("a.txt: wrote"),
+        "{last}"
+    );
+    // The completed first turn's user message never gets a note.
+    assert_eq!(request[0].content, "first");
+    // An assistant reply (odd index) is never given one either.
+    assert_eq!(request[1].content, "done");
+}

@@ -17,7 +17,7 @@ use std::{
 use tokio::{runtime::Runtime, task::JoinHandle};
 
 /// On-disk schema written by `Snapshot::capture`.
-const SCHEMA_VERSION: u32 = 19;
+const SCHEMA_VERSION: u32 = 20;
 const LIMIT: usize = 12 * 1024 * 1024; // JSON escaping can expand bounded text sixfold.
 static TEMP: AtomicU64 = AtomicU64::new(0);
 type Result<T> = std::result::Result<T, String>;
@@ -74,7 +74,7 @@ impl Snapshot {
         }
     }
     pub(crate) fn validate(&self, namespace: &str) -> Result<()> {
-        if !matches!(self.schema_version, 1..=19)
+        if !matches!(self.schema_version, 1..=20)
             || (self.schema_version == 1 && self.task_view.is_some())
             || (self.schema_version < 5 && self.plan_draft.is_some())
             || self.namespace != namespace
@@ -160,6 +160,9 @@ impl Snapshot {
             }
             if !session.valid_tool_steps(self.schema_version) {
                 return Err("Conversation tool steps are invalid".into());
+            }
+            if !session.valid_earlier_attempts(self.schema_version) {
+                return Err("Conversation earlier attempts are invalid".into());
             }
             if !session.valid_sources(self.schema_version) {
                 return Err("Invalid conversation response sources".into());
