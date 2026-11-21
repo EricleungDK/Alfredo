@@ -383,12 +383,19 @@ fn assert_refused(args: &[&str], flag: &str) {
     let err = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{args:?}: {err}");
     assert!(output.stdout.is_empty(), "{args:?}");
+    // --resume keeps the paused run's own repair budget, so --max-repairs never names it (#776).
+    let scope = if flag == "--max-repairs" {
+        "--go or the terminal"
+    } else {
+        "--go, --resume or the terminal"
+    };
     assert!(
-        err.contains(&format!(
-            "{flag} applies only to --go, --resume or the terminal"
-        )),
+        err.contains(&format!("{flag} applies only to {scope}")),
         "{args:?}: {err}"
     );
+    if flag == "--max-repairs" {
+        assert!(!err.contains("--resume"), "{args:?}: {err}");
+    }
     assert!(!marker.exists(), "{args:?}: nothing runs");
 }
 
@@ -475,9 +482,15 @@ fn help_and_reference_say_which_modes_on_finish_and_max_repairs_apply_to() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        text.contains(
-            "--on-finish and --max-repairs apply only to --go, --resume and the terminal"
-        ),
+        text.contains("--on-finish applies only to --go, --resume and the terminal"),
+        "{text}"
+    );
+    assert!(
+        text.contains("--max-repairs applies only to --go and the terminal"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("--max-repairs apply only to --go, --resume"),
         "{text}"
     );
 }

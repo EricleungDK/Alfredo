@@ -114,6 +114,12 @@ class FlagTests(unittest.TestCase):
             self.assertIn('only for', row.lower(), flag)
             for word in ('`--go`', '`--resume`', 'terminal', '`--chat`', '`--doctor`', 'exits 2'):
                 self.assertIn(word, row, flag + ' row lacks ' + word)
+        # Issue #776: --resume keeps the paused run's own budget, so only --on-finish allows it.
+        self.assertIn('only for `--go`, `--resume` and the terminal', rows['--on-finish'].lower())
+        repairs = rows['--max-repairs'].lower()
+        self.assertIn('only for `--go` and the terminal', repairs)
+        self.assertNotIn('`--resume` and the terminal', repairs)
+        self.assertIn("keeps the run's own budget", repairs)
 
     def test_reference_states_the_combined_bound_for_plan_revise(self):
         text = " ".join((ROOT / "alfredo-tui/docs/reference.md").read_text(encoding="utf-8").split())
@@ -238,7 +244,10 @@ class FlagTests(unittest.TestCase):
         source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
         reference = (ROOT / 'alfredo-tui/docs/reference.md').read_text(encoding='utf-8')
         for text in (' '.join(source.split()), ' '.join(reference.split())):
-            self.assertIn('apply only to --go, --resume and the terminal', text.replace('`', ''))
+            plain = text.replace('`', '')
+            self.assertIn('--on-finish applies only to --go, --resume and the terminal', plain)
+            self.assertIn('--max-repairs applies only to --go and the terminal', plain)
+            self.assertNotIn('--max-repairs apply only to --go, --resume', plain)
 
 
 class StatusTests(unittest.TestCase):
