@@ -1100,3 +1100,30 @@ fn a_on_a_directory_creating_card_decides_nothing_and_adds_no_rule() {
     assert!(rules.matching(&dirs_card("write_file")).is_none());
     assert_eq!(session.answer_approval('y', armed), Some(Decision::Approve));
 }
+
+/// Issue #780: the notice for a key that decided nothing, every branch with its exact text.
+#[test]
+fn the_undecided_key_notice_names_the_directory_reason_only_for_a_on_that_card() {
+    let generic =
+        "Read the approval card first; press y or n again (a always allows, not for push)";
+    let dirs = dirs_card("write_file");
+    assert_eq!(
+        allow::undecided_notice('a', Some(&dirs)),
+        "a not offered: creating directories always asks; press y or n"
+    );
+    for key in ['y', 'n', 'x'] {
+        assert_eq!(allow::undecided_notice(key, Some(&dirs)), generic, "{key}");
+    }
+    let mut host = dirs_card("write_file");
+    host.kind = CardKind::Shell { escalated: true };
+    for card in [
+        shell("npm install", true),
+        host,
+        shell("npm install", false),
+        plain("git_push", CardKind::Push),
+        plain("edit_file", CardKind::Edit),
+    ] {
+        assert_eq!(allow::undecided_notice('a', Some(&card)), generic);
+    }
+    assert_eq!(allow::undecided_notice('a', None), generic);
+}

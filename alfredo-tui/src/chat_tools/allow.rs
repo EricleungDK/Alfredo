@@ -248,6 +248,17 @@ pub fn dirs_refusal(card: &Card) -> Option<String> {
         .map(|why| format!("a not offered: {why}; press y or n"))
 }
 
+/// The notice for a y/n/a key that decided nothing on an armed, fully shown card: the
+/// directory reason for `a` on a directory-creating write (issue #780), else the generic hint.
+pub fn undecided_notice(answer: char, card: Option<&Card>) -> String {
+    card.filter(|_| answer == 'a')
+        .and_then(dirs_refusal)
+        .unwrap_or_else(|| {
+            "Read the approval card first; press y or n again (a always allows, not for push)"
+                .into()
+        })
+}
+
 /// Whether `a` is available on `card`: the rule can be added and the hint shows it in full.
 pub fn available(card: &Card) -> bool {
     offer(card).is_some()
