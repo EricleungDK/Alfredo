@@ -257,6 +257,7 @@ impl Session {
         self.messages.iter().map(|m| m.content.len()).sum::<usize>()
             + self.attachments.values().map(String::len).sum::<usize>()
             + self.tool_bytes()
+            + self.earlier_bytes()
             + self.compaction.as_ref().map_or(0, |c| c.summary.len())
     }
 

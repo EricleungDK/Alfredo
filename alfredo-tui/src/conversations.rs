@@ -1,6 +1,8 @@
 //! Bounded local conversation snapshots. No inference or task effect is replayed.
 use crate::{
-    model::{App, Session, Status, MAX_DRAFT, MAX_MESSAGES, MAX_SESSIONS, MAX_TEXT},
+    model::{
+        App, Session, Status, MAX_DRAFT, MAX_EARLIER_BYTES, MAX_MESSAGES, MAX_SESSIONS, MAX_TEXT,
+    },
     tasks::{regular_file, StoreLock, TaskStore},
 };
 use serde::{Deserialize, Serialize};
@@ -244,6 +246,9 @@ impl Snapshot {
                     > MAX_TEXT
             {
                 return Err("Conversation exceeds supported bounds".into());
+            }
+            if session.earlier_bytes() > MAX_EARLIER_BYTES {
+                return Err("Conversation earlier attempts exceed supported bounds".into());
             }
             if session.messages.len() % 2 != 0
                 || session
