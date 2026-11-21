@@ -316,7 +316,7 @@ pub struct Session {
     tool_steps: std::collections::BTreeMap<usize, Vec<ToolStep>>,
     /// Rounds of interrupted attempts that Ctrl+R replaced, keyed by the user-message
     /// index of their turn (issue #775): shown as `· earlier attempt` rows and named in
-    /// the retried request. Saved (schema v19, absent when empty).
+    /// the retried request. Saved (schema v20, absent when empty).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     earlier_attempts: std::collections::BTreeMap<usize, Vec<ToolStep>>,
     /// Always-allow rule that approved each call, keyed by assistant-message index then
@@ -1292,10 +1292,10 @@ impl Session {
             .sum()
     }
 
-    /// Saved earlier attempts need schema v19 and belong to user messages.
+    /// Saved earlier attempts need schema v20 and belong to user messages.
     pub(crate) fn valid_earlier_attempts(&self, schema: u32) -> bool {
         self.earlier_attempts.is_empty()
-            || (schema >= 19
+            || (schema >= 20
                 && self.earlier_attempts.len() <= MAX_MESSAGES / 2
                 && self.earlier_attempts.iter().all(|(index, steps)| {
                     index % 2 == 0

@@ -1490,6 +1490,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             && message.role != "user"
             && message.content.trim().is_empty()
             && session.tool_steps(index).is_empty()
+            && session.earlier_steps(index.saturating_sub(1)).is_empty()
             && session.status == Status::Failed(crate::model::NO_TEXT.into())
         {
             continue;

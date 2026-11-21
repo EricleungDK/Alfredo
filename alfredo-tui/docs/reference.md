@@ -2012,8 +2012,10 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 - **Context.** The calls and results stay part of that turn: later turns send them
   before the reply they fed, they count toward the 128 KiB conversation limit and the
   `--num-ctx` estimate, and compaction summarises them with their turn. They are saved
-  with the conversation (schema v19; the first save keeps `<conversation>.v18-backup`;
-  older builds refuse a v19 file). Retrying a turn drops its tool rounds.
+  with the conversation (schema v19; v20 adds the earlier-attempt rounds of retried turns; the first save
+  keeps `<conversation>.v19-backup`; older builds refuse a v20 file). Retrying a turn
+  keeps its rounds as `· earlier attempt` rows and names what they applied in the retried
+  prompt (issue #775).
 - **Needs a tool-capable model.** If Ollama answers HTTP 400 `... does not support
   tools`, that round is retried once without tools and chat continues as plain chat:
   one notice (`Model X has no tool support; chat is running without file tools`) is
