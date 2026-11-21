@@ -1110,6 +1110,15 @@ impl Session {
                         if let Some(block) = self.attachments.get(&index) {
                             message.content.push_str(block);
                         }
+                        // A retried turn's earlier attempt applied changes: say so, so the
+                        // model does not redo them (issue #775).
+                        if index % 2 == 0 && !dropped {
+                            if let Some(note) = Self::applied_lines(self.earlier_steps(index)) {
+                                message.content.push_str(&format!(
+                                    "\n\n[Earlier attempt of this turn was interrupted. Already applied before it stopped:\n{note}]\nDo not repeat these; continue from there."
+                                ));
+                            }
+                        }
                         Some(match note {
                             // The reply of a kept interrupted turn is only the note.
                             Some(note) if index % 2 == 1 => vec![Message {
@@ -1134,9 +1143,22 @@ impl Session {
     /// executed mutating call whose outcome was not an error (denied, failed and
     /// never-answered calls are left out). `None` when nothing was applied.
     pub(crate) fn applied_note(&self, assistant_index: usize) -> Option<String> {
+        let steps: Vec<ToolStep> = self
+            .earlier_steps(assistant_index.saturating_sub(1))
+            .iter()
+            .chain(self.tool_steps(assistant_index))
+            .cloned()
+            .collect();
+        let applied = Self::applied_lines(&steps)?;
+        Some(format!(
+            "[This turn was interrupted. Already applied before it stopped:\n{applied}]"
+        ))
+    }
+
+    /// One line per executed mutating call of `steps` whose outcome was not an error.
+    fn applied_lines(steps: &[ToolStep]) -> Option<String> {
         use crate::chat_tools::{Tier, TOOLS};
-        let applied: Vec<String> = self
-            .tool_steps(assistant_index)
+        let applied: Vec<String> = steps
             .iter()
             .flat_map(|step| step.calls.iter().zip(&step.results))
             .filter(|(call, result)| {
@@ -1181,12 +1203,7 @@ impl Session {
                 format!("- {} {target}: {report}", call.name)
             })
             .collect();
-        (!applied.is_empty()).then(|| {
-            format!(
-                "[This turn was interrupted. Already applied before it stopped:\n{}]",
-                applied.join("\n")
-            )
-        })
+        (!applied.is_empty()).then(|| applied.join("\n"))
     }
 
     /// Show the project-notes arrival `line` in the transcript unless this content
@@ -1246,9 +1263,22 @@ impl Session {
 
     /// Tool rounds of the reply at `assistant_index` (empty when none).
     pub fn tool_steps(&self, assistant_index: usize) -> &[ToolStep] {
+        if assistant_index.is_multiple_of(2) {
+            return &[];
+        }
         self.tool_steps
             .get(&assistant_index)
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// Tool rounds of earlier, interrupted attempts at the turn opened by the user
+    /// message at `user_index` (issue #775). Kept under the user index in `tool_steps`;
+    /// shown in the transcript, never sent as rounds, summarised by the retry note.
+    pub fn earlier_steps(&self, user_index: usize) -> &[ToolStep] {
+        if !user_index.is_multiple_of(2) {
+            return &[];
+        }
+        self.tool_steps.get(&user_index).map_or(&[], Vec::as_slice)
     }
 
     pub(crate) fn tool_bytes(&self) -> usize {
@@ -1265,8 +1295,9 @@ impl Session {
             || (schema >= 19
                 && self.tool_steps.len() <= MAX_MESSAGES / 2
                 && self.tool_steps.iter().all(|(index, steps)| {
-                    index % 2 == 1
-                        && *index < self.messages.len()
+                    // Odd: a reply's rounds. Even: earlier attempts at a user message's turn.
+                    *index < self.messages.len()
+                        && (index % 2 == 1 || self.messages[*index].role == "user")
                         && !steps.is_empty()
                         && steps.len() <= 64
                         && steps.iter().all(ToolStep::valid)
@@ -1317,7 +1348,14 @@ impl Session {
         // The incomplete assistant message stays visible until an explicit retry.
         self.messages.pop();
         self.sources.remove(&self.messages.len());
-        self.tool_steps.remove(&self.messages.len());
+        // The attempt's rounds stay as earlier-attempt rows under the user message; what
+        // they applied rides on the retried request (issue #775).
+        if let Some(steps) = self.tool_steps.remove(&self.messages.len()) {
+            let earlier = self.tool_steps.entry(self.messages.len() - 1).or_default();
+            earlier.extend(steps);
+            let excess = earlier.len().saturating_sub(64);
+            earlier.drain(..excess);
+        }
         self.rule_marks.remove(&self.messages.len());
         Ok(self.start())
     }
@@ -1581,6 +1619,8 @@ impl Session {
                                 .sum::<usize>()
                     })
                     .sum::<usize>()
+                // One "earlier attempt" label row per retried turn (#775).
+                + self.tool_steps.keys().filter(|index| *index % 2 == 0).count()
                 // Compaction note (#187): marker, one row per summary line, blank row.
                 + self.compaction().map_or(0, |note| {
                     note.summary.bytes().filter(|b| *b == b'\n').count() + 3

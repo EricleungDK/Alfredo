@@ -299,6 +299,7 @@ impl Session {
                         + self
                             .tool_steps(i)
                             .iter()
+                            .chain(self.earlier_steps(i))
                             .map(super::ToolStep::bytes)
                             .sum::<usize>()
                 })

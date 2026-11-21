@@ -1521,6 +1521,18 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             color
         };
         // Tool rounds (issue #233) show before the reply they fed: call, then a cut result.
+        // Rounds of an interrupted earlier attempt at this turn (issue #775), labelled.
+        if index % 2 == 1 && !session.earlier_steps(index - 1).is_empty() {
+            lines.push(Line::styled("· earlier attempt", dim()));
+            for step in session.earlier_steps(index - 1) {
+                lines.extend(tool_step_lines(
+                    step,
+                    width,
+                    session.tool_results_expanded,
+                    |_| None,
+                ));
+            }
+        }
         let mut first_call = 0;
         for step in session.tool_steps(index) {
             lines.extend(tool_step_lines(

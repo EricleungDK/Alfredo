@@ -773,8 +773,16 @@ A `run_command` killed mid-run by Esc, `/stop` or Ctrl+Q counts too: it shows a 
 `↳ cancelled after Ns · killed; it may have partly run` and the note says
 `run_command <cmd>: cancelled mid-run, effects may be partial`. Pending, denied and
 failed calls and read-only results are not sent. Once the new turn
-starts, the interrupted turn is no longer retryable with Ctrl+R; Ctrl+R before
-sending anything new still retries it exactly as before. Which turns were moved past
+starts, the interrupted turn is no longer retryable with Ctrl+R. Ctrl+R before
+sending anything new retries it with the same prompt; when the interrupted attempt
+applied changes, the retried prompt ends with one framed block (like an `@path`
+attachment) naming each of them: `[Earlier attempt of this turn was interrupted.
+Already applied before it stopped: ...]` and `Do not repeat these; continue from
+there.` A turn that applied nothing is retried with the bare prompt, unchanged. The
+first attempt's `⚙` rows stay in the transcript under `· earlier attempt`, are saved
+with the conversation (the note survives a restart) and accumulate across repeated
+retries (the last 64 rounds are kept). Every call the model proposes again still goes
+through the approval card. Which turns were moved past
 is saved with the conversation, so a restart does not send them to the model either.
 
 Snapshots save outside the workspace in `conversations-<name-sha256>.json`, beside
@@ -1978,7 +1986,7 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   further calls (up to 64) get an `error: not run` result and any beyond are dropped;
   a model that asks for one more is stopped and the reply ends with `[Stopped: tool step
   limit reached after 8 rounds; ask again to continue]` (N is the actual cap). A failed request ends the turn as
-  usual (Ctrl+R retries the whole turn). Esc cancels between or during rounds.
+  usual (Ctrl+R retries the whole turn; changes the failed attempt already applied are named in the retried prompt and its `⚙` rows stay under `· earlier attempt`, issue #775). Esc cancels between or during rounds.
   From the third identical failing read call (same tool and arguments, result starting `error:`) in one turn, that result ends with `[note: this exact call failed 3 times this turn; change the arguments or answer from what you already know]`; the turn and the round cap are unchanged.
 - **Empty reply.** A turn whose final round ends with no text (and no tool call; a
   `propose_plan` hand-off always has its note) fails with `Model returned no text; Ctrl+R
