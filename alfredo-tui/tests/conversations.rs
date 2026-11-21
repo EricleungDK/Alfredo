@@ -786,6 +786,47 @@ fn saved_earlier_attempts_are_accepted_and_refused_exactly_at_their_limits() {
     }));
 }
 
+/// Issue #783: earlier-attempt rows have their own cap, apart from the live conversation.
+#[test]
+fn saved_earlier_attempt_bytes_are_bounded_by_their_own_cap() {
+    use alfredo_tui::model::{MAX_EARLIER_BYTES, MAX_TEXT};
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("m".into());
+    retried_turn(&mut app.sessions[0], "one", &[&["a"]], "r1");
+    let base = serde_json::to_value(Snapshot::capture(&app, "default")).unwrap();
+    let calls = base["sessions"][0]["earlier_attempts"]["0"][0]["calls"]
+        .to_string()
+        .len();
+    let save = |edit: &dyn Fn(&mut serde_json::Value)| {
+        let mut value = base.clone();
+        edit(&mut value);
+        let snapshot = serde_json::from_value::<Snapshot>(value).unwrap();
+        store.save(&snapshot).err().map(|error| error.to_string())
+    };
+    let earlier = |bytes: usize| {
+        move |v: &mut serde_json::Value| {
+            let result = "x".repeat(bytes - calls);
+            v["sessions"][0]["earlier_attempts"]["0"][0]["results"] = serde_json::json!([result]);
+        }
+    };
+    assert_eq!(
+        save(&earlier(MAX_EARLIER_BYTES)),
+        None,
+        "exactly at the cap"
+    );
+    let error = save(&earlier(MAX_EARLIER_BYTES + 1)).expect("one byte over the cap");
+    assert!(error.contains("earlier attempts exceed"), "{error}");
+    // A file saved when earlier rows shared the live meter (up to 128 KiB in all) loads,
+    // and the live text no longer has to leave room for them.
+    assert_eq!(save(&earlier(100_000)), None, "an older, large file");
+    let both = |v: &mut serde_json::Value| {
+        earlier(MAX_EARLIER_BYTES)(v);
+        v["sessions"][0]["messages"][1]["content"] = "y".repeat(MAX_TEXT - 1_000).into();
+    };
+    assert_eq!(save(&both), None, "live text plus a full earlier cap");
+}
+
 /// The tallest transcript whose reading anchor survives saving (taller ones are
 /// dropped as unaccounted for), so each row the session accounts for shifts it by one.
 fn kept_rows(prepare: &dyn Fn(&mut alfredo_tui::model::Session)) -> usize {
