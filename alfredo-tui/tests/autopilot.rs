@@ -802,6 +802,17 @@ fn an_oversized_state_file_names_its_path_and_both_ways_out() {
 }
 
 #[test]
+fn a_state_file_of_exactly_the_size_bound_is_read_not_refused_for_size() {
+    let exact = " ".repeat(256 * 1024);
+    let (opened, peeked, path, unchanged) = garbled_bytes(&exact);
+    let error = serde_json::from_str::<Value>(&exact).unwrap_err();
+    let problem = format!("Autopilot state is invalid ({error})");
+    assert_eq!(opened.unwrap_err(), way_out(&problem, &path));
+    assert_eq!(peeked.unwrap_err(), way_out(&problem, &path));
+    assert!(unchanged);
+}
+
+#[test]
 fn saved_state_whose_first_plus_count_overflows_is_refused_without_panicking() {
     assert_refused(&json!({"first": u64::MAX, "count": 5}));
     assert_refused(&json!({"first": u64::MAX - 4, "count": 5}));
