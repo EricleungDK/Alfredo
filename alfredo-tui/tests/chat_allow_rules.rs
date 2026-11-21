@@ -1127,6 +1127,117 @@ fn odd_file_names_cannot_hide_a_protected_directory() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #791 review: a new directory in a protected directory names the protected reason,
+/// not the directory one, whatever the new directory is called. (Chat edits never create
+/// directories through a symlink, so the alias cannot be tested here.)
+#[test]
+fn a_new_directory_in_a_protected_directory_names_the_protected_reason() {
+    let root = dir("alias-newdir");
+    fs::create_dir_all(root.join(".github")).unwrap();
+    let hex = "ab".repeat(32);
+    for path in [
+        ".github/newdir/x.yml".to_string(),
+        ".github/cafe/x.yml".to_string(),
+        format!(".github/{hex}/x.yml"),
+        ".github/a:absent+dirs:b/x.yml".to_string(),
+    ] {
+        let card = real_card(&root, "write_file", &path);
+        assert!(
+            card.fingerprint.contains("+dirs:"),
+            "{path}: {}",
+            card.fingerprint
+        );
+        assert!(!allow::offered(&card), "{path}");
+        assert_eq!(
+            allow::unavailable_reason(&card).as_deref(),
+            Some(PROTECTED_REASON),
+            "{path}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: the resolved path is read from the fingerprint only at a real state
+/// token (`absent`, or exactly 64 hex digits); anything else after a `:` is not one.
+#[test]
+fn only_a_real_state_token_ends_the_resolved_path() {
+    let hash = "ab".repeat(32);
+    let card = |fingerprint: &str| {
+        let mut card = path_card("edit_file", "calc.py");
+        card.fingerprint = fingerprint.into();
+        card
+    };
+    // The protected directory is in the resolved path: a hash or `absent` token ends it.
+    assert!(!allow::offered(&card(&format!(".github/ci.yml:{hash}"))));
+    assert!(!allow::offered(&card(".github/ci.yml:absent")));
+    assert!(!allow::offered(&card(&format!(
+        ".github/ci.yml:{hash}+aliases-protected"
+    ))));
+    // An ordinary path stays ordinary with each token.
+    assert!(allow::offered(&card(&format!("docs/x.md:{hash}"))));
+    assert!(allow::offered(&card("docs/x.md:absent")));
+    // With new directories the path ends at the first `:absent+dirs:`; a protected name
+    // that only appears in the directory list, behind a last `:` that is not a state token
+    // (short hex, 64 non-hex, a longer hex run), does not make the path protected.
+    for tail in ["cafe".to_string(), "z".repeat(64), "ab".repeat(33)] {
+        let fingerprint = format!("docs/x.md:absent+dirs:a/.github:{tail}");
+        assert!(allow::offered(&card(&fingerprint)), "{tail}");
+    }
+    // And with new directories the path before `:absent+dirs:` still counts.
+    assert!(!allow::offered(&card(
+        ".github/n/x.md:absent+dirs:.github/n"
+    )));
+}
+
+/// Issue #791 review: a link chain of 7 links to a file that does not exist yet is followed;
+/// 8 links fail closed (every write_file/edit_file asks).
+#[test]
+fn a_chain_of_7_root_links_is_followed_and_8_fail_closed() {
+    use std::os::unix::fs::symlink;
+    let chain = |tag: &str, links: usize| {
+        let root = dir(tag);
+        fs::create_dir_all(root.join("tools")).unwrap();
+        fs::write(root.join("tools/other.yaml"), "name: ci\n").unwrap();
+        // `.gitattributes` is link 1; l1.. are the rest; the last points at tools/ga.
+        let names: Vec<String> = (1..links).map(|n| format!("l{n}")).collect();
+        let mut from = ".gitattributes".to_string();
+        for name in &names {
+            symlink(name, root.join(&from)).unwrap();
+            from = name.clone();
+        }
+        symlink("tools/ga", root.join(&from)).unwrap();
+        root
+    };
+    let seven = chain("chain7", 7);
+    let rules = both_tools_rules("chain7-state");
+    let target = real_card(&seven, "write_file", "tools/ga");
+    assert!(
+        rules.matching(&target).is_none(),
+        "the final target is protected"
+    );
+    assert_eq!(
+        allow::unavailable_reason(&target).as_deref(),
+        Some(PROTECTED_REASON)
+    );
+    let other = real_card(&seven, "edit_file", "tools/other.yaml");
+    assert!(
+        rules.matching(&other).is_some(),
+        "an unrelated file still matches"
+    );
+    let eight = chain("chain8", 8);
+    let rules = both_tools_rules("chain8-state");
+    for (tool, path) in [
+        ("edit_file", "tools/other.yaml"),
+        ("write_file", "tools/ga"),
+    ] {
+        let card = real_card(&eight, tool, path);
+        assert!(!allow::offered(&card), "{tool} {path}");
+        assert!(rules.matching(&card).is_none(), "{tool} {path}");
+    }
+    let _ = fs::remove_dir_all(seven);
+    let _ = fs::remove_dir_all(eight);
+}
+
 /// Issue #791 review: only the path below the workspace root counts, so a workspace that
 /// itself lives under `.idea` or `.cargo` keeps its rules for ordinary files.
 #[test]

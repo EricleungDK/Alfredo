@@ -2355,9 +2355,14 @@ rule `a` would add.
   is judged), and so is whatever a protected name directly at the workspace root links to
   (`.pre-commit-config.yaml -> tools/pc.yaml` protects `tools/pc.yaml`; `.husky -> hooks`
   protects `hooks/`), even when the link's target does not exist yet (a `write_file` that
-  would create it asks) and through chains of up to 8 links; a longer chain or a link loop
-  there makes every `write_file`/`edit_file` ask. Not detected: such a link below the root (`sub/.husky -> x`), and a
-  hard link to a protected file.
+  would create it asks) and through chains of up to 7 links; a longer chain or a link loop
+  there fails closed: every `write_file`/`edit_file` asks. So does a root protected link
+  whose parent directory is missing or that points at an ancestor of the workspace. Not
+  detected: a protected link below the root (`sub/.husky -> x`), a link inside a protected
+  directory that points outside it (`.husky/pre-commit -> ../scripts/pc.sh`), a hard link
+  to a protected file, and Unicode case folding beyond what `to_lowercase` does on a
+  case-insensitive filesystem (Linux is unaffected). A protected file that calls an ordinary
+  script leaves that script under the rule.
 - **Never push.** `git_push` cards (Push tier, `Tier::allowlistable` false) offer no `a`,
   and no rule matches them, including rules added by hand to the file. A `run_command`
   whose plain words invoke `git … push` (`git -C x push`, `git -c k=v push`, any path to

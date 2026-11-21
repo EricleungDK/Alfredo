@@ -6,3 +6,4 @@
   edits always show an approval card with no `a`, and the card says why (#791).
   The check follows symlinks: a directory alias of `.github/` or a root-level protected
   name that links elsewhere, even to a file that does not exist yet, is covered too.
+  A chain of more than 7 links, or a link loop, makes every file edit ask.
