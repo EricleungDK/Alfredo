@@ -99,6 +99,14 @@ class Fixture:
                     denied = 'denied' in tool_results[-1]['content']
                     chunks = [{'message': {'content': 'BIG_DENIED' if denied else 'BIG_WRITTEN'},
                                'done': False}]
+                elif 'rewrite nested' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'write_file', 'arguments': {
+                            'path': 'new/dir/n.txt', 'content': 'nested\n'}}}]}, 'done': False}]
+                elif 'rewrite nested' in prompt:
+                    denied = 'denied' in tool_results[-1]['content']
+                    chunks = [{'message': {'content': 'NESTED_DENIED' if denied else 'NESTED_WRITTEN'},
+                               'done': False}]
                 elif 'slow command' in prompt and not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'run_command', 'arguments': {
@@ -490,6 +498,27 @@ class ChatTools(unittest.TestCase):
         self.check_signal_kills_the_host_command(signal.SIGTERM)
         self.assertIn(b'\x1b[?1049l', bytes(self.terminal.output), 'alternate screen left')
         self.assertTrue(termios.tcgetattr(self.terminal.slave)[3] & termios.ICANON, 'raw mode off')
+
+    def test_a_on_a_directory_creating_write_names_the_reason_and_writes_nothing(self):
+        # Issue #780: the card says why `a` is missing and pressing it says the same,
+        # never "a always allows"; no rule is added and nothing is written.
+        root = Path(os.path.realpath(self.repo.name))
+        self.terminal.write(b'rewrite nested\r')
+        self.terminal.wait_for('Approve write_file')
+        self.terminal.wait_for('creating directories always asks')
+        self.assertNotIn('a always allow', self.terminal.screen())
+        time.sleep(0.8)
+        self.terminal.write(b'a')
+        self.terminal.wait_for('a not offered: creating directories always asks; press y or n')
+        self.assertNotIn('a always allows', self.terminal.screen())
+        self.assertIn('Approve write_file', self.terminal.screen())
+        self.assertFalse(root.joinpath('new').exists(), 'a must not write')
+        self.assertEqual(list(Path(self.state.name).rglob('chat-allow.json')), [])
+        time.sleep(0.8)
+        self.terminal.write(b'n')
+        self.terminal.wait_for('NESTED_DENIED')
+        self.assertFalse(root.joinpath('new').exists())
+        self.assertEqual(self.approval_outcomes(), ['denied'])
 
     def test_a_denied_edit_never_touches_the_file(self):
         self.terminal.write(b'redraft README\r')

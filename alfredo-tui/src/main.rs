@@ -1589,8 +1589,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     work.app.notice = "The whole card is not on screen, so y and a are off: enlarge the terminal or press n".into();
                                 }
                                 None => {
-                                    work.app.notice =
-                                        "Read the approval card first; press y or n again (a always allows, not for push)".into();
+                                    // Issue #780: `a` on a directory-creating write says why.
+                                    work.app.notice = work.app.sessions[index]
+                                        .pending_approval()
+                                        .filter(|_| answer == 'a')
+                                        .and_then(alfredo_tui::chat_tools::allow::dirs_refusal)
+                                        .unwrap_or_else(|| "Read the approval card first; press y or n again (a always allows, not for push)".into());
                                 }
                             }
                         }

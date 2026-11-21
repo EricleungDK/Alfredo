@@ -228,10 +228,24 @@ pub fn unavailable_reason(card: &Card) -> Option<String> {
     if card.escalated() {
         return Some("HOST runs always ask".into());
     }
+    if card.tool == "write_file" && card.fingerprint.contains("+dirs:") {
+        return Some(DIRS_REASON.into());
+    }
     if !offered(card) {
         return None;
     }
     rule_for(card).err()
+}
+
+/// Why a write_file that creates directories is never always-allowed (issue #272).
+const DIRS_REASON: &str = "creating directories always asks";
+
+/// The notice for `a` pressed on a card that creates directories (issue #780); `None` for
+/// every other card, whose notice is unchanged.
+pub fn dirs_refusal(card: &Card) -> Option<String> {
+    unavailable_reason(card)
+        .filter(|why| why == DIRS_REASON)
+        .map(|why| format!("a not offered: {why}; press y or n"))
 }
 
 /// Whether `a` is available on `card`: the rule can be added and the hint shows it in full.
