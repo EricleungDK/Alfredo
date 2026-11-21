@@ -813,6 +813,60 @@ fn a_state_file_of_exactly_the_size_bound_is_read_not_refused_for_size() {
 }
 
 #[test]
+fn open_io_error_names_path_and_way_out() {
+    let fixture = Fixture::new();
+    let directory = fixture.directory();
+    fs::create_dir_all(&directory).unwrap();
+    let path = autopilot::state_path(&directory, "default");
+    fs::create_dir(&path).unwrap();
+    let error = Autopilot::open(&directory, "default")
+        .map(|_| ())
+        .unwrap_err();
+    let shown = path.display().to_string();
+    assert!(
+        error.starts_with("Cannot read autopilot state: "),
+        "{error}"
+    );
+    assert!(error.contains(&format!("({shown})")), "{error}");
+    assert!(error.contains("original preserved"), "{error}");
+    assert!(error.contains("permissions"), "{error}");
+    assert!(error.contains("--new-mission NAME"), "{error}");
+    assert!(
+        error.contains(&format!("mv \"{shown}\" \"{shown}.bad\"")),
+        "{error}"
+    );
+    assert!(path.is_dir(), "the unreadable path is left alone");
+}
+
+#[test]
+fn peek_io_error_names_path() {
+    let fixture = Fixture::new();
+    let directory = fixture.directory();
+    fs::create_dir_all(&directory).unwrap();
+    let path = autopilot::state_path(&directory, "default");
+    fs::create_dir(&path).unwrap();
+    let error = autopilot::peek(&path).map(|_| ()).unwrap_err();
+    let shown = path.display().to_string();
+    assert!(
+        error.starts_with("Cannot read autopilot state: "),
+        "{error}"
+    );
+    assert!(error.contains(&format!("({shown})")), "{error}");
+    assert!(error.contains("permissions"), "{error}");
+    assert!(error.contains("--new-mission NAME"), "{error}");
+}
+
+#[test]
+fn a_missing_state_file_is_not_an_io_error() {
+    let fixture = Fixture::new();
+    let directory = fixture.directory();
+    fs::create_dir_all(&directory).unwrap();
+    let path = autopilot::state_path(&directory, "default");
+    assert!(autopilot::peek(&path).unwrap().is_none());
+    assert!(Autopilot::open(&directory, "default").is_ok());
+}
+
+#[test]
 fn saved_state_whose_first_plus_count_overflows_is_refused_without_panicking() {
     assert_refused(&json!({"first": u64::MAX, "count": 5}));
     assert_refused(&json!({"first": u64::MAX - 4, "count": 5}));
