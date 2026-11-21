@@ -24,7 +24,7 @@ pub(crate) use failure::{failure_detail, title_failure_line};
 mod refusal;
 pub use refusal::{active_refusal_view, lint_refusal_view};
 use refusal::{
-    draft_matches, goal_brief, lint_refusal, plan_goal, scope_blocker, unattended_lint,
+    draft_matches, goal_brief, lint_refusal, parse, plan_goal, scope_blocker, unattended_lint,
     ACTIVE_REFUSAL_FIX, ACTIVE_REFUSAL_PREFIX,
 };
 #[path = "autopilot_integration.rs"]
@@ -542,11 +542,7 @@ pub fn peek(path: &Path) -> Result<Option<Peek>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    if bytes.len() > MAX_STATE {
-        return Err("Autopilot state exceeds its size bound".into());
-    }
-    let saved: Saved = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    saved.validate()?;
+    let saved = parse(path, &bytes)?;
     let counts = (saved.total > 0).then_some((saved.done, saved.total));
     let word = match saved.phase {
         // A finished loop's saved report names its outcome.
@@ -611,13 +607,7 @@ impl Autopilot {
         let path = state_path(directory, conversation);
         let saved = match fs::read(&path) {
             Ok(bytes) => {
-                if bytes.len() > MAX_STATE {
-                    return Err("Autopilot state exceeds its size bound; file preserved".into());
-                }
-                let mut saved: Saved = serde_json::from_slice(&bytes).map_err(|error| {
-                    format!("Autopilot state is invalid ({error}); file preserved")
-                })?;
-                saved.validate()?;
+                let mut saved = parse(&path, &bytes)?;
                 if saved.active() {
                     saved.paused = true;
                     if saved.phase == Phase::Finishing {
