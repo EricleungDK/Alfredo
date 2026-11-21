@@ -647,7 +647,10 @@ fn undo_that_refused_one_file_keeps_that_call_in_the_note() {
     let request = s.retry().unwrap();
     assert_eq!(request.len(), 1, "{request:?}");
     let prompt = &request[0].content;
-    assert!(prompt.contains("- edit_file a.txt: edited a.txt"), "{prompt}");
+    assert!(
+        prompt.contains("- edit_file a.txt: edited a.txt"),
+        "{prompt}"
+    );
     assert!(!prompt.contains("b.txt"), "{prompt}");
 }
 
@@ -674,7 +677,15 @@ fn undo_leaves_failed_calls_other_tools_and_unrestored_paths_alone() {
             false,
         ),
     );
-    s.apply(1, write_result("c.txt"));
+    s.apply(
+        1,
+        tool_result(
+            "write_file",
+            serde_json::json!({"path": "c.txt", "content": "x"}),
+            "wrote c.txt (1 bytes)",
+            false,
+        ),
+    );
     s.cancel();
     s.undone(&["a.txt".into()]);
     assert_eq!(
@@ -684,7 +695,34 @@ fn undo_leaves_failed_calls_other_tools_and_unrestored_paths_alone() {
     // A repeated /undo never marks a result twice.
     s.undone(&["c.txt".into()]);
     s.undone(&["c.txt".into()]);
-    assert_eq!(s.tool_steps(1)[0].results[2], "undone: wrote c.txt (1 bytes)");
+    assert_eq!(
+        s.tool_steps(1)[0].results[2],
+        "undone: wrote c.txt (1 bytes)"
+    );
+}
+
+#[test]
+fn undo_with_no_reply_or_no_rounds_changes_nothing() {
+    let mut s = Session::new("m".into());
+    s.undone(&["a.txt".into()]);
+    s.insert("hi");
+    s.begin().unwrap();
+    s.undone(&["a.txt".into()]);
+    assert!(s.tool_steps(1).is_empty());
+}
+
+#[test]
+fn undo_matches_a_padded_path_argument() {
+    let mut s = Session::new("m".into());
+    s.insert("pad");
+    s.begin().unwrap();
+    s.apply(1, edit_result(" ./a.txt ", true));
+    s.cancel();
+    s.undone(&["a.txt".into()]);
+    assert_eq!(
+        s.tool_steps(1)[0].results,
+        ["undone: edited  ./a.txt  (1 replacement)"]
+    );
 }
 
 #[test]

@@ -2139,6 +2139,8 @@ Approval (ADR 0004); there is no skip-approval mode.
   undo`. Each file's outcome is logged to `chat-approvals.jsonl` (tool `undo`). Not
   covered: `run_command`, Git (commits, branches, pushes), `/go` runs, the
   conversation itself. Directories a `write_file` created are left in place.
+  An edit `/undo` restored keeps its `⚙` row, marked `undone`, and drops out of the
+  "Already applied" note that Ctrl+R and the next prompt send; an edit it refused stays in it.
 
 ## Chat git writes and push
 

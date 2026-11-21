@@ -1754,6 +1754,34 @@ async fn undo_refuses_a_file_changed_since_and_names_it_but_restores_the_rest() 
         .any(|r| r.tool == "undo" && r.target.contains("a.txt") && r.outcome == Outcome::Applied));
 }
 
+/// Issue #784: the restored paths are what `/undo` reports back for the retry note.
+#[tokio::test]
+async fn undo_reports_the_restored_paths_and_leaves_out_a_refused_file() {
+    let root = workspace("undo-paths");
+    let state = log_dir("undo-paths");
+    fs::write(root.join("a.txt"), "a one\n").unwrap();
+    approved_turn(
+        &root,
+        &state,
+        tool_calls(&[
+            (
+                "edit_file",
+                json!({"path": "README.md", "old_text": "Old intro line.", "new_text": "X"}),
+            ),
+            (
+                "edit_file",
+                json!({"path": "a.txt", "old_text": "one", "new_text": "two"}),
+            ),
+        ]),
+    )
+    .await;
+    fs::write(root.join("README.md"), "owner changed it\n").unwrap();
+    let (lines, restored) = undo::slash(&state, &root).expect("undo runs");
+    assert_eq!(restored, ["a.txt"], "{lines:?}");
+    let (_, again) = undo::slash(&state, &root).expect("undo runs");
+    assert!(again.is_empty(), "{again:?}");
+}
+
 #[tokio::test]
 async fn undo_deletes_a_created_file_only_when_unchanged() {
     let root = workspace("undo-create");
