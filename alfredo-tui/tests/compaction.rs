@@ -75,6 +75,47 @@ fn nothing_is_due_for_an_empty_prompt_a_short_history_or_an_active_reply() {
     assert!(!Session::new("m".into()).compaction_due(None));
 }
 
+/// Issue #783: earlier-attempt rows are saved, so the compaction estimate counts them
+/// even though the live generation meter does not.
+#[test]
+fn compaction_estimate_counts_earlier_attempt_rows() {
+    let mut session = Session::new("fixture".into());
+    session.insert("write it");
+    session.begin().unwrap();
+    // 40 writes of 2 KB (the most a moved call keeps) are about 85 KB of earlier rows.
+    for k in 0..40 {
+        session.apply(
+            1,
+            Update::ToolResult {
+                call: alfredo_tui::model::ToolCall {
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({"path": format!("a{k}"), "content": "c".repeat(2048)}),
+                },
+                result: format!("wrote a{k} (2048 bytes)"),
+                new_round: k == 0,
+            },
+        );
+    }
+    session.apply(1, Update::Failed("lost".into()));
+    session.retry().unwrap();
+    session.apply(2, Update::Token("done".into()));
+    session.apply(2, Update::Done);
+    for number in 2..=3 {
+        turn(&mut session, number);
+    }
+    session.insert("next question");
+    assert!(
+        session.compaction_due(None),
+        "85 KB of earlier rows + 30 KB"
+    );
+    let mut plain = long(3);
+    plain.insert("next question");
+    assert!(
+        !plain.compaction_due(None),
+        "30 KB alone is under the budget"
+    );
+}
+
 #[test]
 fn num_ctx_lowers_the_threshold() {
     let mut session = long(2);

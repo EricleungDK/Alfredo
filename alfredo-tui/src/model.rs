@@ -9,6 +9,10 @@ pub mod console_log;
 pub use compaction::Compaction;
 
 pub const MAX_TEXT: usize = 128 * 1024;
+/// Most bytes of earlier-attempt rows a conversation keeps and saves (issue #783). They
+/// are display material, so this is a separate cap from the live [`MAX_TEXT`] meter; it
+/// equals it so a file saved when they shared one meter still loads.
+pub const MAX_EARLIER_BYTES: usize = MAX_TEXT;
 /// Failure for a reply that finished with no text (issue #397).
 pub const NO_TEXT: &str = "Model returned no text; Ctrl+R retries or send again";
 /// Failure text when a reply or tool step would pass [`MAX_TEXT`]; names the ways out.
@@ -1283,10 +1287,20 @@ impl Session {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// Bytes of the live tool rounds: the meter for the generation caps. Earlier-attempt
+    /// rows are display material and never sent, so they are not counted (issue #783).
     pub(crate) fn tool_bytes(&self) -> usize {
         self.tool_steps
             .values()
-            .chain(self.earlier_attempts.values())
+            .flatten()
+            .map(ToolStep::bytes)
+            .sum()
+    }
+
+    /// Bytes of the earlier-attempt rows: bounded on disk and in the compaction estimate.
+    pub(crate) fn earlier_bytes(&self) -> usize {
+        self.earlier_attempts
+            .values()
             .flatten()
             .map(ToolStep::bytes)
             .sum()
@@ -1370,12 +1384,33 @@ impl Session {
                 .earlier_attempts
                 .entry(self.messages.len() - 1)
                 .or_default();
-            earlier.extend(steps);
+            earlier.extend(steps.into_iter().map(|mut step| {
+                step.results = step.results.iter().map(|r| cut_earlier_result(r)).collect();
+                for call in &mut step.calls {
+                    cut_earlier_arguments(&mut call.arguments);
+                }
+                step
+            }));
             let excess = earlier.len().saturating_sub(64);
             earlier.drain(..excess);
+            self.trim_earlier();
         }
         self.rule_marks.remove(&self.messages.len());
         Ok(self.start())
+    }
+
+    /// Drops the oldest earlier-attempt rounds until they fit [`MAX_EARLIER_BYTES`]. A
+    /// backstop: cut results and arguments keep ordinary rounds far below it, and a dropped
+    /// round leaves the retry note (issue #783).
+    fn trim_earlier(&mut self) {
+        while self.earlier_bytes() > MAX_EARLIER_BYTES {
+            if let Some(mut oldest) = self.earlier_attempts.first_entry() {
+                oldest.get_mut().remove(0);
+                if oldest.get().is_empty() {
+                    oldest.remove();
+                }
+            }
+        }
     }
 
     fn start(&mut self) -> Vec<Message> {
@@ -1963,6 +1998,49 @@ impl Session {
             self.capacity_wait = None;
             if let Some(timing) = &mut self.timing {
                 timing.finish(std::time::Instant::now());
+            }
+        }
+    }
+}
+
+/// Most bytes and lines of a result, and bytes of a call string, kept once its attempt is an earlier one (issue #783):
+/// what the row draws, and what `applied_lines` reads (the first line, the status prefix).
+pub(crate) const EARLIER_RESULT_BYTES: usize = 2048;
+pub(crate) const EARLIER_RESULT_LINES: usize = 200;
+
+/// `result` cut to [`EARLIER_RESULT_LINES`] lines and [`EARLIER_RESULT_BYTES`] bytes (on a
+/// character boundary), with a closing row when something was dropped.
+pub(crate) fn cut_earlier_result(result: &str) -> String {
+    let limit = result.floor_char_boundary(EARLIER_RESULT_BYTES);
+    let head = &result[..limit];
+    let end = head
+        .match_indices('\n')
+        .nth(EARLIER_RESULT_LINES - 1)
+        .map_or(limit, |(at, _)| at);
+    if result[end..].trim_start_matches('\n').is_empty() {
+        return result.to_string();
+    }
+    format!("{}\n… (cut)", &result[..end])
+}
+
+/// Arguments `applied_lines` reads; never cut.
+const KEPT_ARGUMENTS: [&str; 2] = ["path", "command"];
+
+/// Cuts every string argument of a moved call except [`KEPT_ARGUMENTS`] (a `write_file`'s
+/// `content`, an `edit_file`'s text) to [`EARLIER_RESULT_BYTES`] bytes (issue #783).
+pub(crate) fn cut_earlier_arguments(arguments: &mut serde_json::Value) {
+    let Some(map) = arguments.as_object_mut() else {
+        return;
+    };
+    for (key, value) in map.iter_mut() {
+        if KEPT_ARGUMENTS.contains(&key.as_str()) {
+            continue;
+        }
+        if let serde_json::Value::String(text) = value {
+            if text.len() > EARLIER_RESULT_BYTES {
+                let limit = text.floor_char_boundary(EARLIER_RESULT_BYTES);
+                text.truncate(limit);
+                text.push_str("… (cut)");
             }
         }
     }
