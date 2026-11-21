@@ -400,6 +400,7 @@ impl Session {
         shift(&mut self.sources, cut);
         shift(&mut self.attachments, cut);
         shift(&mut self.tool_steps, cut);
+        shift(&mut self.earlier_attempts, cut);
         shift(&mut self.rule_marks, cut);
         // `@path` refusal rows follow their prompt, or go with it (issue #391).
         self.mention_refusals = match self.mention_refusals.0.checked_sub(cut) {

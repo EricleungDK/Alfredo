@@ -314,6 +314,11 @@ pub struct Session {
     /// Sent before that reply as context; saved (schema v19).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     tool_steps: std::collections::BTreeMap<usize, Vec<ToolStep>>,
+    /// Rounds of interrupted attempts that Ctrl+R replaced, keyed by the user-message
+    /// index of their turn (issue #775): shown as `· earlier attempt` rows and named in
+    /// the retried request. Saved (schema v19, absent when empty).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    earlier_attempts: std::collections::BTreeMap<usize, Vec<ToolStep>>,
     /// Always-allow rule that approved each call, keyed by assistant-message index then
     /// the call's position among that reply's calls (issue #320). Display only; not saved.
     #[serde(skip)]
@@ -455,6 +460,7 @@ impl Session {
             attempt: 0,
             attachments: Default::default(),
             tool_steps: Default::default(),
+            earlier_attempts: Default::default(),
             rule_marks: Default::default(),
             pending_rule: None,
             notes_lines: Vec::new(),
@@ -1263,30 +1269,41 @@ impl Session {
 
     /// Tool rounds of the reply at `assistant_index` (empty when none).
     pub fn tool_steps(&self, assistant_index: usize) -> &[ToolStep] {
-        if assistant_index.is_multiple_of(2) {
-            return &[];
-        }
         self.tool_steps
             .get(&assistant_index)
             .map_or(&[], Vec::as_slice)
     }
 
     /// Tool rounds of earlier, interrupted attempts at the turn opened by the user
-    /// message at `user_index` (issue #775). Kept under the user index in `tool_steps`;
-    /// shown in the transcript, never sent as rounds, summarised by the retry note.
+    /// message at `user_index` (issue #775). Shown in the transcript, never sent as
+    /// rounds, summarised by the retry note.
     pub fn earlier_steps(&self, user_index: usize) -> &[ToolStep] {
-        if !user_index.is_multiple_of(2) {
-            return &[];
-        }
-        self.tool_steps.get(&user_index).map_or(&[], Vec::as_slice)
+        self.earlier_attempts
+            .get(&user_index)
+            .map_or(&[], Vec::as_slice)
     }
 
     pub(crate) fn tool_bytes(&self) -> usize {
         self.tool_steps
             .values()
+            .chain(self.earlier_attempts.values())
             .flatten()
             .map(ToolStep::bytes)
             .sum()
+    }
+
+    /// Saved earlier attempts need schema v19 and belong to user messages.
+    pub(crate) fn valid_earlier_attempts(&self, schema: u32) -> bool {
+        self.earlier_attempts.is_empty()
+            || (schema >= 19
+                && self.earlier_attempts.len() <= MAX_MESSAGES / 2
+                && self.earlier_attempts.iter().all(|(index, steps)| {
+                    index % 2 == 0
+                        && *index + 1 < self.messages.len()
+                        && !steps.is_empty()
+                        && steps.len() <= 64
+                        && steps.iter().all(ToolStep::valid)
+                }))
     }
 
     /// Saved tool rounds need schema v19, belong to replies, and are well formed.
@@ -1295,9 +1312,8 @@ impl Session {
             || (schema >= 19
                 && self.tool_steps.len() <= MAX_MESSAGES / 2
                 && self.tool_steps.iter().all(|(index, steps)| {
-                    // Odd: a reply's rounds. Even: earlier attempts at a user message's turn.
-                    *index < self.messages.len()
-                        && (index % 2 == 1 || self.messages[*index].role == "user")
+                    index % 2 == 1
+                        && *index < self.messages.len()
                         && !steps.is_empty()
                         && steps.len() <= 64
                         && steps.iter().all(ToolStep::valid)
@@ -1351,7 +1367,10 @@ impl Session {
         // The attempt's rounds stay as earlier-attempt rows under the user message; what
         // they applied rides on the retried request (issue #775).
         if let Some(steps) = self.tool_steps.remove(&self.messages.len()) {
-            let earlier = self.tool_steps.entry(self.messages.len() - 1).or_default();
+            let earlier = self
+                .earlier_attempts
+                .entry(self.messages.len() - 1)
+                .or_default();
             earlier.extend(steps);
             let excess = earlier.len().saturating_sub(64);
             earlier.drain(..excess);
@@ -1619,8 +1638,25 @@ impl Session {
                                 .sum::<usize>()
                     })
                     .sum::<usize>()
-                // One "earlier attempt" label row per retried turn (#775).
-                + self.tool_steps.keys().filter(|index| *index % 2 == 0).count()
+                // Earlier attempts (#775): their rows and one label row per retried turn.
+                + self
+                    .earlier_attempts
+                    .values()
+                    .map(|steps| {
+                        1 + steps
+                            .iter()
+                            .map(|step| {
+                                2 * step.calls.len()
+                                    + 1
+                                    + step
+                                        .results
+                                        .iter()
+                                        .map(|result| result.lines().count().min(200) + 1)
+                                        .sum::<usize>()
+                            })
+                            .sum::<usize>()
+                    })
+                    .sum::<usize>()
                 // Compaction note (#187): marker, one row per summary line, blank row.
                 + self.compaction().map_or(0, |note| {
                     note.summary.bytes().filter(|b| *b == b'\n').count() + 3

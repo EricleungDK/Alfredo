@@ -161,6 +161,9 @@ impl Snapshot {
             if !session.valid_tool_steps(self.schema_version) {
                 return Err("Conversation tool steps are invalid".into());
             }
+            if !session.valid_earlier_attempts(self.schema_version) {
+                return Err("Conversation earlier attempts are invalid".into());
+            }
             if !session.valid_sources(self.schema_version) {
                 return Err("Invalid conversation response sources".into());
             }
