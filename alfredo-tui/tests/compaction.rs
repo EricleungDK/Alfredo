@@ -82,17 +82,20 @@ fn compaction_estimate_counts_earlier_attempt_rows() {
     let mut session = Session::new("fixture".into());
     session.insert("write it");
     session.begin().unwrap();
-    session.apply(
-        1,
-        Update::ToolResult {
-            call: alfredo_tui::model::ToolCall {
-                name: "write_file".into(),
-                arguments: serde_json::json!({"path": "a", "content": "c".repeat(75_000)}),
+    // 40 writes of 2 KB (the most a moved call keeps) are about 85 KB of earlier rows.
+    for k in 0..40 {
+        session.apply(
+            1,
+            Update::ToolResult {
+                call: alfredo_tui::model::ToolCall {
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({"path": format!("a{k}"), "content": "c".repeat(2048)}),
+                },
+                result: format!("wrote a{k} (2048 bytes)"),
+                new_round: k == 0,
             },
-            result: "wrote a (75000 bytes)".into(),
-            new_round: true,
-        },
-    );
+        );
+    }
     session.apply(1, Update::Failed("lost".into()));
     session.retry().unwrap();
     session.apply(2, Update::Token("done".into()));
@@ -103,7 +106,7 @@ fn compaction_estimate_counts_earlier_attempt_rows() {
     session.insert("next question");
     assert!(
         session.compaction_due(None),
-        "75 KB of earlier rows + 30 KB"
+        "85 KB of earlier rows + 30 KB"
     );
     let mut plain = long(3);
     plain.insert("next question");

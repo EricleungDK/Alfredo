@@ -727,34 +727,118 @@ fn live_bytes_ignore_earlier_rows_but_a_retry_still_hits_its_own_cap() {
     );
 }
 
-#[test]
-fn retries_keep_earlier_rows_within_their_own_byte_cap() {
-    use alfredo_tui::model::MAX_EARLIER_BYTES;
-    let mut s = Session::new("m".into());
-    s.insert("write big files");
-    s.begin().unwrap();
-    for n in 0..8 {
-        let attempt = s.attempt;
+/// A failed attempt of `calls` write_file calls of `content` bytes each, then a retry.
+fn failed_writes(s: &mut Session, tag: &str, calls: usize, content: usize) {
+    let attempt = s.attempt;
+    for k in 0..calls {
         s.apply(
             attempt,
             tool_result(
                 "write_file",
-                serde_json::json!({"path": format!("f{n}.txt"), "content": "c".repeat(60_000)}),
-                &format!("wrote f{n}.txt (60000 bytes)"),
-                true,
+                serde_json::json!({"path": format!("{tag}_{k}.txt"), "content": "c".repeat(content)}),
+                &format!("wrote {tag}_{k}.txt ({content} bytes)"),
+                k == 0,
             ),
         );
-        s.apply(attempt, Update::Failed("lost".into()));
-        s.retry().unwrap();
-        let total: usize = s.earlier_steps(0).iter().map(|step| step.bytes()).sum();
-        assert!(total <= MAX_EARLIER_BYTES, "{n}: {total}");
     }
-    // Oldest rounds went first: the newest file is still there, the first is gone.
-    let steps = s.earlier_steps(0);
-    let last = steps.last().unwrap();
-    assert!(last.results[0].contains("f7.txt"));
-    assert!(steps.iter().all(|step| !step.results[0].contains("f0.txt")));
-    assert!(steps.len() >= 2);
+    s.apply(attempt, Update::Failed("lost".into()));
+    s.retry().unwrap();
+}
+
+#[test]
+fn retries_keep_earlier_rows_within_their_own_byte_cap() {
+    use alfredo_tui::model::MAX_EARLIER_BYTES;
+    let total = |s: &Session| {
+        s.earlier_steps(0)
+            .iter()
+            .map(|step| step.bytes())
+            .sum::<usize>()
+    };
+    let mut s = Session::new("m".into());
+    s.insert("write big files");
+    s.begin().unwrap();
+    // 40 uncut 2 KB writes make a round of about 85 KB: one fits, two do not.
+    failed_writes(&mut s, "a", 40, 2048);
+    assert_eq!(s.earlier_steps(0).len(), 1);
+    assert!(total(&s) <= MAX_EARLIER_BYTES && total(&s) > MAX_EARLIER_BYTES / 2);
+    failed_writes(&mut s, "b", 40, 2048);
+    // The oldest round went first: the newest is still there, the first is gone.
+    assert_eq!(s.earlier_steps(0).len(), 1);
+    assert!(total(&s) <= MAX_EARLIER_BYTES);
+    assert!(s.earlier_steps(0)[0].results[0].contains("b_0.txt"));
+    // A round that alone passes the cap (64 calls) is dropped, never left over the cap.
+    failed_writes(&mut s, "c", 64, 2048);
+    assert!(total(&s) <= MAX_EARLIER_BYTES);
+}
+
+#[test]
+fn retry_cuts_long_call_arguments_but_keeps_path_and_command() {
+    let cut = |arguments: serde_json::Value| {
+        let mut s = Session::new("m".into());
+        s.insert("go");
+        s.begin().unwrap();
+        s.apply(1, tool_result("write_file", arguments, "ok", true));
+        s.apply(1, Update::Failed("lost".into()));
+        s.retry().unwrap();
+        s.earlier_steps(0)[0].calls[0].arguments.clone()
+    };
+    let text = |n: usize| "c".repeat(n);
+    let marker = "… (cut)";
+    assert_eq!(
+        cut(serde_json::json!({"content": text(2048)}))["content"],
+        text(2048)
+    );
+    assert_eq!(
+        cut(serde_json::json!({"content": text(2049)}))["content"],
+        format!("{}{marker}", text(2048))
+    );
+    assert_eq!(
+        cut(serde_json::json!({"content": text(60_000)}))["content"],
+        format!("{}{marker}", text(2048))
+    );
+    // Never inside a character.
+    assert_eq!(
+        cut(serde_json::json!({"content": "é".repeat(1025)}))["content"],
+        format!("{}{marker}", "é".repeat(1024))
+    );
+    // Every long string is cut, not only `content`; short ones stay.
+    let both = cut(serde_json::json!({"old": text(5000), "new": "short", "n": 7, "ok": true}));
+    assert_eq!(both["old"], format!("{}{marker}", text(2048)));
+    assert_eq!(
+        (&both["new"], &both["n"], &both["ok"]),
+        (&"short".into(), &7.into(), &true.into())
+    );
+    // What the applied note reads is never cut.
+    let kept = cut(serde_json::json!({"path": text(3000), "command": text(3000)}));
+    assert_eq!(
+        (
+            kept["path"].as_str().unwrap().len(),
+            kept["command"].as_str().unwrap().len()
+        ),
+        (3000, 3000)
+    );
+    // Arguments that are not an object stay as they were.
+    assert_eq!(cut(serde_json::json!(text(5000))), text(5000));
+    assert_eq!(cut(serde_json::Value::Null), serde_json::Value::Null);
+}
+
+#[test]
+fn a_round_with_large_arguments_stays_in_every_later_retry_note() {
+    let mut s = Session::new("m".into());
+    s.insert("write files");
+    s.begin().unwrap();
+    for n in 0..6 {
+        failed_writes(&mut s, &format!("f{n}"), 1, 60_000);
+    }
+    let request = s.request_through(0);
+    let note = &request[0].content;
+    for n in 0..6 {
+        assert!(
+            note.contains(&format!("- write_file f{n}_0.txt: wrote")),
+            "{n}: {note}"
+        );
+    }
+    assert_eq!(s.earlier_steps(0).len(), 6);
 }
 
 #[test]

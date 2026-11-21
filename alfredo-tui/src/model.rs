@@ -1386,6 +1386,9 @@ impl Session {
                 .or_default();
             earlier.extend(steps.into_iter().map(|mut step| {
                 step.results = step.results.iter().map(|r| cut_earlier_result(r)).collect();
+                for call in &mut step.calls {
+                    cut_earlier_arguments(&mut call.arguments);
+                }
                 step
             }));
             let excess = earlier.len().saturating_sub(64);
@@ -1396,13 +1399,16 @@ impl Session {
         Ok(self.start())
     }
 
-    /// Drops the oldest earlier-attempt rounds until they fit [`MAX_EARLIER_BYTES`].
+    /// Drops the oldest earlier-attempt rounds until they fit [`MAX_EARLIER_BYTES`]. A
+    /// backstop: cut results and arguments keep ordinary rounds far below it, and a dropped
+    /// round leaves the retry note (issue #783).
     fn trim_earlier(&mut self) {
-        while self.earlier_bytes() > MAX_EARLIER_BYTES {
-            let Some(mut oldest) = self.earlier_attempts.first_entry() else {
+        let mut total = self.earlier_bytes();
+        while let Some(mut oldest) = self.earlier_attempts.first_entry() {
+            if total <= MAX_EARLIER_BYTES {
                 break;
-            };
-            oldest.get_mut().remove(0);
+            }
+            total -= oldest.get_mut().remove(0).bytes();
             if oldest.get().is_empty() {
                 oldest.remove();
             }
@@ -1999,8 +2005,7 @@ impl Session {
     }
 }
 
-/// Whether `result` is that of a `run_command` killed mid-run (issue #333).
-/// Most bytes and lines of a result kept once its attempt is an earlier one (issue #783):
+/// Most bytes and lines of a result, and bytes of a call string, kept once its attempt is an earlier one (issue #783):
 /// what the row draws, and what `applied_lines` reads (the first line, the status prefix).
 pub(crate) const EARLIER_RESULT_BYTES: usize = 2048;
 pub(crate) const EARLIER_RESULT_LINES: usize = 200;
@@ -2023,6 +2028,33 @@ pub(crate) fn cut_earlier_result(result: &str) -> String {
     format!("{}\n… (cut)", &result[..end])
 }
 
+/// Arguments `applied_lines` reads; never cut.
+const KEPT_ARGUMENTS: [&str; 2] = ["path", "command"];
+
+/// Cuts every string argument of a moved call except [`KEPT_ARGUMENTS`] (a `write_file`'s
+/// `content`, an `edit_file`'s text) to [`EARLIER_RESULT_BYTES`] bytes (issue #783).
+pub(crate) fn cut_earlier_arguments(arguments: &mut serde_json::Value) {
+    let Some(map) = arguments.as_object_mut() else {
+        return;
+    };
+    for (key, value) in map.iter_mut() {
+        if KEPT_ARGUMENTS.contains(&key.as_str()) {
+            continue;
+        }
+        if let serde_json::Value::String(text) = value {
+            if text.len() > EARLIER_RESULT_BYTES {
+                let mut limit = EARLIER_RESULT_BYTES;
+                while !text.is_char_boundary(limit) {
+                    limit -= 1;
+                }
+                text.truncate(limit);
+                text.push_str("… (cut)");
+            }
+        }
+    }
+}
+
+/// Whether `result` is that of a `run_command` killed mid-run (issue #333).
 fn killed_run(call: &ToolCall, result: &str) -> bool {
     call.name == "run_command" && result.starts_with(crate::chat_tools::CANCELLED_RESULT)
 }
