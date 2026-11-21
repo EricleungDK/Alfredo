@@ -618,6 +618,145 @@ fn retry_budget_is_not_halved_by_earlier_attempt_rows() {
     assert_eq!(s.tool_steps(1).len(), 1);
 }
 
+/// The result of the only earlier round after a failed first attempt returned `result`.
+fn earlier_result(name: &str, arguments: serde_json::Value, result: &str) -> String {
+    let mut s = Session::new("m".into());
+    s.insert("go");
+    s.begin().unwrap();
+    s.apply(1, tool_result(name, arguments, result, true));
+    s.apply(1, Update::Failed("lost".into()));
+    s.retry().unwrap();
+    let steps = s.earlier_steps(0);
+    assert_eq!(steps.len(), 1);
+    steps[0].results[0].clone()
+}
+
+#[test]
+fn retry_cuts_a_moved_result_to_what_is_drawn_and_keeps_short_ones() {
+    let read = |result: &str| earlier_result("read_file", serde_json::json!({"path": "a"}), result);
+    assert_eq!(read("short\nresult"), "short\nresult");
+    // Exactly 200 lines (with or without the last newline) and exactly 2048 bytes stay whole.
+    let lines200 = "l\n".repeat(200);
+    assert_eq!(read(&lines200), lines200);
+    assert_eq!(read(lines200.trim_end()), lines200.trim_end());
+    let bytes2048 = "x".repeat(2048);
+    assert_eq!(read(&bytes2048), bytes2048);
+    // One line over 200 is cut at 200.
+    let cut = read(&"l\n".repeat(201));
+    assert_eq!(cut, format!("{}… (cut)", "l\n".repeat(200)));
+    assert_eq!(read(&"l\n".repeat(900)), cut);
+    // One byte over 2048 is cut at 2048.
+    assert_eq!(
+        read(&"x".repeat(2049)),
+        format!("{}\n… (cut)", "x".repeat(2048))
+    );
+    // Never inside a character: "é" is two bytes, so 1024 fit and 1025 do not.
+    assert_eq!(
+        read(&"é".repeat(1025)),
+        format!("{}\n… (cut)", "é".repeat(1024))
+    );
+    // Bytes win over lines when the lines are long: 100 lines of 31 bytes.
+    let long = format!("{}\n", "a".repeat(30)).repeat(100);
+    assert_eq!(read(&long), format!("{}\n… (cut)", &long[..2048]));
+}
+
+#[test]
+fn retry_after_a_cut_result_still_sends_the_applied_note() {
+    let mut s = Session::new("m".into());
+    s.insert("go");
+    s.begin().unwrap();
+    let body = format!("wrote a.txt (1 bytes)\n{}", "z".repeat(10_000));
+    s.apply(
+        1,
+        tool_result(
+            "write_file",
+            serde_json::json!({"path": "a.txt", "content": "x"}),
+            &body,
+            true,
+        ),
+    );
+    s.apply(
+        1,
+        tool_result(
+            "run_command",
+            serde_json::json!({"command": "sleep 9"}),
+            &format!(
+                "{}\n{}",
+                alfredo_tui::chat_tools::CANCELLED_RESULT,
+                "q".repeat(5000)
+            ),
+            false,
+        ),
+    );
+    s.apply(1, Update::Failed("lost".into()));
+    let request = s.retry().unwrap();
+    let note = &request[0].content;
+    assert!(
+        note.contains("- write_file a.txt: wrote a.txt (1 bytes)"),
+        "{note}"
+    );
+    assert!(
+        note.contains("- run_command sleep 9: cancelled mid-run"),
+        "{note}"
+    );
+    assert!(s.earlier_steps(0)[0].results[0].len() < 2100);
+}
+
+#[test]
+fn live_bytes_ignore_earlier_rows_but_a_retry_still_hits_its_own_cap() {
+    let big = "x".repeat(70_000);
+    let read = |s: &mut Session, attempt: u64| {
+        s.apply(
+            attempt,
+            tool_result("read_file", serde_json::json!({"path": "a"}), &big, true),
+        );
+    };
+    let mut s = Session::new("m".into());
+    s.insert("read it");
+    s.begin().unwrap();
+    read(&mut s, 1);
+    s.apply(1, Update::Failed("lost".into()));
+    s.retry().unwrap();
+    // The retry may use the whole cap: one 70 KB result fits, a second does not.
+    read(&mut s, 2);
+    assert_eq!(s.status, Status::Connecting);
+    read(&mut s, 2);
+    assert_eq!(
+        s.status,
+        Status::Failed(alfredo_tui::model::OUTPUT_LIMIT.into())
+    );
+}
+
+#[test]
+fn retries_keep_earlier_rows_within_their_own_byte_cap() {
+    use alfredo_tui::model::MAX_EARLIER_BYTES;
+    let mut s = Session::new("m".into());
+    s.insert("write big files");
+    s.begin().unwrap();
+    for n in 0..8 {
+        let attempt = s.attempt;
+        s.apply(
+            attempt,
+            tool_result(
+                "write_file",
+                serde_json::json!({"path": format!("f{n}.txt"), "content": "c".repeat(60_000)}),
+                &format!("wrote f{n}.txt (60000 bytes)"),
+                true,
+            ),
+        );
+        s.apply(attempt, Update::Failed("lost".into()));
+        s.retry().unwrap();
+        let total: usize = s.earlier_steps(0).iter().map(|step| step.bytes()).sum();
+        assert!(total <= MAX_EARLIER_BYTES, "{n}: {total}");
+    }
+    // Oldest rounds went first: the newest file is still there, the first is gone.
+    let steps = s.earlier_steps(0);
+    let last = steps.last().unwrap();
+    assert!(last.results[0].contains("f7.txt"));
+    assert!(steps.iter().all(|step| !step.results[0].contains("f0.txt")));
+    assert!(steps.len() >= 2);
+}
+
 #[test]
 fn an_empty_retry_reply_still_shows_the_earlier_attempts_rows() {
     let mut app = App::new("m".into());
