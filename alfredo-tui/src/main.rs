@@ -123,7 +123,7 @@ fn explicit_flag_refusal(
     if on_finish_explicit {
         Some("--on-finish applies only to --go, --resume or the terminal")
     } else if max_repairs_explicit {
-        Some("--max-repairs applies only to --go, --resume or the terminal")
+        Some("--max-repairs applies only to --go or the terminal")
     } else {
         None
     }
@@ -2688,7 +2688,7 @@ const HELP_LINES: &[&str] = &[
     "--doctor checks startup prerequisites without entering terminal mode or running inference.",
     "--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.",
     "--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.",
-    "--on-finish and --max-repairs apply only to --go, --resume and the terminal; an explicit one with --chat or --doctor exits 2, while ALFREDO_ON_FINISH is ignored there.",
+    "--on-finish applies only to --go, --resume and the terminal, and --max-repairs applies only to --go and the terminal (--resume keeps the paused run's own repair budget and exits 2 with an explicit one); an explicit one with --chat or --doctor exits 2, while ALFREDO_ON_FINISH is ignored there.",
     "--on-finish PROGRAM (env ALFREDO_ON_FINISH) runs your executable (absolute path, no shell, outside the sandbox, 10 s limit) when an autopilot run ends done, partial or failed, with ALFREDO_STATE, ALFREDO_BRANCH, ALFREDO_GOAL, ALFREDO_ACCEPTED, ALFREDO_TOTAL and ALFREDO_REPAIRS set.",
     "Environment: ALFREDO_ON_FINISH, ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE, ALFREDO_NUM_CTX, ALFREDO_ICONS, ALFREDO_NO_MOTION, COLORTERM, NO_COLOR",
 ];
