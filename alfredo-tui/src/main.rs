@@ -2064,7 +2064,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 })
                             };
                             match result {
-                                Ok(lines) => {
+                                Ok((lines, restored)) => {
+                                    work.app.sessions[index].undone(&restored);
                                     work.app.sessions[index].remember_submission();
                                     work.app.sessions[index].clear_draft();
                                     if lines.len() > 1 {

@@ -1165,6 +1165,30 @@ impl Session {
         ))
     }
 
+    /// `/undo` restored `restored` (workspace-relative paths): mark the last reply's edits of
+    /// those files `undone`, so the applied note no longer lists them (issue #784). The
+    /// calls and their rows stay.
+    pub fn undone(&mut self, restored: &[String]) {
+        let Some(steps) = self
+            .messages
+            .len()
+            .checked_sub(1)
+            .and_then(|last| self.tool_steps.get_mut(&last))
+        else {
+            return;
+        };
+        for step in steps {
+            for (call, result) in step.calls.iter().zip(&mut step.results) {
+                if !result.starts_with("error:")
+                    && !result.starts_with(UNDONE)
+                    && crate::chat_tools::undo::restored_call(call, restored)
+                {
+                    result.insert_str(0, UNDONE);
+                }
+            }
+        }
+    }
+
     /// One line per executed mutating call of `steps` whose outcome was not an error.
     fn applied_lines(steps: &[ToolStep]) -> Option<String> {
         use crate::chat_tools::{Tier, TOOLS};
@@ -1173,6 +1197,7 @@ impl Session {
             .flat_map(|step| step.calls.iter().zip(&step.results))
             .filter(|(call, result)| {
                 (!result.starts_with("error:") || killed_run(call, result))
+                    && !result.starts_with(UNDONE)
                     && TOOLS.iter().any(|tool| {
                         tool.name == call.name && matches!(tool.tier, Tier::Mutating | Tier::Push)
                     })
@@ -2045,6 +2070,9 @@ pub(crate) fn cut_earlier_arguments(arguments: &mut serde_json::Value) {
         }
     }
 }
+
+/// Result prefix of an edit that `/undo` restored (issue #784).
+const UNDONE: &str = "undone: ";
 
 /// Whether `result` is that of a `run_command` killed mid-run (issue #333).
 fn killed_run(call: &ToolCall, result: &str) -> bool {
