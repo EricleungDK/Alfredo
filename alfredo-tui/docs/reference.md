@@ -2980,6 +2980,11 @@ with `--mission NAME` or headless `--resume`. The error names the absolute file 
 one way out: `move it aside (mv "<path>" "<path>.bad")` and start again, or start with
 `--new-mission NAME`. Alfredo never modifies, moves or deletes the file itself.
 
+A state file that cannot be read at all (a directory, permission denied, for example a
+file left root-owned mode 0600 by a `sudo` run) is refused the same way, with the OS
+error as the problem. Its way out is to fix the file's permissions or move it aside, or
+start with `--new-mission NAME`. A missing file is not an error: the mission starts fresh.
+
 ### Selection history and recovery
 
 Workspace and mission choices save before creation or handoff. An in-process
