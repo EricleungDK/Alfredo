@@ -540,7 +540,7 @@ pub fn peek(path: &Path) -> Result<Option<Peek>, String> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(refusal::read_failure(path, &error)),
     };
     let saved = parse(path, &bytes)?;
     let counts = (saved.total > 0).then_some((saved.done, saved.total));
@@ -618,7 +618,7 @@ impl Autopilot {
                 Some(saved)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(format!("Cannot read autopilot state: {error}")),
+            Err(error) => return Err(refusal::read_failure(&path, &error)),
         };
         let saved_elapsed = saved
             .as_ref()

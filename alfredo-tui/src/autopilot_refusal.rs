@@ -112,22 +112,42 @@ pub(super) fn scope_blocker(scope: &understanding::Snapshot, goal: &str) -> Resu
 }
 
 /// Name the state file and the ways out of a refused one; the file is never touched.
-pub(super) fn unreadable(path: &Path, problem: &str) -> String {
+/// `io`: the file could not be read at all, so fixing its permissions comes first.
+pub(super) fn unreadable(path: &Path, problem: &str, io: bool) -> String {
     let path = path.display();
+    let fix = if io {
+        "Fix its permissions or move it aside"
+    } else {
+        "Move it aside"
+    };
     format!(
-        "{problem} ({path}); original preserved. Move it aside (mv \"{path}\" \"{path}.bad\") or start with --new-mission NAME"
+        "{problem} ({path}); original preserved. {fix} (mv \"{path}\" \"{path}.bad\") or start with --new-mission NAME"
     )
+}
+
+/// The refusal for a state file that exists but cannot be read.
+pub(super) fn read_failure(path: &Path, error: &std::io::Error) -> String {
+    unreadable(path, &format!("Cannot read autopilot state: {error}"), true)
 }
 
 /// Parse and validate saved state bytes; every refusal names `path` and the way out.
 pub(super) fn parse(path: &Path, bytes: &[u8]) -> Result<Saved, String> {
     if bytes.len() > MAX_STATE {
-        return Err(unreadable(path, "Autopilot state exceeds its size bound"));
+        return Err(unreadable(
+            path,
+            "Autopilot state exceeds its size bound",
+            false,
+        ));
     }
-    let saved: Saved = serde_json::from_slice(bytes)
-        .map_err(|error| unreadable(path, &format!("Autopilot state is invalid ({error})")))?;
+    let saved: Saved = serde_json::from_slice(bytes).map_err(|error| {
+        unreadable(
+            path,
+            &format!("Autopilot state is invalid ({error})"),
+            false,
+        )
+    })?;
     saved
         .validate()
-        .map_err(|problem| unreadable(path, &problem))?;
+        .map_err(|problem| unreadable(path, &problem, false))?;
     Ok(saved)
 }
