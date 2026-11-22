@@ -109,6 +109,9 @@ class Fixture:
                         {'function': {'name': 'edit_file', 'arguments': {
                             'path': 'README.md', 'old_text': 'README_BODY_MARKER: a tiny',
                             'new_text': 'REDRAFTED_MARKER: a small'}}}]}, 'done': False}]
+                elif 'redraft' in prompt and 'then hang' in prompt:
+                    time.sleep(30)
+                    chunks = [{'message': {'content': 'HUNG_REPLY'}, 'done': False}]
                 elif 'redraft' in prompt:
                     denied = 'denied' in tool_results[-1]['content']
                     chunks = [{'message': {'content': 'MODEL_SAW_DENIAL' if denied else 'MODEL_SAW_EDIT'},
@@ -313,6 +316,33 @@ class ChatTools(unittest.TestCase):
         self.assertEqual(self.readme(), README)
         self.terminal.write(b'/undo\r')
         self.terminal.wait_for('Nothing to undo: no chat edit from the last turn is recorded')
+
+    def test_undo_then_ctrl_r_sends_the_bare_prompt(self):
+        # Issue #784: /undo reverted the edit the interrupted turn applied, so the retried
+        # request must not say it is still applied.
+        self.terminal.write(b'redraft README then hang\r')
+        self.terminal.wait_for('Approve edit_file')
+        time.sleep(0.7)
+        self.terminal.write(b'y')
+        deadline = time.time() + 10
+        while len(self.fixture.chats()) < 2 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(len(self.fixture.chats()), 2, 'the model was asked again after the edit')
+        self.terminal.write(b'\x1b')
+        self.terminal.wait_for('cancelled')
+        self.terminal.write(b'/undo\r')
+        self.terminal.wait_for('1 restored, 0 refused')
+        self.assertEqual(self.readme(), README)
+        self.terminal.write(b'\x12')
+        deadline = time.time() + 10
+        while len(self.fixture.chats()) < 3 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(len(self.fixture.chats()), 3, 'Ctrl+R retried the turn')
+        retried = self.fixture.chats()[-1]['messages']
+        self.assertEqual([m['role'] for m in retried if m['role'] != 'system'], ['user'])
+        user = [m['content'] for m in retried if m['role'] == 'user'][-1]
+        self.assertEqual(user, 'redraft README then hang')
+        self.assertNotIn('Already applied', user)
 
     def start_slow_command(self, prompt):
         root = Path(os.path.realpath(self.repo.name))

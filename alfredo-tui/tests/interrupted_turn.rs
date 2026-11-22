@@ -589,6 +589,154 @@ fn retry_after_only_unapplied_calls_resends_the_bare_prompt() {
     assert_eq!(roles(&request), [("user", "look around")]);
 }
 
+fn edit_result(path: &str, new_round: bool) -> Update {
+    tool_result(
+        "edit_file",
+        serde_json::json!({"path": path, "old_text": "a", "new_text": "b"}),
+        &format!("edited {path} (1 replacement)"),
+        new_round,
+    )
+}
+
+/// An interrupted turn whose only applied call was an edit, which `/undo` then restored.
+fn undone_edit() -> Session {
+    let mut s = Session::new("m".into());
+    s.insert("redraft README");
+    s.begin().unwrap();
+    s.apply(1, edit_result("README.md", true));
+    s.cancel();
+    s.undone(&["README.md".into()]);
+    s
+}
+
+/// Issue #784: `/undo` reverted the edit, so Ctrl+R must not say it is still applied.
+#[test]
+fn retry_after_undo_of_the_only_applied_edit_sends_the_bare_prompt() {
+    let mut s = undone_edit();
+    let request = s.retry().unwrap();
+    assert_eq!(roles(&request), [("user", "redraft README")]);
+}
+
+#[test]
+fn undo_keeps_the_row_and_marks_its_result_undone() {
+    let mut app = App::new("m".into());
+    app.sessions[0] = undone_edit();
+    let step = &app.sessions[0].tool_steps(1)[0];
+    assert_eq!(step.results, ["undone: edited README.md (1 replacement)"]);
+    let screen = screen_text(&app);
+    assert!(screen.contains("⚙ edit_file"), "{screen}");
+    assert!(screen.contains("undone: edited README.md"), "{screen}");
+}
+
+#[test]
+fn new_prompt_after_undo_of_the_only_applied_edit_carries_no_applied_note() {
+    let mut s = undone_edit();
+    s.insert("hello");
+    assert_eq!(roles(&s.begin().unwrap()), [("user", "hello")]);
+}
+
+#[test]
+fn undo_that_refused_one_file_keeps_that_call_in_the_note() {
+    let mut s = Session::new("m".into());
+    s.insert("edit both");
+    s.begin().unwrap();
+    s.apply(1, edit_result("a.txt", true));
+    s.apply(1, edit_result("./dir/b.txt", false));
+    s.apply(1, Update::Failed("connection lost".into()));
+    s.undone(&["dir/b.txt".into()]);
+    let request = s.retry().unwrap();
+    assert_eq!(request.len(), 1, "{request:?}");
+    let prompt = &request[0].content;
+    assert!(
+        prompt.contains("- edit_file a.txt: edited a.txt"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("b.txt"), "{prompt}");
+}
+
+#[test]
+fn undo_leaves_failed_calls_other_tools_and_unrestored_paths_alone() {
+    let mut s = Session::new("m".into());
+    s.insert("mixed");
+    s.begin().unwrap();
+    s.apply(
+        1,
+        tool_result(
+            "edit_file",
+            serde_json::json!({"path": "a.txt", "old_text": "1", "new_text": "2"}),
+            "error: old_text not found",
+            true,
+        ),
+    );
+    s.apply(
+        1,
+        tool_result(
+            "read_file",
+            serde_json::json!({"path": "a.txt"}),
+            "body",
+            false,
+        ),
+    );
+    s.apply(
+        1,
+        tool_result(
+            "write_file",
+            serde_json::json!({"path": "c.txt", "content": "x"}),
+            "wrote c.txt (1 bytes)",
+            false,
+        ),
+    );
+    s.cancel();
+    s.undone(&["a.txt".into()]);
+    assert_eq!(
+        s.tool_steps(1)[0].results,
+        ["error: old_text not found", "body", "wrote c.txt (1 bytes)"]
+    );
+    // A repeated /undo never marks a result twice.
+    s.undone(&["c.txt".into()]);
+    s.undone(&["c.txt".into()]);
+    assert_eq!(
+        s.tool_steps(1)[0].results[2],
+        "undone: wrote c.txt (1 bytes)"
+    );
+}
+
+#[test]
+fn undo_with_no_reply_or_no_rounds_changes_nothing() {
+    let mut s = Session::new("m".into());
+    s.undone(&["a.txt".into()]);
+    s.insert("hi");
+    s.begin().unwrap();
+    s.undone(&["a.txt".into()]);
+    assert!(s.tool_steps(1).is_empty());
+}
+
+#[test]
+fn undo_matches_a_padded_path_argument() {
+    let mut s = Session::new("m".into());
+    s.insert("pad");
+    s.begin().unwrap();
+    s.apply(1, edit_result(" ./a.txt ", true));
+    s.cancel();
+    s.undone(&["a.txt".into()]);
+    assert_eq!(
+        s.tool_steps(1)[0].results,
+        ["undone: edited  ./a.txt  (1 replacement)"]
+    );
+}
+
+#[test]
+fn undone_edits_stay_out_of_the_retry_note_after_a_restart() {
+    let mut app = App::new("m".into());
+    app.sessions[0] = undone_edit();
+    let (root, store) = store();
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    let mut restored = store.load().unwrap().unwrap().restore();
+    let request = restored.sessions[0].retry().unwrap();
+    assert_eq!(roles(&request), [("user", "redraft README")]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn write_result(path: &str) -> Update {
     tool_result(
         "write_file",

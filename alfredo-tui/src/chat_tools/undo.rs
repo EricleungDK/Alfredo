@@ -321,22 +321,52 @@ impl Capture {
 
 /// `/undo` as the terminal runs it: the last turn's edits in `workspace`, outcomes logged
 /// to the chat-approval log beside the journal in `dir`.
-pub fn slash(dir: &Path, workspace: &Path) -> Result<Vec<String>, String> {
-    run(workspace, dir, Some(&Log::new(dir)))
+/// Returns the report lines and the workspace-relative paths that were restored.
+pub fn slash(dir: &Path, workspace: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+    report(workspace, dir, Some(&Log::new(dir)))
 }
 
 /// Undo the last turn's edits in `root`; one line per file after a summary line.
 pub fn run(root: &Path, dir: &Path, log: Option<&Log>) -> Result<Vec<String>, String> {
+    report(root, dir, log).map(|(lines, _)| lines)
+}
+
+fn report(
+    root: &Path,
+    dir: &Path,
+    log: Option<&Log>,
+) -> Result<(Vec<String>, Vec<String>), String> {
     locked(dir, || run_locked(root, dir, log)).unwrap_or_else(|| {
         Err("the undo journal is busy or unavailable; nothing was undone".into())
     })
 }
 
+/// Whether `call` is an edit of a file in `restored` (issue #784): the `path` argument
+/// compared as the journal names it, without `.` components.
+pub fn restored_call(call: &crate::model::ToolCall, restored: &[String]) -> bool {
+    let path = call
+        .arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str);
+    matches!(call.name.as_str(), "write_file" | "edit_file")
+        && path.is_some_and(|path| {
+            let shown: PathBuf = Path::new(path.trim())
+                .components()
+                .filter(|c| matches!(c, Component::Normal(_)))
+                .collect();
+            restored.iter().any(|r| Path::new(r) == shown)
+        })
+}
+
 const NOTHING: &str = "Nothing to undo: no chat edit from the last turn is recorded";
 
-fn run_locked(root: &Path, dir: &Path, log: Option<&Log>) -> Result<Vec<String>, String> {
+fn run_locked(
+    root: &Path,
+    dir: &Path,
+    log: Option<&Log>,
+) -> Result<(Vec<String>, Vec<String>), String> {
     let Some(mut journal) = load(dir).filter(|j| !j.entries.is_empty()) else {
-        return Ok(vec![NOTHING.into()]);
+        return Ok((vec![NOTHING.into()], Vec::new()));
     };
     let workspace = root
         .canonicalize()
@@ -364,6 +394,7 @@ fn run_locked(root: &Path, dir: &Path, log: Option<&Log>) -> Result<Vec<String>,
     let (mut done, mut refused) = (0, 0);
     let mut lines = Vec::new();
     let mut kept = Vec::new();
+    let mut restored = Vec::new();
     for entry in journal.entries.drain(..).rev() {
         if let Some(reason) = &entry.unavailable {
             refused += 1;
@@ -377,6 +408,7 @@ fn run_locked(root: &Path, dir: &Path, log: Option<&Log>) -> Result<Vec<String>,
         match undo_one(&workspace, dir, &entry) {
             Ok(message) => {
                 done += 1;
+                restored.push(entry.path.clone());
                 lines.push(message);
                 record(&entry.path, Outcome::Applied);
                 if let Some((name, _)) = &entry.before {
@@ -402,7 +434,7 @@ fn run_locked(root: &Path, dir: &Path, log: Option<&Log>) -> Result<Vec<String>,
         0,
         format!("/undo · {done} restored, {refused} refused or not available"),
     );
-    Ok(lines)
+    Ok((lines, restored))
 }
 
 /// Walk `relative` below the canonical `root` one component at a time; no symlink is
