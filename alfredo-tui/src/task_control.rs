@@ -1758,20 +1758,15 @@ impl TaskControl {
         if let Some(blocker) = crate::doctor::sandbox_blocker() {
             return Err(blocker);
         }
-        if self
-            .snapshot
-            .as_ref()
-            .is_none_or(|snapshot| snapshot.revision != expected_revision)
-            && !self.snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot
+        let Some(snapshot) = self.snapshot.as_ref().filter(|snapshot| {
+            snapshot.revision == expected_revision
+                || snapshot
                     .receipts
                     .iter()
                     .any(|receipt| receipt.request.correlation == correlation)
-            })
-        {
+        }) else {
             return Err("Task state changed; refresh before running saved intent".into());
-        }
-        let snapshot = self.snapshot.as_ref().unwrap();
+        };
         let selected = snapshot
             .tasks
             .iter()
@@ -1796,7 +1791,7 @@ impl TaskControl {
         if let Some(blocker) = self.scope_status.run_blocker(snapshot, selected) {
             return Err(blocker);
         }
-        if let Some(approval) = crate::dispatch::approval(self.snapshot.as_ref().unwrap(), task) {
+        if let Some(approval) = crate::dispatch::approval(snapshot, task) {
             self.dispatch.attempts.insert(task, approval);
         }
         self.dispatch.failures.remove(&task);
@@ -1868,7 +1863,9 @@ impl TaskControl {
         else {
             return Err("Architect source review has not been acknowledged".into());
         };
-        let source = self.architecture_launch.take().unwrap();
+        let Some(source) = self.architecture_launch.take() else {
+            return Err("Architect source review has not been acknowledged".into());
+        };
         let Action::ReviewArchitecture { task, .. } = source.action else {
             return Err("Architect source is not an architecture review".into());
         };
@@ -2722,6 +2719,19 @@ mod refusal_notice_tests {
         )));
         assert!(control.notice.contains("/retry-task"), "{}", control.notice);
         assert!(control.retry.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_unacknowledged_architect_source_is_refused_and_kept() {
+        let (mut control, root) = control();
+        control.snapshot = Some(control.store.snapshot().unwrap());
+        control.architecture_launch = control.retry.clone();
+        assert_eq!(
+            control.prepare_architect().unwrap_err(),
+            "Architect source review has not been acknowledged"
+        );
+        assert!(control.architecture_launch.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 
