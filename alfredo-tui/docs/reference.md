@@ -2065,7 +2065,13 @@ Approval (ADR 0004); there is no skip-approval mode.
   like the header); when the card is too tall with the `args` excerpt, that row replaces
   the excerpt, so a short change to a long file (3 contiguous lines on a 24x80 terminal)
   arms instead of going deny-only (issue #586). A path too wide for one row is never cut,
-  and the `args` line stays on `run_command` and the git tools. Enlarging the terminal re-evaluates the
+  and the `args` line stays on the git tools. A `run_command` card keeps it too, and drops it
+  only when it is the row that does not fit and nothing in it is missing from the card: its keys
+  are only `command`, `cwd`, `escalate` and `timeout_seconds` (the `cwd · timeout` row, the
+  `$` rows and the HOST banner draw them), and the `$` rows spell the command exactly (a
+  trailing newline or a CR keeps the row). Below 24 rows a pending card also shrinks the prompt
+  box to one row, carrying the approval hint and any draft, so `run_command touch x` arms at
+  80x18 (issue #745). Enlarging the terminal re-evaluates the
   card; on a terminal so short that the header cannot be drawn, only Esc answers.
 - **The card shows minimal hunks (issue #510).** A `write_file` or `edit_file` card draws only the changed lines, one `@@ line N @@` header per run of changes (N is the line in the current file); unchanged lines between hunks are not drawn, so a rewrite that changes lines 1 and 100 of a 100-line file is a 6-line card. A change that needs more than 160 added plus removed lines is drawn as one span from its first to its last change and is then refused by the cap below. One contiguous change reads as before.
 - **Over-cap changes are refused, not cut (issue #269).** A card never hides lines the

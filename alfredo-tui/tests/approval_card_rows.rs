@@ -3,6 +3,7 @@
 use alfredo_tui::chat_tools::approval::{Card, CardKind, FileRow};
 use alfredo_tui::ui::approval_card_lines_with_file;
 use ratatui::text::Line;
+use serde_json::json;
 
 fn wide_card(preview_line: impl Fn(usize) -> String) -> Card {
     let preview: Vec<String> = (0..30).map(preview_line).collect();
@@ -170,5 +171,149 @@ fn the_args_excerpt_is_twice_the_width_long() {
         let text = texts(&with_file(&card, width, 200).0);
         let args = text.iter().find_map(|l| l.strip_prefix("  args ")).unwrap();
         assert_eq!(args.chars().count(), width.max(20) * 2, "{width}");
+    }
+}
+
+/// A `run_command` card as `chat_tools::shell::preview` builds it.
+fn shell_card(arguments: serde_json::Value, escalated: bool) -> Card {
+    let command = arguments["command"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let place = if escalated {
+        "HOST · network on · your environment and credentials (SSH agent, tokens) · outside the sandbox"
+    } else {
+        "sandboxed · network off · only the Coding Workspace writable"
+    };
+    let mut preview = format!("cwd sub · {place} · timeout 30s");
+    for line in command.lines() {
+        preview.push_str(&format!("\n$ {line}"));
+    }
+    Card {
+        tool: "run_command".into(),
+        arguments,
+        kind: CardKind::Shell { escalated },
+        summary: format!("run {command}"),
+        preview,
+        fingerprint: String::new(),
+    }
+}
+
+fn args_rows(lines: &[Line<'static>]) -> usize {
+    texts(lines)
+        .iter()
+        .filter(|l| l.starts_with("  args "))
+        .count()
+}
+
+/// Rows a card takes with its args row, and the largest row budget that is one short
+/// of drawing it whole with them.
+fn full_height(card: &Card) -> usize {
+    height_of(&approval_card_lines(card, 80, 100).0, 80)
+}
+
+/// Issue #745: the args row of a `run_command` card repeats the `$` rows, the cwd and
+/// timeout row and the HOST banner. Where it is the row that does not fit, it is left
+/// out; every argument is still drawn and the card is whole.
+#[test]
+fn a_run_command_card_drops_its_args_row_only_when_that_is_the_row_that_does_not_fit() {
+    for escalated in [false, true] {
+        let card = shell_card(
+            json!({"command": "echo a\necho b", "cwd": "sub", "escalate": escalated, "timeout_seconds": 30}),
+            escalated,
+        );
+        let (lines, _, whole) = approval_card_lines(&card, 80, 100);
+        assert!(whole && args_rows(&lines) == 1, "{:?}", texts(&lines));
+        let full = height_of(&lines, 80);
+        let args = lines
+            .iter()
+            .find(|l| l.to_string().starts_with("  args "))
+            .map(|l| height_of(std::slice::from_ref(l), 80))
+            .unwrap();
+        let bare = full - args;
+        let (lines, head, whole) = approval_card_lines(&card, 80, bare);
+        let text = texts(&lines);
+        assert!(whole && args_rows(&lines) == 0, "{text:?}");
+        assert_eq!(height_of(&lines, 80), bare, "{text:?}");
+        assert_eq!(head, if escalated { 2 } else { 1 }, "{text:?}");
+        assert!(text.iter().any(|l| l.contains("? Approve run_command")));
+        assert!(text.iter().any(|l| l.trim() == "$ echo a"), "{text:?}");
+        assert!(text.iter().any(|l| l.trim() == "$ echo b"), "{text:?}");
+        assert!(text.iter().any(|l| l.contains("cwd sub")), "{text:?}");
+        assert!(text.iter().any(|l| l.contains("timeout 30s")), "{text:?}");
+        assert_eq!(
+            text.iter().any(|l| l.contains("! HOST")),
+            escalated,
+            "{text:?}"
+        );
+        assert!(text.last().unwrap().contains("y approve"), "{text:?}");
+        // One row fewer and nothing more can go: deny-only, with the args row back.
+        let (lines, _, whole) = approval_card_lines(&card, 80, bare - 1);
+        assert!(!whole && args_rows(&lines) == 1, "{:?}", texts(&lines));
+    }
+}
+
+/// Issue #745: a run_command card whose args row says something its other rows do not
+/// keeps the row, and when the row cannot fit the card is deny-only.
+#[test]
+fn a_run_command_card_keeps_an_args_row_that_shows_more_than_the_card() {
+    let hidden = |card: Card| {
+        let full = full_height(&card);
+        let (lines, _, whole) = approval_card_lines(&card, 80, full - 1);
+        assert!(!whole && args_rows(&lines) == 1, "{:?}", texts(&lines));
+        let (lines, _, whole) = approval_card_lines(&card, 80, full);
+        assert!(whole && args_rows(&lines) == 1, "{:?}", texts(&lines));
+    };
+    // An argument the tool does not read, or one the card does not draw.
+    hidden(shell_card(json!({"command": "ls", "extra": "x"}), false));
+    // A trailing newline, a CR and a tab are not visible on a `$` row.
+    hidden(shell_card(json!({"command": "ls\n"}), false));
+    hidden(shell_card(json!({"command": "ls\r\nrm x"}), false));
+    // `escalate` says HOST but the card is not drawn as one, and the reverse.
+    hidden(shell_card(
+        json!({"command": "ls", "escalate": true}),
+        false,
+    ));
+    hidden(shell_card(
+        json!({"command": "ls", "escalate": false}),
+        true,
+    ));
+    // Arguments that are not a command object.
+    hidden(shell_card(json!({"command": 5}), false));
+    hidden(shell_card(json!({"command": ""}), false));
+    hidden(shell_card(json!(["ls"]), false));
+    // A card whose rows are not those of a run_command preview.
+    let mut card = shell_card(json!({"command": "ls"}), false);
+    card.preview = card.preview.replace("cwd ", "dir ");
+    hidden(card);
+    let mut card = shell_card(json!({"command": "ls"}), false);
+    card.preview = card.preview.replace(" · timeout ", " · limit ");
+    hidden(card);
+    let mut card = shell_card(json!({"command": "ls"}), false);
+    card.preview = card.preview.replace("$ ls", "ls");
+    hidden(card);
+    let mut card = shell_card(json!({"command": "ls"}), false);
+    card.preview = card.preview.replace("\n$ ls", "");
+    hidden(card);
+    let mut card = shell_card(json!({"command": "ls -l"}), false);
+    card.preview = card.preview.replace("$ ls -l", "$ ls");
+    hidden(card);
+    let mut card = shell_card(json!({"command": "ls"}), false);
+    card.tool = "write_file".into();
+    hidden(card);
+    let mut card = shell_card(json!({"command": "ls"}), false);
+    card.kind = CardKind::Git;
+    hidden(card);
+}
+
+/// Issue #745: with the args row gone each key the tool reads is still drawn.
+#[test]
+fn a_run_command_card_without_args_draws_every_key_the_tool_reads() {
+    let card = shell_card(json!({"command": "ls"}), false);
+    let (lines, _, whole) = approval_card_lines(&card, 80, full_height(&card) - 1);
+    let text = texts(&lines).join("\n");
+    assert!(whole && !text.contains("args"), "{text}");
+    for shown in ["cwd sub", "timeout 30s", "sandboxed", "$ ls", "run ls"] {
+        assert!(text.contains(shown), "{shown}: {text}");
     }
 }

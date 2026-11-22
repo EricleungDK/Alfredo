@@ -40,6 +40,12 @@ const COMMAND_SUMMARY: usize = 160;
 
 /// Most text rows the prompt box shows for a multi-line draft (issue #398).
 const MAX_PROMPT_ROWS: usize = 6;
+/// Terminal height from which a pending card keeps the three-row prompt box.
+const FULL_PROMPT_ROWS_FROM: u16 = 24;
+/// The least draft room beside the approval hint on the one-row prompt.
+const MIN_DRAFT_CELLS: usize = 8;
+/// Chat rows kept for the transcript: its last line and the blank row after it.
+const MIN_TRANSCRIPT_ROWS: u16 = 2;
 
 fn safe(text: &str) -> String {
     dashboard::safe(text)
@@ -254,15 +260,26 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
             area.height.saturating_sub(header_rows + 3 + 2 + 2),
         ))
         .max(1);
+    let session = &app.sessions[app.selected];
+    // On a short terminal a pending card needs the rows more than the prompt box does:
+    // the box shrinks to one row that carries the approval hint and any draft (issue
+    // #745). From 24 rows up the layout of issues #586 and #623 is unchanged.
+    let card_pending = session.pending_approval().is_some()
+        && app.pane.focus.is_none()
+        && area.height < FULL_PROMPT_ROWS_FROM;
+    let prompt_rows = if card_pending {
+        1
+    } else {
+        prompt_text_rows as u16 + 2
+    };
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(u16::from(autopilot.is_some())),
         Constraint::Min(3),
-        Constraint::Length(prompt_text_rows as u16 + 2),
+        Constraint::Length(prompt_rows),
         Constraint::Length(2),
     ])
     .split(area);
-    let session = &app.sessions[app.selected];
     draw_header(frame, app, tasks, rows[0]);
     if let Some(status) = autopilot {
         draw_autopilot(frame, &theme, status, rows[1]);
@@ -315,38 +332,48 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         None if app.sessions.len() > 1 => " Prompt · Enter send · Tab chats ".to_string(),
         None => " Prompt · Enter send ".to_string(),
     };
-    let draft_width = rows[3].width.saturating_sub(4) as usize;
-    let draft = if session.draft_line_count() > 1 {
-        Text::from(
-            session
-                .draft_lines(draft_width, prompt_text_rows)
-                .iter()
-                .map(|line| Line::from(safe(line)))
-                .collect::<Vec<_>>(),
-        )
+    if card_pending {
+        draw_card_prompt(
+            frame,
+            session,
+            &prompt_title,
+            theme.color(Tone::Cyan),
+            rows[3],
+        );
     } else {
-        Text::from(safe(&session.draft_view(draft_width)))
-    };
-    frame.render_widget(
-        Paragraph::new(draft)
-            .style(if session.replace_pending() {
-                // Rejected text reads as selected: the next character replaces it.
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            })
-            .block(
-                Block::bordered()
-                    .padding(Padding::horizontal(1))
-                    .border_style(Style::default().fg(if focused {
-                        theme.color(Tone::Dim)
-                    } else {
-                        theme.color(Tone::Cyan)
-                    }))
-                    .title(prompt_title),
-            ),
-        rows[3],
-    );
+        let draft_width = rows[3].width.saturating_sub(4) as usize;
+        let draft = if session.draft_line_count() > 1 {
+            Text::from(
+                session
+                    .draft_lines(draft_width, prompt_text_rows)
+                    .iter()
+                    .map(|line| Line::from(safe(line)))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            Text::from(safe(&session.draft_view(draft_width)))
+        };
+        frame.render_widget(
+            Paragraph::new(draft)
+                .style(if session.replace_pending() {
+                    // Rejected text reads as selected: the next character replaces it.
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                })
+                .block(
+                    Block::bordered()
+                        .padding(Padding::horizontal(1))
+                        .border_style(Style::default().fg(if focused {
+                            theme.color(Tone::Dim)
+                        } else {
+                            theme.color(Tone::Cyan)
+                        }))
+                        .title(prompt_title),
+                ),
+            rows[3],
+        );
+    }
     let note = if !app.notice.is_empty() {
         safe(&app.notice)
     } else if let Some(tasks) = tasks.filter(|tasks| tasks.visible) {
@@ -404,6 +431,29 @@ fn strip_colors(buffer: &mut Buffer) {
         cell.set_fg(Color::Reset);
         cell.set_bg(Color::Reset);
     }
+}
+
+/// The one-row prompt shown while an approval card is pending (issue #745): the
+/// approval hint, then the draft after it when there is one (a draft blocks `y`/`n`/`a`).
+fn draw_card_prompt(
+    frame: &mut Frame,
+    session: &crate::model::Session,
+    hint: &str,
+    color: Color,
+    area: Rect,
+) {
+    let width = usize::from(area.width);
+    let hint = hint.trim();
+    let room = width.saturating_sub(hint.width() + 3);
+    let text = if session.draft.is_empty() || room < MIN_DRAFT_CELLS {
+        cut_cells(hint, width)
+    } else {
+        format!("{hint} › {}", safe(&session.draft_view(room)))
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(text, Style::default().fg(color))),
+        area,
+    );
 }
 
 /// Fields separated by three spaces, never chains of ` · `.
@@ -1604,7 +1654,8 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
     let metadata = Paragraph::new(metadata).wrap(Wrap { trim: false });
     let metadata_height = metadata
         .line_count(inner.width)
-        .min(inner.height.saturating_sub(1) as usize) as u16;
+        .min(inner.height.saturating_sub(MIN_TRANSCRIPT_ROWS) as usize)
+        as u16;
     let content =
         Layout::vertical([Constraint::Length(metadata_height), Constraint::Min(1)]).split(inner);
     frame.render_widget(metadata, content[0]);
@@ -1883,6 +1934,8 @@ pub fn approval_card_lines_with_file(
     let file = file.filter(|_| card.kind == crate::chat_tools::approval::CardKind::Edit);
     let tries: &[Rows] = if file.is_some() {
         &[Rows::Both, Rows::FileOnly]
+    } else if shell_args_all_shown(card) {
+        &[Rows::Args, Rows::Bare]
     } else {
         &[Rows::Args]
     };
@@ -1905,6 +1958,40 @@ enum Rows {
     Both,
     /// A file edit's `path · N bytes` row instead of the args excerpt.
     FileOnly,
+    /// No args row: a `run_command` card whose every argument is drawn on its own rows
+    /// (see [`shell_args_all_shown`]).
+    Bare,
+}
+
+/// The `run_command` arguments that change what runs.
+const SHELL_ARGUMENTS: [&str; 4] = ["command", "cwd", "escalate", "timeout_seconds"];
+
+/// True when the args row of a `run_command` card repeats what its other rows draw: no
+/// argument beyond the four the tool reads, and the `$` rows spell the command exactly
+/// (a trailing newline or a `\r` would not show there, so such a card keeps its args).
+/// The cwd and timeout are on the card's first preview row and the HOST banner follows
+/// `escalate`.
+fn shell_args_all_shown(card: &crate::chat_tools::approval::Card) -> bool {
+    use crate::chat_tools::approval::CardKind;
+    let Some(arguments) = card.arguments.as_object() else {
+        return false;
+    };
+    let Some(command) = arguments.get("command").and_then(|c| c.as_str()) else {
+        return false;
+    };
+    let mut rows = card.preview.lines();
+    let first = rows.next().unwrap_or_default();
+    let drawn: Option<Vec<&str>> = rows.map(|row| row.strip_prefix("$ ")).collect();
+    let escalate = arguments.get("escalate").and_then(|e| e.as_bool());
+    card.tool == "run_command"
+        && matches!(card.kind, CardKind::Shell { .. })
+        && arguments
+            .keys()
+            .all(|key| SHELL_ARGUMENTS.contains(&key.as_str()))
+        && escalate.unwrap_or(false) == card.escalated()
+        && first.starts_with("cwd ")
+        && first.contains(" · timeout ")
+        && drawn.is_some_and(|rows| !rows.is_empty() && rows.join("\n") == command)
 }
 
 /// `(deny_only, rows)`: a deny-only card cuts its header; `rows` picks the header rows.
@@ -1983,7 +2070,7 @@ fn approval_card_build(
         });
     let file_only = rows_kind == Rows::FileOnly && file_row.is_some();
     lines.extend(file_row);
-    if !file_only {
+    if !file_only && rows_kind != Rows::Bare {
         let arguments = card.arguments.to_string();
         let shown: String = arguments.chars().take(width.max(20) * 2).collect();
         lines.push(Line::styled(

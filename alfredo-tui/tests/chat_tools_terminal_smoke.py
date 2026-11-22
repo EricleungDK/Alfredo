@@ -113,6 +113,12 @@ class Fixture:
                             'command': SLOW, 'escalate': 'on host' in prompt}}}]}, 'done': False}]
                 elif 'slow command' in prompt:
                     chunks = [{'message': {'content': 'SLOW_DONE'}, 'done': False}]
+                elif 'short command' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'run_command', 'arguments': {
+                            'command': 'touch pwned'}}}]}, 'done': False}]
+                elif 'short command' in prompt:
+                    chunks = [{'message': {'content': 'SHORT_RAN'}, 'done': False}]
                 elif 'long command' in prompt and not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'run_command', 'arguments': {'command': LONG}}}]},
@@ -555,6 +561,24 @@ class ChatTools(unittest.TestCase):
         self.terminal.wait_for('LONG_DENIED')
         self.assertFalse(root.joinpath('pwned').exists())
         self.assertEqual(self.approval_outcomes(), ['denied'])
+
+    def test_a_one_line_command_at_18x80_arms_and_y_runs_it(self):
+        # Issue #745: a tmux half-split is 18 rows; the card used to say `y is off`.
+        fcntl.ioctl(self.terminal.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 18, 80, 0, 0))
+        self.terminal.process.send_signal(signal.SIGWINCH)
+        self.terminal.wait_for_width(80)
+        time.sleep(0.5)
+        root = Path(os.path.realpath(self.repo.name))
+        self.terminal.write(b'short command\r')
+        self.terminal.wait_for('$ touch pwned')
+        screen = self.terminal.screen()
+        self.assertNotIn('y is off', screen)
+        self.assertIn('y approve', screen)
+        self.assertFalse(root.joinpath('pwned').exists(), 'nothing before y')
+        time.sleep(1.0)
+        self.terminal.write(b'y')
+        self.terminal.wait_for('SHORT_RAN')
+        self.assertTrue(root.joinpath('pwned').exists())
 
     def test_a_three_line_write_file_at_24x80_shows_one_path_row_and_y_writes_it(self):
         # Issue #586: the args excerpt used to push this card past 24 rows (deny-only).
