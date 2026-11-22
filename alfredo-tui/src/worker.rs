@@ -1087,9 +1087,22 @@ fn sanitize_output(text: &str) -> String {
             c => plain.push(c),
         }
     }
+    relative_worktree_paths(&plain)
+}
+
+/// Shorten absolute run-worktree paths to repository-relative ones (`.../worktree/x` becomes
+/// `x`). Display only; control characters pass through unchanged.
+pub(crate) fn relative_worktree_paths(plain: &str) -> String {
+    shorten_worktree_paths(plain, false)
+}
+
+/// The shortening itself. With `keep_hidden`, a token whose absolute prefix holds a hidden
+/// or control character stays whole, so the character is shown rather than dropped with
+/// the prefix (issue #736 review round 2).
+fn shorten_worktree_paths(plain: &str, keep_hidden: bool) -> String {
     const MARK: &str = "/worktree/";
     let mut out = String::with_capacity(plain.len());
-    let mut rest = plain.as_str();
+    let mut rest = plain;
     while let Some(index) = rest.find(MARK) {
         let before = &rest[..index];
         // Advance by the delimiter's own UTF-8 width: whitespace such as NBSP,
@@ -1101,8 +1114,10 @@ fn sanitize_output(text: &str) -> String {
             })
             .map_or(0, |(i, c)| i + c.len_utf8());
         out.push_str(&before[..start]);
-        if !before[start..].starts_with('/') {
-            out.push_str(&before[start..]);
+        let prefix = &before[start..];
+        let hidden = keep_hidden && prefix.chars().any(crate::dashboard::card_hidden);
+        if !prefix.starts_with('/') || hidden {
+            out.push_str(prefix);
             out.push_str(MARK);
         }
         rest = &rest[index + MARK.len()..];
@@ -1120,8 +1135,59 @@ pub fn output_tail(check: &ExecutionReceipt) -> Option<(&'static str, String)> {
     Some((label, bounded_tail(raw)))
 }
 
+/// [`output_tail`] without sanitizing: the same stream and bounds, but the raw lines with
+/// only the worktree paths shortened, so a control character shows in the dashboard as a
+/// marker instead of being deleted, split into a line, or swallowed with an escape sequence.
+pub(crate) fn raw_output_tail(check: &ExecutionReceipt) -> Option<(&'static str, Vec<String>)> {
+    let (label, raw) = [("stderr", &check.stderr), ("stdout", &check.stdout)]
+        .into_iter()
+        .find(|(_, text)| !text.trim().is_empty())?;
+    Some((label, bounded_raw_rows(&shorten_worktree_paths(raw, true))))
+}
+
+/// The raw tail as rows, split as `str::lines` splits them (so a CRLF ending loses its CR
+/// and a lone CR stays in its row). Only trailing line breaks and spaces are trimmed: a CR
+/// or tab at the end of the stream still shows. The last `TAIL_LINES` rows and at most
+/// `TAIL_BYTES` are kept; rows are never re-joined and split again.
+fn bounded_raw_rows(raw: &str) -> Vec<String> {
+    let mut text = raw;
+    loop {
+        if let Some(rest) = text.strip_suffix("\r\n") {
+            text = rest;
+        } else if let Some(rest) = text.strip_suffix(['\n', ' ']) {
+            text = rest;
+        } else {
+            break;
+        }
+    }
+    let rows: Vec<&str> = text.lines().collect();
+    let mut kept: Vec<String> = Vec::new();
+    let mut bytes = 0;
+    for row in rows[rows.len().saturating_sub(TAIL_LINES)..].iter().rev() {
+        let separator = usize::from(!kept.is_empty());
+        if bytes + separator + row.len() > TAIL_BYTES {
+            if kept.is_empty() {
+                let mut start = row.len().saturating_sub(TAIL_BYTES);
+                while !row.is_char_boundary(start) {
+                    start += 1;
+                }
+                kept.push(row[start..].to_owned());
+            }
+            break;
+        }
+        bytes += separator + row.len();
+        kept.push((*row).to_owned());
+    }
+    kept.reverse();
+    kept
+}
+
 fn bounded_tail(raw: &str) -> String {
-    let clean = sanitize_output(raw);
+    bounded_lines(&sanitize_output(raw))
+}
+
+/// The last `TAIL_LINES` lines and at most `TAIL_BYTES` of already-clean text.
+fn bounded_lines(clean: &str) -> String {
     let lines: Vec<&str> = clean.trim_end().lines().collect();
     let mut tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
     if tail.len() > TAIL_BYTES {

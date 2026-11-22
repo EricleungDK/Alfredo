@@ -551,14 +551,15 @@ fn work_detail(
             }
             lines.push(Line::default());
             lines.push(heading(label));
-            let text = safe(output);
-            let all: Vec<&str> = text.lines().collect();
+            // Each line split first (a lone CR is not a break here), then shown visibly: hidden
+            // characters as `<U+XXXX>`, tabs as `→` stops (issue #736).
+            let all: Vec<&str> = output.lines().collect();
             // The panel follows the tail; keep a bounded window of recent lines.
-            lines.extend(
-                all[all.len().saturating_sub(400)..]
-                    .iter()
-                    .map(|line| Line::from((*line).to_owned())),
-            );
+            lines.extend(all[all.len().saturating_sub(400)..].iter().map(|line| {
+                Line::from(crate::dashboard::show_tabs(
+                    &crate::dashboard::safe_visible(line),
+                ))
+            }));
         }
         return (
             lines,

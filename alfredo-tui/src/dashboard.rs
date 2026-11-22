@@ -477,6 +477,14 @@ pub fn footer(context: Footer, turn: Turn, width: usize) -> String {
     }
 }
 
+/// One line of outcome text with every hidden character shown as `<U+XXXX>`, controls
+/// included: a lone CR, U+0085, U+2028 and U+2029 are not breaks here, so they must not
+/// vanish or turn into plain spaces (issue #736). Only `\n` and `\r\n` become a space.
+fn marked_line(text: &str) -> String {
+    let flat = text.replace("\r\n", "\n").replace('\n', " ");
+    show_tabs(&safe_visible(&flat))
+}
+
 /// Compact projection of verified run evidence: outcome first, then diff and output.
 /// Run, baseline and receipt identifiers stay in the F3 evidence view.
 pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
@@ -494,8 +502,8 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         .check
         .as_ref()
         .filter(|check| !crate::worker::check_passed(check));
-    let tail = failed_check.and_then(crate::worker::output_tail);
-    let mut detail = single_line(&evidence.detail);
+    let tail = failed_check.and_then(crate::worker::raw_output_tail);
+    let mut detail = marked_line(&evidence.detail);
     if failed_check.is_some() {
         // The compact tail in the detail is shown below as formatted lines instead.
         for marker in [": stderr: ", ": stdout: ", " · stderr: ", " · stdout: "] {
@@ -533,7 +541,7 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         Some(_) if passed => {}
         // The outcome line already states the check result; do not repeat it.
         Some(check) if detail.starts_with("Check ") => {
-            let message = single_line(&check.error_message);
+            let message = marked_line(&check.error_message);
             if !message.is_empty() && !detail.contains(&message) {
                 lines.push(Line::styled(message, Style::default().fg(Color::Red)));
             }
@@ -541,11 +549,11 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         Some(check) => {
             lines.push(Line::from(format!(
                 "Check · {}{exit}",
-                single_line(&check.status)
+                marked_line(&check.status)
             )));
             if !check.error_message.is_empty() {
                 lines.push(Line::styled(
-                    single_line(&check.error_message),
+                    marked_line(&check.error_message),
                     Style::default().fg(Color::Red),
                 ));
             }
@@ -555,17 +563,21 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
     if let Some((label, tail)) = &tail {
         lines.push(Line::default());
         lines.push(heading(&format!("{label} · last lines")));
-        lines.extend(
-            tail.lines()
-                .map(|line| Line::styled(line.to_owned(), Style::default().fg(Color::Red))),
-        );
+        lines.extend(tail.iter().map(|line| {
+            Line::styled(
+                show_tabs(&safe_visible(line)),
+                Style::default().fg(Color::Red),
+            )
+        }));
     }
     lines.push(Line::default());
     lines.push(heading("Diff"));
     if evidence.patch.is_empty() {
         lines.push(Line::from("No changes captured."));
     } else {
-        for line in safe(&evidence.patch).lines() {
+        // Split before marking (CRLF ends lose their CR, a lone CR shows as `<U+000D>`); colour
+        // follows the raw prefix, which marking never changes.
+        for line in evidence.patch.lines() {
             let color = if line.starts_with("diff --git ")
                 || line.starts_with("+++ ")
                 || line.starts_with("--- ")
@@ -580,7 +592,10 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
             } else {
                 Color::Reset
             };
-            lines.push(Line::styled(line.to_owned(), Style::default().fg(color)));
+            lines.push(Line::styled(
+                show_tabs(&safe_visible(line)),
+                Style::default().fg(color),
+            ));
         }
     }
     if let Some(check) = &evidence.check {
@@ -590,12 +605,16 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
         ] {
             // A stream already shown whole as the tail above is not repeated.
             let shown = tail.as_ref().is_some_and(|(stream, text)| {
-                label.ends_with(stream) && text.lines().count() >= output.trim_end().lines().count()
+                label.ends_with(stream) && text.len() >= output.trim_end().lines().count()
             });
             if !output.trim().is_empty() && !shown {
                 lines.push(Line::default());
                 lines.push(heading(label));
-                lines.extend(safe(output).lines().map(|line| Line::from(line.to_owned())));
+                lines.extend(
+                    output
+                        .lines()
+                        .map(|line| Line::from(show_tabs(&safe_visible(line)))),
+                );
             }
         }
     }
