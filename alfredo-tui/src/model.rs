@@ -464,7 +464,7 @@ impl Session {
             attempt: 0,
             attachments: Default::default(),
             tool_steps: Default::default(),
-            earlier_attempts: Default::default(),
+            earlier_attempts: std::collections::BTreeMap::default(),
             rule_marks: Default::default(),
             pending_rule: None,
             notes_lines: Vec::new(),
@@ -1124,9 +1124,11 @@ impl Session {
                         // model does not redo them (issue #775).
                         if index % 2 == 0 && !dropped {
                             if let Some(note) = Self::applied_lines(self.earlier_steps(index)) {
-                                message.content.push_str(&format!(
+                                use std::fmt::Write;
+                                let _ = write!(
+                                    message.content,
                                     "\n\n[Earlier attempt of this turn was interrupted. Already applied before it stopped:\n{note}]\nDo not repeat these; continue from there."
-                                ));
+                                );
                             }
                         }
                         Some(match note {
