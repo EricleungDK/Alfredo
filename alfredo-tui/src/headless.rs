@@ -40,6 +40,33 @@ static STREAM: AtomicBool = AtomicBool::new(false);
 /// Version of the stream-json event schema (`"v"` on every line).
 const STREAM_VERSION: u32 = 1;
 
+/// JSON preserves model-supplied text, but serde_json leaves Unicode C1 terminal
+/// controls raw. Escape these in their JSON string representation before writing
+/// to a terminal; JSON parsers still recover the original characters.
+fn terminal_safe_json(value: &serde_json::Value) -> String {
+    let serialized = value.to_string();
+    let mut safe = String::with_capacity(serialized.len());
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for ch in serialized.chars() {
+        if ('\u{80}'..='\u{9f}').contains(&ch) {
+            let byte = ch as u8;
+            safe.push_str("\\u00");
+            safe.push(HEX[usize::from(byte >> 4)] as char);
+            safe.push(HEX[usize::from(byte & 0x0f)] as char);
+        } else {
+            safe.push(ch);
+        }
+    }
+    safe
+}
+
+/// Both headless output formats use the same terminal-safe JSON encoding.
+fn write_json_line(value: &serde_json::Value) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{}", terminal_safe_json(value));
+    let _ = out.flush();
+}
+
 /// Turn the stream on or off for this process (`--output-format`).
 pub fn set_stream(on: bool) {
     STREAM.store(on, Ordering::SeqCst);
@@ -54,9 +81,7 @@ fn emit(kind: &str, fields: serde_json::Value) {
     let mut event = fields;
     event["v"] = STREAM_VERSION.into();
     event["type"] = kind.into();
-    let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{event}");
-    let _ = out.flush();
+    write_json_line(&event);
 }
 
 /// The final result object: a plain line, or the stream's last `result` event.
@@ -64,8 +89,7 @@ fn print_result(result: serde_json::Value) {
     if STREAM.load(Ordering::SeqCst) {
         emit("result", result);
     } else {
-        let _ = writeln!(std::io::stdout(), "{result}");
-        let _ = std::io::stdout().flush();
+        write_json_line(&result);
     }
 }
 

@@ -80,6 +80,66 @@ fn result(output: &Output) -> Value {
     serde_json::from_str(stdout.trim()).unwrap()
 }
 
+#[test]
+fn plain_headless_json_escapes_c1_controls_without_changing_reply() {
+    let root = repository("plain-c1");
+    let reply = "final \u{9b}2J\u{9d}0;SPOOF\u{90}payload\u{7} reply";
+    let fixture = scripted_chat(vec![done(reply)]);
+    let output = run(&root, &fixture, &["--chat", "hi", "--headless"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout.clone()).unwrap();
+    assert!(!stdout.chars().any(|c| ('\u{80}'..='\u{9f}').contains(&c)));
+    for escaped in ["\\u009b", "\\u009d", "\\u0090", "\\u0007"] {
+        assert!(stdout.contains(escaped), "missing {escaped}: {stdout:?}");
+    }
+    assert_eq!(result(&output)["reply"], reply);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn stream_json_escapes_c1_in_tool_path_and_reply_on_every_line() {
+    let root = repository("stream-c1");
+    let path = "missing-\u{9b}2J\u{9d}0;SPOOF.txt";
+    let reply = "all done \u{90}payload";
+    let fixture = scripted_chat(vec![
+        tool_calls(&[("read_file", json!({"path": path}))]),
+        done(reply),
+    ]);
+    let output = run(
+        &root,
+        &fixture,
+        &[
+            "--chat",
+            "read that file",
+            "--headless",
+            "--output-format",
+            "stream-json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.chars().any(|c| ('\u{80}'..='\u{9f}').contains(&c)));
+    assert!(stdout.contains("\\u009b") && stdout.contains("\\u009d"));
+    assert!(stdout.contains("\\u0090"));
+    let events: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(events
+        .iter()
+        .any(|event| event["type"] == "tool" && event["path"] == path));
+    assert_eq!(events.last().unwrap()["reply"], reply);
+    let _ = fs::remove_dir_all(&root);
+}
+
 fn approvals_log(root: &Path) -> Vec<Value> {
     let mut found = Vec::new();
     let mut stack = vec![root.join("state")];

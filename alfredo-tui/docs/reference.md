@@ -331,6 +331,9 @@ or the flag without `--headless`, exits 2 with nothing on stdout.
 Stdout carries only these lines. Stderr keeps the same progress lines as without the flag, exit codes are
 unchanged, and a setup error (exit 2) prints nothing on stdout. New event types or fields may be added
 within version 1; consumers should ignore unknown ones.
+Both output formats escape Unicode C1 terminal controls (U+0080–U+009F) as JSON `\u00XX`
+sequences. JSON parsers still recover the original model-supplied string values, while
+terminals do not receive live C1 controls from the output.
 
 ### Paused runs: `--resume --headless`
 
