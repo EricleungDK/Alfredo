@@ -75,10 +75,10 @@ pub(crate) fn fingerprint(
             new_dirs,
         } = resolve_target(root, path, name == "write_file")?;
         let at = display(root, &target);
-        match read_bounded(root, &target)? {
+        let state = match read_bounded(root, &target)? {
             Some(bytes) => {
                 use sha2::{Digest, Sha256};
-                Ok(format!("{at}:{:x}", Sha256::digest(&bytes)))
+                format!("{at}:{:x}", Sha256::digest(&bytes))
             }
             None => {
                 let dirs = new_dirs
@@ -86,13 +86,49 @@ pub(crate) fn fingerprint(
                     .map(|dir| display(root, dir))
                     .collect::<Vec<_>>();
                 if dirs.is_empty() {
-                    Ok(format!("{at}:absent"))
+                    format!("{at}:absent")
                 } else {
-                    Ok(format!("{at}:absent+dirs:{}", dirs.join(",")))
+                    format!("{at}:absent+dirs:{}", dirs.join(","))
                 }
             }
-        }
+        };
+        let aliased = if aliases_protected(root, &target) {
+            ALIASED
+        } else {
+            ""
+        };
+        Ok(format!("{state}{aliased}"))
     }))
+}
+
+/// Ends the fingerprint of a call whose resolved target is, or lies under, what a protected
+/// config name at the workspace root links to (issue #791); `allow` never covers it.
+pub(crate) const ALIASED: &str = "+aliases-protected";
+
+/// Whether `target` (resolved) is what a protected file or directory name directly under
+/// the workspace root points at, so a symlinked `.pre-commit-config.yaml` or `.husky` does
+/// not let a rule write the file that takes effect (issue #791). The link is followed from
+/// the link itself ([`follow`]), so a target that does not exist yet still counts; a link
+/// chain too long or looping counts as pointing at `target` (the card asks).
+fn aliases_protected(root: &Path, target: &Path) -> bool {
+    super::allow::PROTECTED_DIRS
+        .iter()
+        .chain(super::allow::PROTECTED_FILES.iter())
+        .any(|name| follow(root.join(name)).is_none_or(|linked| target.starts_with(linked)))
+}
+
+/// `path` with symlinks followed (at most 8) even when the end does not exist: the last
+/// hop is its canonical parent plus its name. `None` past the bound, so a loop never hangs.
+fn follow(mut path: PathBuf) -> Option<PathBuf> {
+    for _ in 0..8 {
+        let parent = path.parent()?.canonicalize().ok()?;
+        let name = path.file_name()?;
+        match std::fs::read_link(parent.join(name)) {
+            Ok(link) => path = parent.join(link),
+            Err(_) => return Some(parent.join(name)),
+        }
+    }
+    None
 }
 
 /// The bytes of the regular file at `target` inside `root`, at most [`MAX_FILE`] of them;

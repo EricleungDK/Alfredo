@@ -2341,6 +2341,30 @@ rule `a` would add.
   reach is bounded only by the Sandbox; the card says so. Rules ignore `cwd`.
   A command containing any of `; & | ` `` ` `` `$ > < ( ) \` or a newline matches only a
   rule that is exactly that command (`cargo test; rm -rf ~` never matches `cargo test`).
+- **Protected config paths (issue #791).** A `write_file` or `edit_file` on CI and tool
+  config always shows a normal card, even when a rule for the tool exists: the card offers
+  no `a`, its key line says `a not offered: CI and tool config can run code or change git;
+  always asks`, pressing `a` repeats that and decides nothing, and no rule matches the path,
+  a rule typed into `chat-allow.json` by hand included. `y` still writes it. Protected:
+  the directories `.github/`, `.husky/`, `.vscode/`, `.idea/`, `.devcontainer/` and
+  `.cargo/` in any path component at any depth, and the files `.gitlab-ci.yml`,
+  `.pre-commit-config.yaml`, `.gitattributes` and `.gitmodules` at any depth, matched
+  case-insensitively with `./` ignored (`./.GitHub/x.yml`, `sub/.husky/pre-commit`,
+  `a/.gitattributes`). Other files (`docs/github.md`, `src/x.rs`) keep running by the rule.
+  The model's spelling and where the write lands both count: a symlinked directory alias
+  (`ci -> .github`, so `ci/workflows/ci.yml`) is protected, a workspace that itself lives
+  under a directory named `.idea` or `.cargo` is not (only the path below the workspace root
+  is judged), and so is whatever a protected name directly at the workspace root links to
+  (`.pre-commit-config.yaml -> tools/pc.yaml` protects `tools/pc.yaml`; `.husky -> hooks`
+  protects `hooks/`), even when the link's target does not exist yet (a `write_file` that
+  would create it asks) and through chains of up to 7 links; a longer chain or a link loop
+  there fails closed: every `write_file`/`edit_file` asks. So does a root protected link
+  whose parent directory is missing or that points at an ancestor of the workspace. Not
+  detected: a protected link below the root (`sub/.husky -> x`), a link inside a protected
+  directory that points outside it (`.husky/pre-commit -> ../scripts/pc.sh`), a hard link
+  to a protected file, and Unicode case folding beyond what `to_lowercase` does on a
+  case-insensitive filesystem (Linux is unaffected). A protected file that calls an ordinary
+  script leaves that script under the rule.
 - **Never push.** `git_push` cards (Push tier, `Tier::allowlistable` false) offer no `a`,
   and no rule matches them, including rules added by hand to the file. A `run_command`
   whose plain words invoke `git … push` (`git -C x push`, `git -c k=v push`, any path to

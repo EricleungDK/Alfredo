@@ -11,6 +11,8 @@
 //!   kept only so `/allow` can show it, and it never matches.
 //! - A sandboxed rule is a prefix: ANY arguments after it are allowed (the sandbox
 //!   bounds the impact). A sandboxed rule never covers a host run.
+//! - A write_file/edit_file on CI and tooling config ([`protected`]: `.github/`, `.husky/`,
+//!   `.gitattributes`, …) is never offered or matched, from a hand-edited file too (issue #791).
 //! - A run_command invoking `git … push` ([`pushes`]) is never offered or matched.
 //! - Rules ignore the call's `cwd`.
 //! - Command prefixes match whole whitespace-separated words. A command holding a
@@ -55,15 +57,80 @@ pub struct Rule {
 /// run_command that invokes `git … push`, not a HOST (escalated) run (issue #311: a host
 /// run always asks, so no rule can skip its card), and not a write_file that creates
 /// directories (issue #272: those always ask, so a rule for write_file never covers making
-/// directories; the card fingerprint carries `+dirs:` exactly then).
+/// directories; the card fingerprint carries `+dirs:` exactly then), and not a file edit
+/// on a [`protected`] path (issue #791).
 pub fn offered(card: &Card) -> bool {
-    card.kind != CardKind::Push
-        && !card.escalated()
-        && !(card.tool == "write_file" && card.fingerprint.contains("+dirs:"))
-        && TOOLS
+    !(card.kind == CardKind::Push
+        || card.escalated()
+        || protects(card)
+        || card.tool == "write_file" && card.fingerprint.contains("+dirs:")
+        || !TOOLS
             .iter()
             .any(|tool| tool.name == card.tool && tool.tier.allowlistable())
-        && !command_of(card).is_some_and(pushes)
+        || command_of(card).is_some_and(pushes))
+}
+
+/// Directories whose files can run code or change git (issue #791), matched in any path
+/// component, case-insensitively.
+pub(super) const PROTECTED_DIRS: [&str; 6] = [
+    ".github",
+    ".husky",
+    ".vscode",
+    ".idea",
+    ".devcontainer",
+    ".cargo",
+];
+/// Config files with the same reach, matched as the last path component.
+pub(super) const PROTECTED_FILES: [&str; 4] = [
+    ".gitlab-ci.yml",
+    ".pre-commit-config.yaml",
+    ".gitattributes",
+    ".gitmodules",
+];
+
+/// Whether `path` (as the model wrote it) is CI or tooling config a rule never covers
+/// (issue #791): a [`PROTECTED_DIRS`] name in any component, or a [`PROTECTED_FILES`] name
+/// as the file name, at any depth. Case is folded, `./` and empty components are ignored.
+pub fn protected(path: &str) -> bool {
+    let lower = path.trim().to_lowercase();
+    let parts: Vec<&str> = lower
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    parts.iter().any(|part| PROTECTED_DIRS.contains(part))
+        || parts
+            .last()
+            .is_some_and(|name| PROTECTED_FILES.contains(name))
+}
+
+/// Whether `card` is a write_file/edit_file on a [`protected`] path: by the name the model
+/// gave, by where the write lands (the card fingerprint starts with the resolved path below
+/// the workspace root, so a symlinked directory alias is seen), or because that target is what
+/// a protected name at the root links to ([`super::edit::ALIASED`]).
+fn protects(card: &Card) -> bool {
+    let state = card
+        .fingerprint
+        .strip_suffix(super::edit::ALIASED)
+        .unwrap_or(&card.fingerprint);
+    // `{path}:{sha256 hex | absent}`; with new directories `{path}:absent+dirs:{list}`, which is
+    // never offered anyway. The state token is checked, so a file name holding `:` or
+    // `+dirs:` cannot move the split.
+    let resolved = state
+        .rsplit_once(':')
+        .filter(|(_, token)| {
+            *token == "absent"
+                || (token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()))
+        })
+        .or_else(|| state.split_once(":absent+dirs:"))
+        .map(|(path, _)| path);
+    matches!(card.tool.as_str(), "write_file" | "edit_file")
+        && (card
+            .arguments
+            .get("path")
+            .and_then(|path| path.as_str())
+            .is_some_and(protected)
+            || resolved.is_some_and(protected)
+            || card.fingerprint.ends_with(super::edit::ALIASED))
 }
 
 /// Whether a shell command may run `git push`: a `git` word (any path) followed later
@@ -228,6 +295,9 @@ pub fn unavailable_reason(card: &Card) -> Option<String> {
     if card.escalated() {
         return Some("HOST runs always ask".into());
     }
+    if protects(card) {
+        return Some(PROTECTED_REASON.into());
+    }
     if card.tool == "write_file" && card.fingerprint.contains("+dirs:") {
         return Some(DIRS_REASON.into());
     }
@@ -240,19 +310,32 @@ pub fn unavailable_reason(card: &Card) -> Option<String> {
 /// Why a write_file that creates directories is never always-allowed (issue #272).
 const DIRS_REASON: &str = "creating directories always asks";
 
+/// Why a write_file/edit_file on CI or tooling config is never always-allowed (issue #791).
+const PROTECTED_REASON: &str = "CI and tool config can run code or change git; always asks";
+
 /// The notice for `a` pressed on a card that creates directories (issue #780); `None` for
 /// every other card, whose notice is unchanged.
 pub fn dirs_refusal(card: &Card) -> Option<String> {
+    refusal(card, DIRS_REASON)
+}
+
+/// The notice for `a` pressed on a protected-path card (issue #791); `None` otherwise.
+pub fn protected_refusal(card: &Card) -> Option<String> {
+    refusal(card, PROTECTED_REASON)
+}
+
+fn refusal(card: &Card, reason: &str) -> Option<String> {
     unavailable_reason(card)
-        .filter(|why| why == DIRS_REASON)
+        .filter(|why| why == reason)
         .map(|why| format!("a not offered: {why}; press y or n"))
 }
 
 /// The notice for a y/n/a key that decided nothing on an armed, fully shown card: the
-/// directory reason for `a` on a directory-creating write (issue #780), else the generic hint.
+/// directory reason for `a` on a directory-creating write (issue #780) or the protected-path
+/// reason (issue #791), else the generic hint.
 pub fn undecided_notice(answer: char, card: Option<&Card>) -> String {
     card.filter(|_| answer == 'a')
-        .and_then(dirs_refusal)
+        .and_then(|card| dirs_refusal(card).or_else(|| protected_refusal(card)))
         .unwrap_or_else(|| {
             "Read the approval card first; press y or n again (a always allows, not for push)"
                 .into()

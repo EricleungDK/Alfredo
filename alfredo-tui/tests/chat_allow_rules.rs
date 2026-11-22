@@ -336,8 +336,12 @@ fn a_waits_for_the_arm_delay_and_never_answers_a_push_card() {
 }
 
 fn edit_call() -> Reply {
-    let arguments =
-        json!({"path": "README.md", "old_text": "Old intro line.", "new_text": "New intro line."});
+    edit_call_with(
+        json!({"path": "README.md", "old_text": "Old intro line.", "new_text": "New intro line."}),
+    )
+}
+
+fn edit_call_with(arguments: serde_json::Value) -> Reply {
     Reply::Stream(
         vec![
             format!(
@@ -352,8 +356,12 @@ fn edit_call() -> Reply {
 }
 
 async fn turn(root: &Path, gate: Gate) -> Vec<Event> {
+    turn_with(root, gate, edit_call()).await
+}
+
+async fn turn_with(root: &Path, gate: Gate, call: Reply) -> Vec<Event> {
     let addr = ollama_fixture::reserve();
-    let first = Mutex::new(Some(edit_call()));
+    let first = Mutex::new(Some(call));
     let fixture = ollama_fixture::serve(addr, move |_, index| {
         if index == 0 {
             first.lock().unwrap().take().unwrap()
@@ -707,6 +715,588 @@ fn a_write_file_rule_does_not_cover_directory_creating_writes() {
         "a missing dir still asks"
     );
     let _ = fs::remove_dir_all(root);
+}
+
+const PROTECTED_REASON: &str = "CI and tool config can run code or change git; always asks";
+
+fn path_card(tool: &str, path: &str) -> Card {
+    Card {
+        tool: tool.into(),
+        arguments: json!({"path": path, "content": "x\n", "old_text": "a", "new_text": "b"}),
+        kind: CardKind::Edit,
+        summary: format!("{tool} {path}"),
+        preview: String::new(),
+        fingerprint: format!("/w/{path}:present"),
+    }
+}
+
+const PROTECTED: &[&str] = &[
+    ".github/workflows/ci.yml",
+    ".husky/pre-commit",
+    ".vscode/tasks.json",
+    ".idea/workspace.xml",
+    ".devcontainer/devcontainer.json",
+    ".cargo/config.toml",
+    ".gitlab-ci.yml",
+    ".pre-commit-config.yaml",
+    ".gitattributes",
+    ".gitmodules",
+];
+
+/// Issue #791: the classifier. Every directory and file name, each spelling.
+#[test]
+fn the_protected_classifier_matches_names_in_any_spelling() {
+    for path in PROTECTED {
+        assert!(allow::protected(path), "{path}");
+        assert!(allow::protected(&format!("./{path}")), "./{path}");
+        assert!(
+            allow::protected(&format!("sub/dir/{path}")),
+            "sub/dir/{path}"
+        );
+        assert!(allow::protected(&path.to_uppercase()), "{path} upper");
+        assert!(allow::protected(&format!("  {path}  ")), "{path} padded");
+    }
+    for path in [
+        "./.github/x.yml",
+        ".GitHub/x.yml",
+        "sub/.husky/pre-commit",
+        "a/.gitattributes",
+        "a//.github///x",
+        "./a/./.vscode/x",
+        "a/.GITMODULES",
+        ".github",
+        "src/.vscode",
+        "/w/.github/x.yml",
+        "a/.Gitlab-CI.yml",
+        // resolve_target walks Path::components(), which drops `.` and trailing slashes.
+        ".gitattributes/",
+        ".gitattributes/.",
+        "a/.gitmodules//",
+        "./.gitlab-ci.yml/./",
+        "./a/./.gitattributes",
+        "./a/./.pre-commit-config.yaml/",
+    ] {
+        assert!(allow::protected(path), "{path}");
+    }
+}
+
+/// Issue #791: names that look close but are not in the set stay ordinary.
+#[test]
+fn the_protected_classifier_leaves_ordinary_paths_alone() {
+    for path in [
+        "calc.py",
+        "src/x.rs",
+        "docs/github.md",
+        "github/x.yml",
+        ".githubx/a",
+        "x.github/a",
+        ".gith/a",
+        ".gitignore",
+        ".gitattributes.bak",
+        "a.gitmodules",
+        "src/.gitattributes/x",
+        ".gitlab-ci.yml/x",
+        "husky/pre-commit",
+        "cargo/config.toml",
+        "vscode/tasks.json",
+        ".env.example",
+        "",
+        ".",
+        "./",
+    ] {
+        assert!(!allow::protected(path), "{path:?}");
+    }
+}
+
+/// Issue #791: a protected path never gets `a` and no rule matches it, even a rule typed
+/// into chat-allow.json by hand; the card says why and `a` decides nothing.
+#[test]
+fn protected_paths_are_never_offered_or_matched() {
+    let state = dir("protected-state");
+    fs::write(
+        state.join(allow::FILE),
+        r#"[{"id":1,"tool":"write_file"},{"id":2,"tool":"edit_file"}]"#,
+    )
+    .unwrap();
+    let rules = Rules::new(&state);
+    assert_eq!(rules.list().unwrap().len(), 2, "an old file still loads");
+    let spellings = [
+        ".gitattributes/",
+        ".gitattributes/.",
+        "a/.gitmodules//",
+        "./.gitlab-ci.yml/./",
+        "./a/./.gitattributes",
+    ];
+    for tool in ["write_file", "edit_file"] {
+        for path in PROTECTED.iter().chain(spellings.iter()) {
+            let card = path_card(tool, path);
+            assert!(!allow::offered(&card), "{tool} {path}");
+            assert!(allow::offer(&card).is_none(), "{tool} {path}");
+            assert!(!allow::available(&card), "{tool} {path}");
+            assert!(allow::rule_for(&card).is_err(), "{tool} {path}");
+            assert!(rules.add_for(&card).is_err(), "{tool} {path}");
+            assert!(rules.matching(&card).is_none(), "{tool} {path}");
+            assert_eq!(
+                allow::unavailable_reason(&card).as_deref(),
+                Some(PROTECTED_REASON)
+            );
+            assert_eq!(
+                allow::undecided_notice('a', Some(&card)),
+                format!("a not offered: {PROTECTED_REASON}; press y or n")
+            );
+        }
+    }
+    assert_eq!(rules.list().unwrap().len(), 2, "no rule was added");
+    let _ = fs::remove_dir_all(state);
+}
+
+/// Issue #791: the card's key line and the `a` key on a protected path.
+#[test]
+fn a_protected_card_says_why_and_a_decides_nothing() {
+    let card = path_card("edit_file", ".github/workflows/ci.yml");
+    let text = screen(card.clone());
+    assert!(!text.contains("a always allow"), "{text}");
+    assert!(
+        text.contains("n deny · Esc cancels the turn (deny) · a not offered: CI and tool"),
+        "{text}"
+    );
+    assert!(text.contains("always asks"), "{text}");
+    let generic =
+        "Read the approval card first; press y or n again (a always allows, not for push)";
+    for key in ['y', 'n', 'x'] {
+        assert_eq!(allow::undecided_notice(key, Some(&card)), generic, "{key}");
+    }
+    let mut session = pending(card.clone());
+    let armed = Instant::now() + approval::ARM + Duration::from_millis(1);
+    assert!(session.approval_key_answers(armed));
+    assert_eq!(session.answer_approval('a', armed), None);
+    assert!(session.pending_approval().is_some(), "card still pending");
+    assert_eq!(session.answer_approval('y', armed), Some(Decision::Approve));
+    // A protected path inside a new directory names the protected reason, not the
+    // directory one.
+    let mut nested = path_card("write_file", ".github/new/ci.yml");
+    nested.fingerprint = "/w/.github/new/ci.yml:absent+dirs:new".into();
+    assert_eq!(
+        allow::unavailable_reason(&nested).as_deref(),
+        Some(PROTECTED_REASON)
+    );
+}
+
+/// Issue #791: with a rule present, ordinary files still match and keep their offer.
+#[test]
+fn ordinary_paths_still_match_rules() {
+    let state = dir("ordinary-state");
+    let rules = Rules::new(&state);
+    rules.add_for(&path_card("write_file", "calc.py")).unwrap();
+    rules.add_for(&path_card("edit_file", "calc.py")).unwrap();
+    for tool in ["write_file", "edit_file"] {
+        for path in ["calc.py", "src/x.rs", "docs/github.md", "./README.md"] {
+            let card = path_card(tool, path);
+            assert!(allow::offered(&card), "{tool} {path}");
+            assert!(allow::offer(&card).is_some(), "{tool} {path}");
+            assert_eq!(allow::unavailable_reason(&card), None, "{tool} {path}");
+            assert!(rules.matching(&card).is_some(), "{tool} {path}");
+            assert_eq!(
+                allow::undecided_notice('a', Some(&card)),
+                "Read the approval card first; press y or n again (a always allows, not for push)"
+            );
+        }
+    }
+    assert!(screen(path_card("edit_file", "docs/github.md")).contains("a always allow"));
+    // The path rule is for the file tools only: another tool's card is untouched.
+    let commit = path_card("git_commit", ".github/x");
+    assert!(allow::offered(&commit));
+    let _ = fs::remove_dir_all(state);
+}
+
+/// A workspace with a real card builder: `ci`/`wf` alias protected directories, `d` an
+/// ordinary one, `.pre-commit-config.yaml`/`.husky` are symlinks to ordinary targets.
+fn alias_root(tag: &str) -> PathBuf {
+    use std::os::unix::fs::symlink;
+    let root = dir(tag);
+    for sub in [".github/workflows", "docs", "tools", "hooks"] {
+        fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    fs::write(root.join(".github/workflows/ci.yml"), "name: ci\n").unwrap();
+    fs::write(root.join("docs/a.md"), "name: ci\n").unwrap();
+    fs::write(root.join("tools/pc.yaml"), "repos: []\n").unwrap();
+    fs::write(root.join("tools/other.yaml"), "x: 1\n").unwrap();
+    fs::write(root.join("hooks/pre-commit"), "#!/bin/sh\n").unwrap();
+    symlink(".github", root.join("ci")).unwrap();
+    symlink(".github/workflows", root.join("wf")).unwrap();
+    symlink("docs", root.join("d")).unwrap();
+    symlink("tools/pc.yaml", root.join(".pre-commit-config.yaml")).unwrap();
+    symlink("hooks", root.join(".husky")).unwrap();
+    root
+}
+
+fn real_card(root: &Path, tool: &str, path: &str) -> Card {
+    approval::card(
+        root,
+        &alfredo_tui::model::ToolCall {
+            name: tool.into(),
+            arguments: json!({"path": path, "content": "z\n", "old_text": "name: ci", "new_text": "name: z"}),
+        },
+    )
+    .unwrap()
+}
+
+fn both_tools_rules(tag: &str) -> Rules {
+    let state = dir(tag);
+    fs::write(
+        state.join(allow::FILE),
+        r#"[{"id":1,"tool":"write_file"},{"id":2,"tool":"edit_file"}]"#,
+    )
+    .unwrap();
+    Rules::new(&state)
+}
+
+/// Issue #791 review: a symlinked directory alias of a protected directory is judged by
+/// where the write lands, not by the name the model gave.
+#[test]
+fn a_symlinked_alias_of_a_protected_directory_still_asks() {
+    let root = alias_root("alias");
+    let rules = both_tools_rules("alias-state");
+    for (tool, path) in [
+        ("edit_file", "ci/workflows/ci.yml"),
+        ("edit_file", "./ci/workflows/ci.yml"),
+        ("write_file", "ci/workflows/ci.yml"),
+        ("write_file", "wf/ci.yml"),
+        ("write_file", "wf/evil.yml"),
+    ] {
+        let card = real_card(&root, tool, path);
+        assert!(!allow::offered(&card), "{tool} {path}");
+        assert!(rules.matching(&card).is_none(), "{tool} {path}");
+        assert_eq!(
+            allow::unavailable_reason(&card).as_deref(),
+            Some(PROTECTED_REASON),
+            "{tool} {path}"
+        );
+    }
+    // An alias of an ordinary directory stays ordinary.
+    for (tool, path) in [
+        ("write_file", "d/a.md"),
+        ("write_file", "d/new.md"),
+        ("edit_file", "docs/a.md"),
+    ] {
+        let card = real_card(&root, tool, path);
+        assert!(rules.matching(&card).is_some(), "{tool} {path}");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: a protected name that is a symlink to an ordinary file or directory
+/// at the workspace root protects what it points at, and the card still applies and undoes.
+#[test]
+fn a_root_protected_name_that_links_elsewhere_protects_its_target() {
+    let root = alias_root("rootlink");
+    let rules = both_tools_rules("rootlink-state");
+    for (tool, path) in [
+        ("write_file", "tools/pc.yaml"),
+        ("write_file", "./tools/pc.yaml"),
+        ("write_file", "hooks/pre-commit"),
+        ("write_file", "hooks/new-hook"),
+        ("write_file", "d/../hooks/pre-commit"),
+    ] {
+        let Ok(card) = approval::card(
+            &root,
+            &alfredo_tui::model::ToolCall {
+                name: tool.into(),
+                arguments: json!({"path": path, "content": "z\n"}),
+            },
+        ) else {
+            continue; // `..` is refused before any card
+        };
+        assert!(!allow::offered(&card), "{tool} {path}");
+        assert!(rules.matching(&card).is_none(), "{tool} {path}");
+        assert_eq!(
+            allow::unavailable_reason(&card).as_deref(),
+            Some(PROTECTED_REASON)
+        );
+    }
+    let ordinary = real_card(&root, "write_file", "tools/other.yaml");
+    assert!(rules.matching(&ordinary).is_some());
+    // y still writes it: the fingerprint re-check agrees with the card.
+    let card = real_card(&root, "write_file", "tools/pc.yaml");
+    assert!(
+        chat_tools::undo::before(&root, &card).is_some(),
+        "undo keeps working"
+    );
+    approval::apply(&root, &card).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("tools/pc.yaml")).unwrap(),
+        "z\n"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: a protected root name that links to a file or directory that does
+/// not exist yet still protects it, through chained links, and a link loop fails closed.
+#[test]
+fn dangling_and_chained_root_links_protect_their_targets() {
+    use std::os::unix::fs::symlink;
+    let root = dir("dangling");
+    let rules = both_tools_rules("dangling-state");
+    fs::create_dir_all(root.join("tools")).unwrap();
+    fs::create_dir_all(root.join("hk")).unwrap();
+    fs::write(root.join("calc.py"), "name: ci\n").unwrap();
+    symlink("tools/pc.yaml", root.join(".pre-commit-config.yaml")).unwrap();
+    symlink("hk/real", root.join(".husky")).unwrap();
+    symlink("hop", root.join(".gitattributes")).unwrap();
+    symlink("tools/ga", root.join("hop")).unwrap();
+    for path in ["tools/pc.yaml", "./tools/pc.yaml", "hk/real", "tools/ga"] {
+        let card = real_card(&root, "write_file", path);
+        assert!(!allow::offered(&card), "{path}");
+        assert!(rules.matching(&card).is_none(), "{path}");
+        assert_eq!(
+            allow::unavailable_reason(&card).as_deref(),
+            Some(PROTECTED_REASON),
+            "{path}"
+        );
+    }
+    let ordinary = real_card(&root, "write_file", "tools/other.yaml");
+    assert!(rules.matching(&ordinary).is_some(), "an unrelated file");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: a link loop at the root never hangs and fails closed: every
+/// write_file/edit_file asks.
+#[test]
+fn a_root_link_loop_fails_closed() {
+    use std::os::unix::fs::symlink;
+    let root = dir("loop-links");
+    let rules = both_tools_rules("loop-links-state");
+    fs::write(root.join("calc.py"), "name: ci\n").unwrap();
+    symlink(".gitmodules", root.join(".gitmodules")).unwrap();
+    symlink("b", root.join("a")).unwrap();
+    symlink("a", root.join("b")).unwrap();
+    symlink("a", root.join(".husky")).unwrap();
+    for tool in ["write_file", "edit_file"] {
+        let card = real_card(&root, tool, "calc.py");
+        assert!(!allow::offered(&card), "{tool}");
+        assert!(rules.matching(&card).is_none(), "{tool}");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: a regular file under a protected name, and no protected names at
+/// all, behave as before.
+#[test]
+fn regular_root_config_files_and_no_links_change_nothing() {
+    let root = dir("regular");
+    let rules = both_tools_rules("regular-state");
+    fs::write(root.join(".pre-commit-config.yaml"), "name: ci\n").unwrap();
+    fs::write(root.join("calc.py"), "name: ci\n").unwrap();
+    let own = real_card(&root, "edit_file", ".pre-commit-config.yaml");
+    assert!(rules.matching(&own).is_none());
+    let calc = real_card(&root, "edit_file", "calc.py");
+    assert!(rules.matching(&calc).is_some());
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: the resolved path is read back from the card without being fooled by
+/// `+dirs:`, `:` or the alias marker inside a file name.
+#[test]
+fn odd_file_names_cannot_hide_a_protected_directory() {
+    use std::os::unix::fs::symlink;
+    let root = dir("odd-names");
+    let rules = both_tools_rules("odd-names-state");
+    fs::create_dir_all(root.join("sub/.cargo")).unwrap();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    for name in ["x+dirs:y.toml", "z+aliases-protected", "a:b+dirs:c:d"] {
+        fs::write(root.join("sub/.cargo").join(name), "name: ci\n").unwrap();
+        fs::write(root.join("docs").join(name), "name: ci\n").unwrap();
+    }
+    symlink("sub/.cargo", root.join("cfg")).unwrap();
+    symlink("docs", root.join("d")).unwrap();
+    for name in ["x+dirs:y.toml", "z+aliases-protected", "a:b+dirs:c:d"] {
+        for tool in ["edit_file", "write_file"] {
+            let card = real_card(&root, tool, &format!("cfg/{name}"));
+            assert!(rules.matching(&card).is_none(), "{tool} cfg/{name}");
+            // (A write_file whose name holds `+dirs:` is asked anyway: the old directory
+            // check reads the fingerprint text.)
+            let card = real_card(&root, tool, &format!("d/{name}"));
+            let asked_anyway = tool == "write_file" && name.contains("+dirs:");
+            assert_eq!(
+                rules.matching(&card).is_some(),
+                !asked_anyway,
+                "{tool} d/{name}"
+            );
+        }
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: a new directory in a protected directory names the protected reason,
+/// not the directory one, whatever the new directory is called. (Chat edits never create
+/// directories through a symlink, so the alias cannot be tested here.)
+#[test]
+fn a_new_directory_in_a_protected_directory_names_the_protected_reason() {
+    let root = dir("alias-newdir");
+    fs::create_dir_all(root.join(".github")).unwrap();
+    let hex = "ab".repeat(32);
+    for path in [
+        ".github/newdir/x.yml".to_string(),
+        ".github/cafe/x.yml".to_string(),
+        format!(".github/{hex}/x.yml"),
+        ".github/a:absent+dirs:b/x.yml".to_string(),
+    ] {
+        let card = real_card(&root, "write_file", &path);
+        assert!(
+            card.fingerprint.contains("+dirs:"),
+            "{path}: {}",
+            card.fingerprint
+        );
+        assert!(!allow::offered(&card), "{path}");
+        assert_eq!(
+            allow::unavailable_reason(&card).as_deref(),
+            Some(PROTECTED_REASON),
+            "{path}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #791 review: the resolved path is read from the fingerprint only at a real state
+/// token (`absent`, or exactly 64 hex digits); anything else after a `:` is not one.
+#[test]
+fn only_a_real_state_token_ends_the_resolved_path() {
+    let hash = "ab".repeat(32);
+    let card = |fingerprint: &str| {
+        let mut card = path_card("edit_file", "calc.py");
+        card.fingerprint = fingerprint.into();
+        card
+    };
+    // The protected directory is in the resolved path: a hash or `absent` token ends it.
+    assert!(!allow::offered(&card(&format!(".github/ci.yml:{hash}"))));
+    assert!(!allow::offered(&card(".github/ci.yml:absent")));
+    assert!(!allow::offered(&card(&format!(
+        ".github/ci.yml:{hash}+aliases-protected"
+    ))));
+    // An ordinary path stays ordinary with each token.
+    assert!(allow::offered(&card(&format!("docs/x.md:{hash}"))));
+    assert!(allow::offered(&card("docs/x.md:absent")));
+    // With new directories the path ends at the first `:absent+dirs:`; a protected name
+    // that only appears in the directory list, behind a last `:` that is not a state token
+    // (short hex, 64 non-hex, a longer hex run), does not make the path protected.
+    for tail in ["cafe".to_string(), "z".repeat(64), "ab".repeat(33)] {
+        let fingerprint = format!("docs/x.md:absent+dirs:a/.github:{tail}");
+        assert!(allow::offered(&card(&fingerprint)), "{tail}");
+    }
+    // And with new directories the path before `:absent+dirs:` still counts.
+    assert!(!allow::offered(&card(
+        ".github/n/x.md:absent+dirs:.github/n"
+    )));
+}
+
+/// Issue #791 review: a link chain of 7 links to a file that does not exist yet is followed;
+/// 8 links fail closed (every write_file/edit_file asks).
+#[test]
+fn a_chain_of_7_root_links_is_followed_and_8_fail_closed() {
+    use std::os::unix::fs::symlink;
+    let chain = |tag: &str, links: usize| {
+        let root = dir(tag);
+        fs::create_dir_all(root.join("tools")).unwrap();
+        fs::write(root.join("tools/other.yaml"), "name: ci\n").unwrap();
+        // `.gitattributes` is link 1; l1.. are the rest; the last points at tools/ga.
+        let names: Vec<String> = (1..links).map(|n| format!("l{n}")).collect();
+        let mut from = ".gitattributes".to_string();
+        for name in &names {
+            symlink(name, root.join(&from)).unwrap();
+            from = name.clone();
+        }
+        symlink("tools/ga", root.join(&from)).unwrap();
+        root
+    };
+    let seven = chain("chain7", 7);
+    let rules = both_tools_rules("chain7-state");
+    let target = real_card(&seven, "write_file", "tools/ga");
+    assert!(
+        rules.matching(&target).is_none(),
+        "the final target is protected"
+    );
+    assert_eq!(
+        allow::unavailable_reason(&target).as_deref(),
+        Some(PROTECTED_REASON)
+    );
+    let other = real_card(&seven, "edit_file", "tools/other.yaml");
+    assert!(
+        rules.matching(&other).is_some(),
+        "an unrelated file still matches"
+    );
+    let eight = chain("chain8", 8);
+    let rules = both_tools_rules("chain8-state");
+    for (tool, path) in [
+        ("edit_file", "tools/other.yaml"),
+        ("write_file", "tools/ga"),
+    ] {
+        let card = real_card(&eight, tool, path);
+        assert!(!allow::offered(&card), "{tool} {path}");
+        assert!(rules.matching(&card).is_none(), "{tool} {path}");
+    }
+    let _ = fs::remove_dir_all(seven);
+    let _ = fs::remove_dir_all(eight);
+}
+
+/// Issue #791 review: only the path below the workspace root counts, so a workspace that
+/// itself lives under `.idea` or `.cargo` keeps its rules for ordinary files.
+#[test]
+fn a_workspace_under_a_protected_directory_name_still_matches_rules() {
+    let base = dir("under");
+    let root = base.join(".idea/.cargo/ws");
+    fs::create_dir_all(root.join(".github")).unwrap();
+    fs::write(root.join("calc.py"), "name: ci\n").unwrap();
+    fs::write(root.join(".github/ci.yml"), "name: ci\n").unwrap();
+    let rules = both_tools_rules("under-state");
+    for tool in ["write_file", "edit_file"] {
+        let card = real_card(&root, tool, "calc.py");
+        assert!(allow::offered(&card), "{tool}");
+        assert!(rules.matching(&card).is_some(), "{tool}");
+        let card = real_card(&root, tool, ".github/ci.yml");
+        assert!(rules.matching(&card).is_none(), "{tool} protected inside");
+    }
+    let _ = fs::remove_dir_all(base);
+}
+
+/// Issue #791 through the tool loop: with a rule for the tool, a protected edit is asked
+/// (unchanged on `n`, written on `y` with no rule id); an ordinary edit is not asked.
+#[tokio::test]
+async fn a_rule_never_skips_the_card_for_a_protected_file() {
+    let root = dir("protected-loop");
+    fs::create_dir_all(root.join(".github/workflows")).unwrap();
+    let ci = root.join(".github/workflows/ci.yml");
+    fs::write(&ci, "name: ci\n").unwrap();
+    let state = dir("protected-loop-state");
+    let log = Log::new(&state);
+    fs::write(state.join(allow::FILE), r#"[{"id":1,"tool":"edit_file"}]"#).unwrap();
+    let rules = Rules::new(&state);
+    let call = || {
+        edit_call_with(
+            json!({"path": ".github/workflows/ci.yml", "old_text": "ci", "new_text": "pwned"}),
+        )
+    };
+    let (denied, asked) = gate(Decision::Deny, &log, &rules);
+    turn_with(&root, denied, call()).await;
+    assert_eq!(*asked.lock().unwrap(), 1, "the card was shown");
+    assert_eq!(fs::read_to_string(&ci).unwrap(), "name: ci\n", "unchanged");
+    let (approved, asked) = gate(Decision::Approve, &log, &rules);
+    turn_with(&root, approved, call()).await;
+    assert_eq!(*asked.lock().unwrap(), 1);
+    assert_eq!(fs::read_to_string(&ci).unwrap(), "name: pwned\n");
+    assert_eq!(log.records().last().unwrap().rule, None, "answered by y");
+    let (ordinary, asked) = gate(Decision::Deny, &log, &rules);
+    turn(&root, ordinary).await;
+    assert_eq!(
+        *asked.lock().unwrap(),
+        0,
+        "README.md still runs by the rule"
+    );
+    assert!(fs::read_to_string(root.join("README.md"))
+        .unwrap()
+        .contains("New intro line."));
+    assert_eq!(log.records().last().unwrap().rule, Some(1));
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(state);
 }
 
 /// Issue #311: a HOST rule written before the fix matches neither its exact command nor a
